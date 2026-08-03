@@ -457,22 +457,8 @@ int dcu_dc_buffered_amount(int dc, int *out_amount) {
     });
 }
 
-int dcu_event_peek(dcu_event_header *out_header) {
-    if (!out_header)
-        return DCU_ERR_INVALID;
-    if (!g_queue.peek(out_header))
-        return DCU_ERR_NOT_AVAIL;
-    return DCU_OK;
+int dcu_event_next(dcu_event_header *out_header, void *buf, int cap, void *buf2, int cap2) {
+    return g_queue.next(out_header, buf, cap, buf2, cap2);
 }
-
-int dcu_event_copy_payload(void *buffer, int capacity, int *out_len) {
-    return g_queue.copy_payload(buffer, capacity, false, out_len);
-}
-
-int dcu_event_copy_payload2(void *buffer, int capacity, int *out_len) {
-    return g_queue.copy_payload(buffer, capacity, true, out_len);
-}
-
-int dcu_event_pop(void) { return g_queue.pop(); }
 
 } // extern "C"

@@ -54,11 +54,11 @@ extern "C" {
  *
  * 返回值域门禁
  * ------------
- * dcu_event_copy_payload / dcu_event_copy_payload2 只允许返回
+ * dcu_event_next 只允许返回
  * DCU_OK / DCU_ERR_NOT_AVAIL / DCU_ERR_TOO_SMALL / DCU_ERR_INVALID。
  * 这一条读一遍函数就能核实。
  *
- * **将来若给这两个函数新增错误码，必须同时声明它是否消费队首。**
+ * **将来若给它新增错误码，必须同时声明它是否消费队首。**
  */
 
 /* 状态枚举越界时的取值。上游新增成员时映射到它，绝不抛、绝不丢事件、
@@ -144,10 +144,11 @@ DCU_API int dcu_dc_buffered_amount(int dc, int *out_amount);
 
 /* --- 事件泵 -------------------------------------------------------------- */
 
-DCU_API int dcu_event_peek(dcu_event_header *out_header);
-DCU_API int dcu_event_copy_payload(void *buffer, int capacity, int *out_len);
-DCU_API int dcu_event_copy_payload2(void *buffer, int capacity, int *out_len);
-DCU_API int dcu_event_pop(void);
+/* 单次原子取事件：填充 header + 两段载荷并弹出；缓冲不足则填好 header（含两个
+ * 精确长度）但**不弹出**，返回 DCU_ERR_TOO_SMALL；队列空则 header.type =
+ * DCU_EVENT_NONE 并返回 DCU_ERR_NOT_AVAIL。 */
+DCU_API int dcu_event_next(dcu_event_header *out_header, void *buf, int cap, void *buf2,
+                           int cap2);
 
 #ifdef __cplusplus
 }

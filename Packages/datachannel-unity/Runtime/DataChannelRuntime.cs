@@ -133,12 +133,28 @@ namespace DataChannelUnity
 
             for (int safety = 0; safety < 256; safety++)
             {
-                var rc = NativeMethods.dcu_event_peek(out var header);
+                var rc = NativeMethods.dcu_event_next(out var header,
+                    _payloadBuf, _payloadBuf.Length, _payload2Buf, _payload2Buf.Length);
+
+                if (rc == NativeMethods.ErrTooSmall)
+                {
+                    // header 里两个长度都是**精确值**，且事件未被消费；单消费者契约
+                    // 保证两次调用之间队首不变，所以扩容后**一次重试必然成功**。
+                    // 不写 while —— 第二次仍失败说明契约被破坏，那是要人看的 bug，
+                    // 循环只会把它变成静默活锁。
+                    EnsureCapacity(ref _payloadBuf, header.payload_len);
+                    EnsureCapacity(ref _payload2Buf, header.payload2_len);
+                    rc = NativeMethods.dcu_event_next(out header,
+                        _payloadBuf, _payloadBuf.Length, _payload2Buf, _payload2Buf.Length);
+                }
+
                 if (rc == NativeMethods.ErrNotAvail || header.type == NativeMethods.EventType.None)
                     break;
+
                 if (rc != NativeMethods.Success)
                 {
-                    DataChannelLog.Emit(LogLevel.Warning, "dcu_event_peek failed: " + rc);
+                    DataChannelLog.Emit(LogLevel.Warning,
+                        "dcu_event_next failed: " + MapError(rc) + " (raw=" + rc + ")");
                     break;
                 }
 
@@ -148,54 +164,20 @@ namespace DataChannelUnity
 
                 if (header.payload_len > 0)
                 {
-                    EnsureCapacity(ref _payloadBuf, header.payload_len);
-                    var rcCopy = NativeMethods.dcu_event_copy_payload(
-                        _payloadBuf, _payloadBuf.Length, out var n);
-                    if (rcCopy == NativeMethods.ErrTooSmall)
+                    if (header.type == NativeMethods.EventType.DcMessage)
                     {
-                        // TOO_SMALL 带回的是**精确**所需长度，且事件未被消费；单消费者契约
-                        // 保证两次调用之间队首不变，所以扩容后**一次重试必然成功**。
-                        // 不写 while —— 第二次仍失败说明契约被破坏，那是要人看的 bug，
-                        // 循环只会把它变成静默活锁。
-                        EnsureCapacity(ref _payloadBuf, n);
-                        rcCopy = NativeMethods.dcu_event_copy_payload(
-                            _payloadBuf, _payloadBuf.Length, out n);
-                    }
-                    if (rcCopy == NativeMethods.Success)
-                    {
-                        if (header.type == NativeMethods.EventType.DcMessage)
-                        {
-                            binary = new byte[n];
-                            Buffer.BlockCopy(_payloadBuf, 0, binary, 0, n);
-                        }
-                        else
-                        {
-                            payload = Encoding.UTF8.GetString(_payloadBuf, 0, n);
-                        }
+                        binary = new byte[header.payload_len];
+                        Buffer.BlockCopy(_payloadBuf, 0, binary, 0, header.payload_len);
                     }
                     else
                     {
-                        DataChannelLog.Emit(LogLevel.Warning,
-                            "dcu_event_copy_payload failed: " + MapError(rcCopy) + " (raw=" + rcCopy + ")");
+                        payload = Encoding.UTF8.GetString(_payloadBuf, 0, header.payload_len);
                     }
                 }
 
                 if (header.payload2_len > 0)
-                {
-                    EnsureCapacity(ref _payload2Buf, header.payload2_len);
-                    var rc2 = NativeMethods.dcu_event_copy_payload2(
-                        _payload2Buf, _payload2Buf.Length, out var n2);
-                    if (rc2 == NativeMethods.ErrTooSmall)
-                    {
-                        EnsureCapacity(ref _payload2Buf, n2);
-                        rc2 = NativeMethods.dcu_event_copy_payload2(
-                            _payload2Buf, _payload2Buf.Length, out n2);
-                    }
-                    if (rc2 == NativeMethods.Success)
-                        payload2 = Encoding.UTF8.GetString(_payload2Buf, 0, n2);
-                }
+                    payload2 = Encoding.UTF8.GetString(_payload2Buf, 0, header.payload2_len);
 
-                NativeMethods.dcu_event_pop();
                 Dispatch(header, payload, payload2, binary);
             }
         }

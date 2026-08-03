@@ -127,16 +127,10 @@ namespace DataChannelUnity.Internal
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_dc_buffered_amount(int dc, out int amount);
 
+        // 单次原子取事件：填充 header + 两段载荷并弹出；缓冲不足则填好 header
+        // （含两个精确长度）但**不弹出**，返回 ErrTooSmall。
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_event_peek(out EventHeader header);
-
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_event_copy_payload(byte[] buffer, int capacity, out int len);
-
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_event_copy_payload2(byte[] buffer, int capacity, out int len);
-
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_event_pop();
+        public static extern int dcu_event_next(out EventHeader header,
+            byte[] buf, int cap, byte[] buf2, int cap2);
     }
 }

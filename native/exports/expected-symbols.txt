@@ -10,8 +10,12 @@
 # 由 native/scripts/audit-macos-plugin.sh 逐行 diff 实际导出，不符即非零退出。
 # 允许 # 注释与空行；其余每行一个符号名（不带平台前缀下划线），顺序无关。
 #
-# 当前对应 DCU_ABI_VERSION = 1。SPEC §4 定义的目标形态是 19 个导出、
-# DCU_ABI_VERSION = 2，属 §14 第 2 步，尚未实现。
+# 当前 DCU_ABI_VERSION = 2，15 个导出。目标形态是 19 个（SPEC §4）——
+# 余下 dcu_dc_receive / dcu_event_queue_depth / dcu_dc_state / dcu_log_next
+# 随切分 #44 的 S3/S4/S5 加回。
+#
+# 注：S1 已一次性 bump 到 2，S2–S5 各自改本清单但不再 bump（包未发布，2 是目标态，
+# 中途 bump 到 3/4/5/6 只是噪音；#32 已立先例）。这是对 SPEC §11 的有意偏离。
 
 dcu_abi_version
 dcu_init
@@ -30,7 +34,4 @@ dcu_dc_close
 dcu_dc_destroy
 dcu_dc_buffered_amount
 
-dcu_event_peek
-dcu_event_copy_payload
-dcu_event_copy_payload2
-dcu_event_pop
+dcu_event_next
