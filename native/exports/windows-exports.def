@@ -1,0 +1,20 @@
+LIBRARY datachannel_unity
+EXPORTS
+    dcu_abi_version
+    dcu_init
+    dcu_shutdown
+    dcu_set_log_level
+    dcu_pc_create
+    dcu_pc_close
+    dcu_pc_destroy
+    dcu_pc_set_remote_description
+    dcu_pc_add_remote_candidate
+    dcu_pc_create_data_channel
+    dcu_dc_send
+    dcu_dc_close
+    dcu_dc_destroy
+    dcu_dc_buffered_amount
+    dcu_event_peek
+    dcu_event_copy_payload
+    dcu_event_copy_payload2
+    dcu_event_pop

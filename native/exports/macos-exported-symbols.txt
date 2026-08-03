@@ -1,0 +1,4 @@
+# Mach-O exported symbols for datachannel_unity (Unity P/Invoke only).
+# Leading underscore is required for C symbols on Apple platforms.
+# Wildcards supported by ld64.
+_dcu_*

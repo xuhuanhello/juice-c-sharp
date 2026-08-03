@@ -1,0 +1,13 @@
+# Pinned upstream versions for datachannel-unity native builds.
+# See docs/SPEC.md and wayfinder #11 / #16 / #17.
+
+libdatachannel=v0.24.5
+datachannel-wasm=v0.4.0
+# MbedTLS 由 fetch-deps.sh / meson wrap 拉进 native/subprojects/mbedtls。
+# 禁止使用 brew/系统 mbedtls 作为产品路径（决策 #23 / #25）。
+# 注：上游同时存在 v3.6.7 与 mbedtls-3.6.7 两个附注标签，指向同一 commit 068ff080。
+mbedtls=v3.6.7
+crypto=mbedtls-3.6.7-static-subproject
+unity_min=2022.3
+emscripten_unity=3.1.8-unity
+dcu_abi=1
