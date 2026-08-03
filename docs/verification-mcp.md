@@ -1,12 +1,14 @@
 # DataChannel Unity — MCP self-verification checklist
 
-**Ticket:** [#21](https://github.com/xuhuanhello/juice-c-sharp/issues/21)  
-**Map:** [#16](https://github.com/xuhuanhello/juice-c-sharp/issues/16)  
-**Purpose:** Agents must verify the package via **Unity MCP** (not “please test manually”), using a fixed sequence and expected results.
+**Tickets:** [#21](https://github.com/xuhuanhello/juice-c-sharp/issues/21), revised by [#39](https://github.com/xuhuanhello/juice-c-sharp/issues/39)  
+**Maps:** [#16](https://github.com/xuhuanhello/juice-c-sharp/issues/16), [#26](https://github.com/xuhuanhello/juice-c-sharp/issues/26)  
+**Purpose:** This is the **manual** — how verification is executed in this project with Unity MCP. *What* must be verified is [`docs/SPEC.md` §11](./SPEC.md); *when* it must be run is [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 **Prerequisite:** Unity Editor has this project open (`juice-c-sharp`) with MCP for Unity connected. If multiple editors are connected, select this instance (`set_active_instance` / `mcpforunity://instances`).
 
-**Native product path:** `Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle` (built via Meson — see `docs/SPEC.md` §9).
+**Native product path:** `Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle` (built via **CMake** — see `docs/SPEC.md` §9).
+
+> **No literal expected numbers in this file.** Export counts, test counts and the ABI version live where they get checked — `native/exports/expected-symbols.txt` and `dcu.h` — not in prose that nobody runs. See §11 of the SPEC for why.
 
 ---
 
@@ -19,8 +21,10 @@ Run from repo root before Editor work:
   Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
 ```
 
-**Expect:** `OK: 18 dcu_* exports, no forbidden crypto dylibs`  
+**Expect:** **exit code 0** — the exported symbols diff clean against `native/exports/expected-symbols.txt`, and no forbidden crypto dylibs.  
 **Expect `otool -L`:** only `@loader_path/…`, system `CoreFoundation` / `Security` / `libc++` / `libSystem` — no Homebrew openssl/mbedtls.
+
+A diff failure means one of two things, and the script's output distinguishes them: a symbol was renamed or added deliberately (update the expectations file **in the same commit as the `DCU_ABI_VERSION` bump**), or upstream leaked a symbol through the allowlist.
 
 ---
 
@@ -43,29 +47,33 @@ If `instance_selection_required`, set active instance to this project and retry.
 
 ---
 
-## 3. EditMode tests
+## 3. EditMode tests — two tiers
+
+### 3a. Managed tier (no native plugin required)
 
 | MCP tool | Params |
 |----------|--------|
 | `run_tests` | `mode=EditMode`, `assembly_names=["DataChannelUnity.Tests.Editor"]`, `include_details=true`, `include_failed_tests=true`, `init_timeout=120000` |
 | `get_test_job` | `job_id=<from run_tests>`, `wait_timeout=120`, `include_details=true` |
 
-**Expect:**
+### 3b. Native / EditMode tier (plugin must be loaded)
+
+| MCP tool | Params |
+|----------|--------|
+| `run_tests` | same, with `assembly_names=["DataChannelUnity.Tests.Editor.Native"]` |
+| `get_test_job` | as above |
+
+**Expect, for both:**
 
 | Field | Value |
 |-------|--------|
 | `status` | `succeeded` |
-| `summary.total` | `4` |
-| `summary.passed` | `4` |
 | `summary.failed` | `0` |
 | `resultState` | `Passed` |
 
-Tests covered:
+Do **not** assert `summary.total` and do not enumerate case names here — the checklist is not a copy of the test directory, and both go stale on the next test added.
 
-- `DataChannelInit_DefaultsReliableOrdered`
-- `IceServer_CtorWithUrl`
-- `PeerConnectionConfig_Defaults`
-- `RedactIceCredentials_HidesUserInfo`
+**A skipped/ignored native test is a failure, not a pass** (SPEC §11, *absence must be failure*). If the native tier reports zero tests run, the plugin did not load — treat it as red.
 
 ---
 
@@ -73,29 +81,32 @@ Tests covered:
 
 | MCP tool | Params |
 |----------|--------|
-| `execute_code` | Roslyn/auto; call `DataChannelRuntime.EnsureNative()`, create/dispose `PeerConnection` |
+| `execute_code` | Roslyn/auto; check availability and ABI, create/dispose a `PeerConnection` |
 
 Example body (abbreviated):
 
 ```csharp
-DataChannelUnity.DataChannelRuntime.EnsureNative();
 var available = DataChannelUnity.DataChannelRuntime.IsNativeAvailable;
 var abi = available ? DataChannelUnity.DataChannelRuntime.AbiVersion : -1;
 using (var pc = new DataChannelUnity.PeerConnection(new DataChannelUnity.PeerConnectionConfig()))
-  return new { available, abi, handle = pc.NativeHandle };
+  return new { available, abi, state = pc.ConnectionState.ToString() };
 ```
 
-**Expect:** `nativeAvailable=true`, `abiVersion=1`, `handle > 0`, no exception.
+**Expect:** `available=true`, no exception, and `abi` **equal to `DCU_ABI_VERSION` in `native/dcu/include/dcu.h`** — read the header, do not compare against a number written here.
+
+`NativeHandle` is `internal` (SPEC §6); use `ToString()` if a handle is wanted for diagnostics.
 
 ---
 
-## 5. Dual Peer loopback (in-process fake signal)
+## 5. Dual Peer loopback via `execute_code` (in-process fake signal)
 
 | MCP tool | Params |
 |----------|--------|
 | `execute_code` | Two `PeerConnection`s, wire local description/candidate events to the other peer, `CreateDataChannel`, `Pump()` until both sides receive a message or ~8s timeout |
 
 **Expect:** `success=true`, `gotA=true`, `gotB=true` within a few seconds (typically &lt; 1s on localhost).
+
+This step drives the pump **by hand** — `execute_code` is not the PlayerLoop. It therefore proves the event path but says nothing about pump registration; that is what step 7 is for.
 
 ---
 
@@ -107,47 +118,74 @@ using (var pc = new DataChannelUnity.PeerConnection(new DataChannelUnity.PeerCon
 
 **Expect:** no `DllNotFoundException`, no missing `datachannel_unity` / `__Internal`, no plugin load errors related to this package.
 
+**Expected, not a failure:** a `dropped N log messages` warning when running at Verbose under load — the log queue is bounded by design (SPEC §7). Do not treat it as a defect, and do not write a "console must be perfectly clean" gate that cannot tell it apart from a real one.
+
 ---
 
-## 7. Scene Play Mode (DualPeer)
-
-`Samples~/DualPeerLoopback` lives under UPM `Samples~` and is **not** compiled into the package until imported. For MCP Play verification this project uses:
-
-`Assets/DataChannelVerify/DualPeerPlayDriver.cs` (same logic as the sample; namespace `DataChannelUnity.Verify`).
+## 7. PlayMode smoke (dual peer, real PlayerLoop)
 
 | MCP tool | Params |
 |----------|--------|
-| `manage_gameobject` | `action=create`, `name=DualPeerPlayDriver`, `components_to_add=["DualPeerPlayDriver"]` |
-| `read_console` | `action=clear` |
-| `manage_editor` | `action=play` |
-| (wait ~2–5s; domain reload may disconnect MCP — retry tools) | |
-| `read_console` | `types=all`, `filter_text=DualPeer` (or unfiltered) |
-| `manage_editor` | `action=stop` |
-| `manage_scene` | `action=save` (optional) |
+| `run_tests` | `mode=PlayMode`, `assembly_names=["DataChannelUnity.Tests.Runtime"]`, `include_details=true`, `include_failed_tests=true` |
+| `get_test_job` | `job_id=<from run_tests>`, `wait_timeout=180`, `include_details=true` |
 
-**Expect console lines** (order may vary slightly):
+**Expect:** `status=succeeded`, `summary.failed=0`.
 
-- `A local offer` / `B local answer`
-- `A DC open — sending ping` / `B DC open`
-- `B received: ping-from-a` / `A received: pong-from-b`
-- **`DualPeerLoopback SUCCESS`**
+**What this tier is for:** it asserts that messages flow **without anyone calling `Pump()` manually** — i.e. that `RegisterPump()` actually installed into the PlayerLoop. No other step covers that path. It also covers the two channel-creation orders (before connect / after connect), which fail in different ways (SPEC §4).
 
-**Expect:** zero errors related to `DllNotFound` / plugin load.
+Headless equivalent, when the Editor is not holding the project open:
+
+```bash
+Unity -runTests -testPlatform PlayMode -batchmode \
+  -projectPath . -testResults /tmp/playmode.xml
+```
+
+Entering play mode may briefly drop the MCP session; retry after `refresh_unity`.
 
 ---
 
-## Baseline recorded (2026-08-02, juice-c-sharp @ 2022.3.62f3, macOS arm64)
+## 8. Domain-reload lifecycle (manual step, machine-judged)
 
-| Step | Result |
-|------|--------|
+The test framework does not survive a domain reload, so this cannot be an ordinary test — and a probe compiled dynamically through `execute_code` is destroyed by the very transition it is trying to observe. Use a **persistent Editor script** committed to the project.
+
+| Step | |
+|------|--|
+| 1 | With the persistent probe present, create a PeerConnection and a DataChannel in edit mode |
+| 2 | Force a domain reload (recompile, or `manage_editor` play/stop with Reload Domain on) |
+| 3 | Read the probe's **artifact** — a live-object count written to `SessionState` or a file |
+
+**Expect:** live objects **0** after `beforeAssemblyReload`, and after exiting play mode.
+
+**Reading a line out of the Console does not satisfy this step.** The probe must emit something assertable; otherwise this is the same disease as `|| true` (SPEC §11).
+
+---
+
+## 9. Suite-level teardown
+
+After the tiers above, in the same Editor session:
+
+**Expect:** `dcu_shutdown()` reports **0** undestroyed objects, and `dcu_event_queue_depth()` is **0**.
+
+These are machine-checkable and independent of the log bridge, which is exactly why they replace "grep the Console for an English success line".
+
+---
+
+## Baseline snapshot (2026-08-03, juice-c-sharp @ 2022.3.62f3, macOS arm64)
+
+> **This is a historical record, not an expectation.** It describes the tree **before** the implementation-hardening work (`DCU_ABI_VERSION` 1, 18 exports, C API implementation). Do not compare a current run against these numbers — compare against `expected-symbols.txt` and `dcu.h`.
+
+| Step | Result at that time |
+|------|---------------------|
 | Native audit | PASS — 18 `dcu_*`, no homebrew crypto dylibs |
-| EditMode | **4/4 Passed** (~0.5s) |
-| `EnsureNative` + `PeerConnection` | `available=true`, `abi=1`, handle created |
+| EditMode | 4/4 Passed (~0.5s) |
+| Native load + `PeerConnection` | `available=true`, `abi=1`, handle created |
 | Dual peer via `execute_code` | `success=true` in ~126ms |
-| **Scene Play `DualPeerPlayDriver`** | **`DualPeerLoopback SUCCESS`** (ping/pong in console); 0 errors |
+| Scene Play dual-peer driver | ping/pong completed; 0 errors |
 | Console DataChannel errors | 0 |
 
-**Note:** Batchmode `-runTests` cannot open the project while the GUI Editor already has it open (`Multiple Unity instances cannot open the same project`). Prefer MCP while the Editor is running, or close the Editor before batchmode. Entering Play Mode may drop the MCP session briefly; retry after `refresh_unity` / reconnect.
+Recorded in [#42](https://github.com/xuhuanhello/juice-c-sharp/issues/42) as the pre-migration baseline for the C++ API move.
+
+**Note:** Batchmode `-runTests` cannot open the project while the GUI Editor already has it open (`Multiple Unity instances cannot open the same project`). Prefer MCP while the Editor is running, or close the Editor before batchmode.
 
 ---
 
@@ -155,19 +193,18 @@ using (var pc = new DataChannelUnity.PeerConnection(new DataChannelUnity.PeerCon
 
 | Symptom | Action |
 |---------|--------|
-| `DllNotFoundException` / native unavailable | Rebuild: `cd native && ./scripts/build-macos-arm64.sh` (Meson entry); confirm `.bundle` only under `Plugins/macOS/arm64/` |
-| Audit fails on crypto dylibs | Product path must use subprojects MbedTLS static (not brew OpenSSL dylib) |
-| Audit fails on non-`dcu_*` exports | Check `native/exports/macos-exported-symbols.txt` + linker flags |
-| EditMode redact test fails | Regex must match `turn:user:pass@host` (`:(?://)?` not `://?`) |
+| `DllNotFoundException` / native unavailable | Rebuild: `./native/scripts/build-macos-arm64.sh` (CMake entry, SPEC §9); confirm `.bundle` only under `Plugins/macOS/arm64/` |
+| `permission denied` running a script | The script lost its executable bit in git — `git update-index --chmod=+x native/scripts/<name>.sh`. **Do not `chmod` and move on**; that hides the same regression next time |
+| Audit fails on crypto dylibs | Product path must use subprojects MbedTLS static (never brew OpenSSL) |
+| Audit symbol diff non-empty | Deliberate ABI change → update `native/exports/expected-symbols.txt` **with** the `DCU_ABI_VERSION` bump. Otherwise upstream leaked a symbol — check visibility flags and the allowlist |
+| Native tier reports 0 tests | Plugin not loaded. This is a failure, not a skip |
+| Redaction test fails | Assert on the **public** logging path output (`credentials=redacted@`), not on the internal regex |
 | MCP `no_unity_session` / multi-instance | Connect MCP for **this** project; `set_active_instance` from `mcpforunity://instances` |
-| Dual peer timeout | Ensure `DataChannelRuntime.Pump()` is called in the wait loop (Editor execute_code is not the PlayerLoop) |
+| Dual peer timeout in step 5 | Ensure `DataChannelRuntime.Pump()` is called in the wait loop (`execute_code` is not the PlayerLoop) |
+| Dual peer timeout in step 7 | The opposite — the pump should be running by itself. Suspect pump registration or a third-party `SetPlayerLoop` overwrite |
 
 ---
 
-## Agent policy
+## When to run this
 
-After changing native plugins, C# interop, or packaging:
-
-1. Run this checklist via MCP.  
-2. Do **not** mark packaging/native tickets done without recording step results (pass/fail + key fields).  
-3. On failure, fix and re-run the failed steps before closing the ticket.
+See [`CONTRIBUTING.md`](../CONTRIBUTING.md). The gate text lives there, not here — a manual should say *how*, not *whether*.

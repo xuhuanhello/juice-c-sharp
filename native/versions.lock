@@ -3,8 +3,9 @@
 
 libdatachannel=v0.24.5
 datachannel-wasm=v0.4.0
-# MbedTLS 由 fetch-deps.sh / meson wrap 拉进 native/subprojects/mbedtls。
-# 禁止使用 brew/系统 mbedtls 作为产品路径（决策 #23 / #25）。
+# MbedTLS 由 fetch-deps.sh 拉进 native/subprojects/mbedtls。
+# 禁止使用 brew/系统 mbedtls 或 OpenSSL 作为产品路径（决策 #17；构建入口见 #27，
+# 已由 Meson 改为 CMake-only，#23 / #25 随之撤销）。
 # 注：上游同时存在 v3.6.7 与 mbedtls-3.6.7 两个附注标签，指向同一 commit 068ff080。
 mbedtls=v3.6.7
 crypto=mbedtls-3.6.7-static-subproject
