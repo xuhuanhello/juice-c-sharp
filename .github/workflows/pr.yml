@@ -1,0 +1,38 @@
+# PR gate (map #20): EditMode when Unity available + macOS arm64 native build/audit.
+# Full multi-platform matrix is plugins-matrix.yml (release / nightly).
+name: PR
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  native-macos-arm64:
+    name: macOS arm64 plugin + audit
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          brew install meson cmake ninja
+      - name: Build plugin (Meson entry)
+        run: |
+          chmod +x native/scripts/*.sh
+          ./native/scripts/fetch-deps.sh
+          ./native/scripts/build-macos-arm64.sh
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: datachannel_unity-macos-arm64
+          path: Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
+
+  # EditMode tests require a Unity license/runner — enable when org secrets exist.
+  # editmode:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: game-ci/unity-test-runner@v4
+  #       with:
+  #         projectPath: .
+  #         testMode: EditMode

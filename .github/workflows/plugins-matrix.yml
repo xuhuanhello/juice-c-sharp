@@ -1,0 +1,45 @@
+# Full plugin matrix (map #20): run on release, schedule, or workflow_dispatch.
+# Maintainer downloads artifacts and commits LFS plugins (map #13) — no auto-push to main.
+name: Plugins matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # weekly Monday 06:00 UTC
+  release:
+    types: [published]
+
+jobs:
+  macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install cmake ninja openssl@3
+      - run: |
+          chmod +x native/scripts/*.sh
+          OPENSSL_ROOT="$(brew --prefix openssl@3)" ./native/scripts/build-macos-arm64.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugins-macos-arm64
+          path: Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
+
+  # --- Scaffold only: enable as scripts land ---
+  # macos-x64:
+  #   runs-on: macos-13
+  #   steps: ... build-macos-x64.sh
+  #
+  # windows-x64:
+  #   runs-on: windows-latest
+  #   steps: ... build-windows-x64.ps1 + dumpbin audit
+  #
+  # android-arm64:
+  #   runs-on: ubuntu-latest
+  #   steps: ... NDK + build-android-arm64.sh
+  #
+  # ios-arm64:
+  #   runs-on: macos-latest
+  #   steps: ... build-ios-arm64.sh
+  #
+  # webgl:
+  #   runs-on: ubuntu-latest
+  #   steps: ... Unity Emscripten 3.1.8-unity + datachannel-wasm
