@@ -1,0 +1,27 @@
+{
+  "name": "com.xuhuanhello.datachannel",
+  "version": "0.1.0",
+  "displayName": "DataChannel Unity",
+  "description": "WebRTC DataChannel bindings for Unity (libdatachannel + datachannel-wasm) with a stable C ABI and C# API.",
+  "unity": "2022.3",
+  "documentationUrl": "https://github.com/xuhuanhello/juice-c-sharp/blob/main/docs/SPEC.md",
+  "licensesUrl": "https://github.com/xuhuanhello/juice-c-sharp/blob/main/Packages/datachannel-unity/LICENSE.md",
+  "keywords": [
+    "webrtc",
+    "datachannel",
+    "p2p",
+    "ice",
+    "libdatachannel"
+  ],
+  "author": {
+    "name": "xuhuanhello",
+    "url": "https://github.com/xuhuanhello"
+  },
+  "samples": [
+    {
+      "displayName": "Dual Peer Loopback",
+      "description": "In-process two PeerConnections with in-memory signaling and a binary DataChannel message.",
+      "path": "Samples~/DualPeerLoopback"
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+# DataChannel Unity (`com.xuhuanhello.datachannel`)
+
+WebRTC **DataChannel** bindings for Unity: stable C ABI (`dcu_*`) over [libdatachannel](https://github.com/paullouisageneau/libdatachannel) (native) and [datachannel-wasm](https://github.com/paullouisageneau/datachannel-wasm) (WebGL).
+
+**Specification:** [`docs/SPEC.md`](../../docs/SPEC.md)
+
+## Install
+
+Add to `Packages/manifest.json`:
+
+```json
+"com.xuhuanhello.datachannel": "file:datachannel-unity"
+```
+
+Or use a git URL once published:
+
+```json
+"com.xuhuanhello.datachannel": "https://github.com/xuhuanhello/juice-c-sharp.git?path=Packages/datachannel-unity"
+```
+
+## Build native plugins
+
+Pinned versions live in `native/versions.lock` (libdatachannel **v0.24.5**, datachannel-wasm **v0.4.0**, MbedTLS).
+
+```bash
+# tools: meson, cmake, ninja, clang++, git — local mac by default
+cd native
+./scripts/fetch-deps.sh    # fills subprojects/mbedtls + libdatachannel
+meson setup build/macos-arm64 --buildtype=release
+meson compile -C build/macos-arm64
+# same thing via thin wrapper:
+./scripts/build-macos-arm64.sh
+```
+
+- **Meson is the product entry** (local = CI). Crypto + libdatachannel are built from **`subprojects/`**, not linked from brew.
+- **Single product per mac arch:** `datachannel_unity.bundle` only.
+- **Self-contained:** static MbedTLS 3.6 (with DTLS-SRTP user config) into the plugin; `otool -L` must not show Homebrew openssl/mbedtls.
+- **Exports:** only `dcu_*` (`native/exports/`).
+- **CI:** matrix in GitHub Actions; maintainers merge LFS (see `docs/SPEC.md` §9–§10).
+
+## Minimal usage
+
+```csharp
+using DataChannelUnity;
+
+var pc = new PeerConnection(new PeerConnectionConfig {
+    IceServers = { new IceServer("stun:stun.l.google.com:19302") }
+});
+pc.LocalDescriptionGenerated += (sdp, type) => { /* send via your signal */ };
+pc.LocalCandidateGenerated += (cand, mid) => { /* trickle */ };
+
+var dc = pc.CreateDataChannel("game");
+dc.Open += () => dc.Send(System.Text.Encoding.UTF8.GetBytes("hi"));
+dc.Message += bytes => { /* ... */ };
+
+// Answerer side:
+// pc.SetRemoteDescription(offerSdp, "offer");
+// pc.AddRemoteCandidate(cand, mid);
+```
+
+Events run on the **Unity main thread** (automatic PlayerLoop pump).
+
+## Sample
+
+**Dual Peer Loopback** — Window → Package Manager → DataChannel Unity → Samples.
+
+## License
+
+Package C# / `dcu_*` sources: see `LICENSE.md`.  
+libdatachannel is **MPL-2.0** — see `ThirdPartyNotices.md` when redistributing prebuilt binaries.
