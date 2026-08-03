@@ -153,7 +153,11 @@ This step drives the pump **by hand** — `execute_code` is not the PlayerLoop. 
 
 **Expect:** `status=succeeded`, `summary.failed=0`.
 
-**What this tier is for:** it asserts that messages flow **without anyone calling `Pump()` manually** — i.e. that `RegisterPump()` actually installed into the PlayerLoop. No other step covers that path. It also covers the two channel-creation orders (before connect / after connect), which fail in different ways (SPEC §4).
+**What this tier is for:** it asserts that messages flow **without anyone calling `Pump()` manually** — i.e. that `RegisterPump()` actually installed into the PlayerLoop. No other step covers that path.
+
+> There must be **no `DataChannelRuntime.Pump()` call anywhere in this assembly.** Adding one to make a red test green destroys the only thing the tier verifies. The assertions were confirmed to depend on the pump by a throw-away mutation (same test, main thread blocked instead of yielding → nothing delivered, test failed) — a gate never observed failing is not known to work.
+
+Currently covers the **before-connect** channel-creation order only. The complementary **after-connect** order (§4, where the open race lives) arrives with the rest of the required-contract list.
 
 Headless equivalent, when the Editor is not holding the project open:
 
