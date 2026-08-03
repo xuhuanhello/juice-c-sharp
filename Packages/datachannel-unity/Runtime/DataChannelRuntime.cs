@@ -38,7 +38,7 @@ namespace DataChannelUnity
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
-        private static void OnDomainReload()
+        private static void ResetStaticsOnEnterPlayMode()
         {
             _nativeReady = false;
             _initAttempted = false;
@@ -53,7 +53,7 @@ namespace DataChannelUnity
             RegisterPump();
         }
 
-        public static void EnsureNative()
+        internal static void EnsureNative()
         {
             if (_initAttempted) return;
             _initAttempted = true;
@@ -83,7 +83,7 @@ namespace DataChannelUnity
             }
         }
 
-        public static void RegisterPump()
+        internal static void RegisterPump()
         {
             if (_pumpRegistered) return;
             var loop = PlayerLoop.GetCurrentPlayerLoop();

@@ -1138,5 +1138,5 @@ Not required to start implementation. Each is deliberately unspecified, with the
 | **Observability beyond `BufferedAmount`** | Queue depth, drop counts, per-frame stats all currently go to logs, which suffice for attribution. Exposing them for application network HUDs should be its own decision, not a rider on another one |
 | **Inbound rate limiting / malicious-peer defence** | §1 out of scope: the accepted weakness in §6 has its correct fix at a connection layer that can react per peer — a new mechanism, not a hardening of an existing one |
 | **HarmonyOS** | Waiting on Unity/tooling |
-| **Implementation milestones / PR slicing** | Separate planning |
+| ~~Implementation milestones / PR slicing~~ | **Done** — [#44](https://github.com/xuhuanhello/juice-c-sharp/issues/44) slices §14 steps 2–3 into nine vertical cuts, each leaving the tree green |
 | Optional later | Selected-candidate-pair API, device farm CI, WebSocket bindings, FishNet transport mapping |

@@ -46,10 +46,10 @@ namespace DataChannelUnity.Tests
                 a.LocalCandidateGenerated += (cand, mid) => b.AddRemoteCandidate(cand, mid);
                 b.LocalCandidateGenerated += (cand, mid) => a.AddRemoteCandidate(cand, mid);
 
-                b.DataChannel += ch =>
+                b.DataChannelReceived += ch =>
                 {
                     incoming = ch;
-                    ch.Message += bytes =>
+                    ch.MessageReceived += bytes =>
                     {
                         gotB = Encoding.UTF8.GetString(bytes);
                         ch.Send(Encoding.UTF8.GetBytes("pong"));
@@ -57,12 +57,12 @@ namespace DataChannelUnity.Tests
                 };
 
                 outgoing = a.CreateDataChannel("playmode-smoke");
-                outgoing.Open += () =>
+                outgoing.Opened += () =>
                 {
                     aOpened = true;
                     outgoing.Send(Encoding.UTF8.GetBytes("ping"));
                 };
-                outgoing.Message += bytes => gotA = Encoding.UTF8.GetString(bytes);
+                outgoing.MessageReceived += bytes => gotA = Encoding.UTF8.GetString(bytes);
 
                 // 只推进帧。事件要么由已注册的 PlayerLoop pump 送达，要么送不到 ——
                 // 后者正是本测试要抓的回归。

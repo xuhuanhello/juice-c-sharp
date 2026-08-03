@@ -22,8 +22,7 @@ namespace DataChannelUnity.Verify
 
         IEnumerator Start()
         {
-            DataChannelLog.SetLogLevel(LogLevel.Info);
-            DataChannelRuntime.EnsureNative();
+            DataChannelLog.Level = LogLevel.Info;
             if (!DataChannelRuntime.IsNativeAvailable)
             {
                 Debug.LogError("DualPeerPlayDriver: native plugin missing. Run native/scripts/build-*.sh");
@@ -57,11 +56,11 @@ namespace DataChannelUnity.Verify
                 _a.AddRemoteCandidate(cand, mid);
             };
 
-            _b.DataChannel += ch =>
+            _b.DataChannelReceived += ch =>
             {
                 _dcB = ch;
-                _dcB.Open += () => Debug.Log("B DC open");
-                _dcB.Message += data =>
+                _dcB.Opened += () => Debug.Log("B DC open");
+                _dcB.MessageReceived += data =>
                 {
                     var text = Encoding.UTF8.GetString(data);
                     Debug.Log("B received: " + text);
@@ -71,12 +70,12 @@ namespace DataChannelUnity.Verify
             };
 
             _dcA = _a.CreateDataChannel("loopback");
-            _dcA.Open += () =>
+            _dcA.Opened += () =>
             {
                 Debug.Log("A DC open — sending ping");
                 _dcA.Send(Encoding.UTF8.GetBytes("ping-from-a"));
             };
-            _dcA.Message += data =>
+            _dcA.MessageReceived += data =>
             {
                 var text = Encoding.UTF8.GetString(data);
                 Debug.Log("A received: " + text);

@@ -10,7 +10,7 @@ namespace DataChannelUnity
         private bool _disposed;
         private IPeerConnectionObserver _observer;
 
-        public int NativeHandle { get; }
+        internal int NativeHandle { get; }
         public ConnectionState ConnectionState { get; private set; } = ConnectionState.New;
         public GatheringState GatheringState { get; private set; } = GatheringState.New;
 
@@ -18,7 +18,7 @@ namespace DataChannelUnity
         public event Action<string, string> LocalCandidateGenerated;
         public event Action<ConnectionState> ConnectionStateChanged;
         public event Action<GatheringState> GatheringStateChanged;
-        public event Action<DataChannel> DataChannel;
+        public event Action<DataChannel> DataChannelReceived;
 
         public PeerConnection(PeerConnectionConfig config = null)
         {
@@ -37,13 +37,19 @@ namespace DataChannelUnity
             HandleTable.Register(this);
         }
 
-        public void SetObserver(IPeerConnectionObserver observer) => _observer = observer;
+        /// <summary>单个观察者，非多播；再次赋值会静默覆盖上一个。</summary>
+        public IPeerConnectionObserver Observer
+        {
+            get => _observer;
+            set => _observer = value;
+        }
 
         public DataChannel CreateDataChannel(string label, DataChannelInit init = null)
         {
             ThrowIfDisposed();
             if (label == null) throw new ArgumentNullException(nameof(label));
             init = init ?? new DataChannelInit();
+            init.Validate();
 
             var labelBytes = Encoding.UTF8.GetBytes(label);
             var ninit = new NativeMethods.DcInitNative
@@ -147,7 +153,7 @@ namespace DataChannelUnity
 
         internal void RaiseIncomingDataChannel(DataChannel channel)
         {
-            DataChannel?.Invoke(channel);
+            DataChannelReceived?.Invoke(channel);
             _observer?.OnDataChannel(channel);
         }
     }

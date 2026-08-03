@@ -11,14 +11,14 @@ namespace DataChannelUnity
         private IDataChannelObserver _observer;
 
         public PeerConnection Peer { get; }
-        public int NativeHandle { get; }
+        internal int NativeHandle { get; }
         public string Label { get; }
         public bool IsOpen => _open && !_disposed;
 
-        public event Action Open;
+        public event Action Opened;
         public event Action Closed;
-        public event Action<string> Error;
-        public event Action<byte[]> Message;
+        public event Action<string> ErrorOccurred;
+        public event Action<byte[]> MessageReceived;
 
         internal DataChannel(PeerConnection peer, int handle, string label, bool ownsCreation)
         {
@@ -27,7 +27,12 @@ namespace DataChannelUnity
             Label = label ?? string.Empty;
         }
 
-        public void SetObserver(IDataChannelObserver observer) => _observer = observer;
+        /// <summary>单个观察者，非多播；再次赋值会静默覆盖上一个。</summary>
+        public IDataChannelObserver Observer
+        {
+            get => _observer;
+            set => _observer = value;
+        }
 
         public int BufferedAmount
         {
@@ -68,7 +73,6 @@ namespace DataChannelUnity
                 "dcu_dc_send");
         }
 
-#if NET_STANDARD_2_1 || UNITY_2021_2_OR_NEWER
         public void Send(ReadOnlySpan<byte> data)
         {
             ThrowIfDisposed();
@@ -79,7 +83,6 @@ namespace DataChannelUnity
                 NativeMethods.dcu_dc_send(NativeHandle, arr, arr.Length),
                 "dcu_dc_send");
         }
-#endif
 
         public void Dispose()
         {
@@ -117,7 +120,7 @@ namespace DataChannelUnity
         internal void RaiseOpen()
         {
             _open = true;
-            Open?.Invoke();
+            Opened?.Invoke();
             _observer?.OnOpen();
         }
 
@@ -130,13 +133,13 @@ namespace DataChannelUnity
 
         internal void RaiseError(string message)
         {
-            Error?.Invoke(message);
+            ErrorOccurred?.Invoke(message);
             _observer?.OnError(message);
         }
 
         internal void RaiseMessage(byte[] data)
         {
-            Message?.Invoke(data);
+            MessageReceived?.Invoke(data);
             _observer?.OnMessage(data);
         }
     }
