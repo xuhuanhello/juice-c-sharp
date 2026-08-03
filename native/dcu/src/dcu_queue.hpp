@@ -46,16 +46,22 @@ public:
         return true;
     }
 
-    int copy_payload(char *buffer, int capacity, bool second) {
+    // 返回码 + out 参数（SPEC §4）。TOO_SMALL 时填入所需长度且**不消费**，
+    // 使扩容重试幂等。
+    int copy_payload(void *buffer, int capacity, bool second, int *out_len) {
         std::lock_guard<std::mutex> lock(mu_);
+        if (!out_len)
+            return DCU_ERR_INVALID;
+        *out_len = 0;
         if (q_.empty())
             return DCU_ERR_NOT_AVAIL;
         const auto &buf = second ? q_.front().payload2 : q_.front().payload;
+        *out_len = static_cast<int>(buf.size());
         if (!buffer || capacity < static_cast<int>(buf.size()))
             return DCU_ERR_TOO_SMALL;
         if (!buf.empty())
             std::memcpy(buffer, buf.data(), buf.size());
-        return static_cast<int>(buf.size());
+        return DCU_OK;
     }
 
     int pop() {

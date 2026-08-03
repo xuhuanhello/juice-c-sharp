@@ -59,14 +59,11 @@ template <typename F> int dcu_wrap(F &&f) {
     } catch (const std::exception &) {
         return DCU_ERR_FAILURE;
     } catch (...) {
-        return DCU_ERR_FAILURE;
+        // 无法归类的失败。**绝不压平成 FAILURE** —— 压平丢掉的恰是最有诊断价值的
+        // 那一位：INVALID（你传的参数不对，可自助修复）被伪装成 FAILURE（运行时
+        // 问题，只能提 issue）。见 #31 决议 5。
+        return DCU_ERR_UPSTREAM_UNKNOWN;
     }
-}
-
-// 迁移前这些函数一律是 `rc == 0 ? DCU_OK : DCU_ERR_FAILURE`，把 INVALID 压平成
-// FAILURE。保真化归 #31（SPEC §4），本次不改，以免行为漂移。
-template <typename F> int dcu_wrap_flat(F &&f) {
-    return dcu_wrap(std::forward<F>(f)) == DCU_OK ? DCU_OK : DCU_ERR_FAILURE;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +72,8 @@ template <typename F> int dcu_wrap_flat(F &&f) {
 // 显式 switch 而非强转（#31 决议 3）。此处**故意不写 default 标签**：枚举成员
 // 全覆盖时，上游若新增成员，编译器的 -Wswitch 会报出来 —— 这替回了一部分
 // static_assert 在 C++ 路线上失去的编译期信号（#42 已知退步）。
-// 越界值经落尾的强转原样带出，与迁移前一致；映射到 Unknown 归 #31/#34。
+// 越界值映射到 DCU_STATE_UNKNOWN：不抛（default 绝不抛）、不丢事件（应用会停在
+// 旧状态）、也不冒充某个既有成员（那是撒谎）。
 // ---------------------------------------------------------------------------
 
 int map_pc_state(rtc::PeerConnection::State s) {
@@ -93,7 +91,7 @@ int map_pc_state(rtc::PeerConnection::State s) {
     case rtc::PeerConnection::State::Closed:
         return 5;
     }
-    return static_cast<int>(s);
+    return DCU_STATE_UNKNOWN;
 }
 
 int map_gathering_state(rtc::PeerConnection::GatheringState s) {
@@ -105,7 +103,7 @@ int map_gathering_state(rtc::PeerConnection::GatheringState s) {
     case rtc::PeerConnection::GatheringState::Complete:
         return 2;
     }
-    return static_cast<int>(s);
+    return DCU_STATE_UNKNOWN;
 }
 
 rtc::LogLevel map_log_level(int level) {
@@ -230,17 +228,21 @@ void wire_pc_callbacks(int h, const std::shared_ptr<rtc::PeerConnection> &pc) {
 
 extern "C" {
 
-int dcu_abi_version(void) { return DCU_ABI_VERSION; }
+int dcu_abi_version(int *out_version) {
+    if (!out_version)
+        return DCU_ERR_INVALID;
+    *out_version = DCU_ABI_VERSION;
+    return DCU_OK;
+}
 
 int dcu_init(void) {
     if (g_inited.exchange(true))
         return DCU_OK;
-    dcu_wrap([] {
+    return dcu_wrap([] {
         rtc::InitLogger(rtc::LogLevel::Warning);
         rtc::Preload();
         return DCU_OK;
     });
-    return DCU_OK;
 }
 
 int dcu_shutdown(void) {
@@ -248,41 +250,40 @@ int dcu_shutdown(void) {
         return DCU_OK;
     // 顺序对应上游 rtcCleanup：先丢对象（eraseAll），再 Cleanup。队列在对象销毁
     // **之后**清，这样销毁期间回调推进来的事件也一并清掉。
-    dcu_wrap([] {
+    return dcu_wrap([] {
         g_table.clear();
         g_queue.clear();
         if (rtc::Cleanup().wait_for(std::chrono::seconds(10)) == std::future_status::timeout)
             throw std::runtime_error("Cleanup timeout (possible deadlock or undestructible object)");
         return DCU_OK;
     });
-    // 迁移前 rtcCleanup() 返回 void 并自行吞掉异常，dcu_shutdown 恒返回 DCU_OK。
-    // 改为返回未销毁对象数归 #37 决议 7（SPEC §4），本次不改。
-    return DCU_OK;
+    // 返回未销毁对象数（经 out 参数）归 #37 决议 7，随 S8 落地。
 }
 
 int dcu_set_log_level(int level) {
-    dcu_wrap([level] {
+    return dcu_wrap([level] {
         // 注意：上游 InitLogger 不幂等，回调传空即静默拆桥回落 stdout。目前我们本来
-        // 就没装桥，故与迁移前一致；静态 trampoline 归 #33（SPEC §7）。
+        // 就没装桥，故与迁移前一致；静态 trampoline 归 #33（SPEC §7），随 S5 落地。
         rtc::InitLogger(map_log_level(level));
         return DCU_OK;
     });
-    return DCU_OK;
 }
 
-int dcu_pc_create(const dcu_pc_config *config) {
+int dcu_pc_create(const dcu_pc_config *config, int *out_pc) {
+    if (!out_pc)
+        return DCU_ERR_INVALID;
+    *out_pc = 0;
     if (!g_inited.load())
         return DCU_ERR_FAILURE;
     if (!config)
         return DCU_ERR_INVALID;
 
-    return dcu_wrap([config] {
+    return dcu_wrap([config, out_pc] {
         rtc::Configuration cfg;
 
         // 凭证走结构化字段，不再拼 URI（#33 决议 3 / SPEC §5）。
         // rtc::IceServer 的字段全 public，URL 构造函数自己 url_decode userinfo，
-        // 我们不需要解析任何东西 —— percent_encode_userinfo / build_ice_uri 连同
-        // 它们的三个真 bug（无 :// 时猜 scheme、rest 遇 @ 整串放弃、stun: 也被塞凭证）一并删除。
+        // 我们不需要解析任何东西。
         if (config->ice_servers && config->ice_server_count > 0) {
             for (int i = 0; i < config->ice_server_count; ++i) {
                 const dcu_ice_server &s = config->ice_servers[i];
@@ -316,8 +317,7 @@ int dcu_pc_create(const dcu_pc_config *config) {
         cfg.enableIceUdpMux = config->enable_ice_udp_mux != 0;
         cfg.disableAutoNegotiation = false;
 
-        // SPEC §5 定的是「<= 0 即自动」。capi 对 maxMessageSize 用的是 != 0，
-        // 对 C# 能产出的取值（0 或正数）两者等价。
+        // SPEC §5 定的是「<= 0 即自动」。
         if (config->mtu > 0)
             cfg.mtu = static_cast<size_t>(config->mtu);
         if (config->max_message_size > 0)
@@ -326,14 +326,15 @@ int dcu_pc_create(const dcu_pc_config *config) {
         auto pc = std::make_shared<rtc::PeerConnection>(std::move(cfg));
         int h = g_table.add_pc(pc);
         wire_pc_callbacks(h, pc);
-        return h;
+        *out_pc = h;
+        return DCU_OK;
     });
 }
 
 int dcu_pc_close(int pc) {
     if (pc <= 0)
         return DCU_ERR_INVALID;
-    return dcu_wrap_flat([pc] {
+    return dcu_wrap([pc] {
         g_table.get_pc(pc)->close();
         return DCU_OK;
     });
@@ -342,10 +343,10 @@ int dcu_pc_close(int pc) {
 int dcu_pc_destroy(int pc) {
     if (pc <= 0)
         return DCU_ERR_INVALID;
-    return dcu_wrap_flat([pc] {
+    return dcu_wrap([pc] {
         // 与上游 rtcDeletePeerConnection 同形：先 close 再摘表。
-        // 摘表**只摘 PC**，其子 DataChannel 仍留在表里 —— 与迁移前一致（级联释放
-        // 由托管侧负责，见 #29 / SPEC §6）。
+        // 摘表**只摘 PC**，其子 DataChannel 仍留在表里 —— 级联释放由托管侧负责
+        // （#29 / SPEC §6），随 S6 落地。
         auto p = g_table.get_pc(pc);
         p->close();
         p.reset();
@@ -360,7 +361,7 @@ int dcu_pc_set_remote_description(int pc, const char *sdp, int sdp_len, const ch
         return DCU_ERR_INVALID;
     std::string s = string_from_buf(sdp, sdp_len);
     std::string t = string_from_buf(type, type_len);
-    return dcu_wrap_flat([pc, &s, &t] {
+    return dcu_wrap([pc, &s, &t] {
         g_table.get_pc(pc)->setRemoteDescription({s, t});
         return DCU_OK;
     });
@@ -372,18 +373,22 @@ int dcu_pc_add_remote_candidate(int pc, const char *cand, int cand_len, const ch
         return DCU_ERR_INVALID;
     std::string c = string_from_buf(cand, cand_len);
     std::string m = string_from_buf(mid, mid_len);
-    return dcu_wrap_flat([pc, &c, &m] {
+    return dcu_wrap([pc, &c, &m] {
         g_table.get_pc(pc)->addRemoteCandidate({c, m});
         return DCU_OK;
     });
 }
 
-int dcu_pc_create_data_channel(int pc, const char *label, int label_len, const dcu_dc_init *init) {
+int dcu_pc_create_data_channel(int pc, const char *label, int label_len, const dcu_dc_init *init,
+                               int *out_dc) {
+    if (!out_dc)
+        return DCU_ERR_INVALID;
+    *out_dc = 0;
     if (pc <= 0 || !label || label_len < 0)
         return DCU_ERR_INVALID;
     std::string lab = string_from_buf(label, label_len);
 
-    return dcu_wrap([pc, &lab, init] {
+    return dcu_wrap([pc, &lab, init, out_dc] {
         rtc::DataChannelInit dci;
         if (init) {
             // 逐条对应 capi.cpp 的 rtcCreateDataChannelEx：unordered 直传；
@@ -401,18 +406,19 @@ int dcu_pc_create_data_channel(int pc, const char *label, int label_len, const d
         auto dc = g_table.get_pc(pc)->createDataChannel(lab, std::move(dci));
         int h = g_table.add_dc(dc);
         // 出向路径：wire 与创建之间存在 open 竞态窗口（#32 T1），与迁移前同样大。
-        // 补发是 SPEC §14 第 2 步，见文件头不变量 3。
+        // 补发随 S4 落地，见文件头不变量 3。
         wire_dc_callbacks(h, dc);
-        return h;
+        *out_dc = h;
+        return DCU_OK;
     });
 }
 
-int dcu_dc_send(int dc, const char *data, int len) {
+int dcu_dc_send(int dc, const void *data, int len) {
     if (dc <= 0 || !data || len < 0)
         return DCU_ERR_INVALID;
-    return dcu_wrap_flat([dc, data, len] {
-        const auto *b = reinterpret_cast<const rtc::byte *>(data);
-        // send() 返回 false 仅表示「已缓冲」，迁移前的 rtcSendMessage 同样忽略它。
+    return dcu_wrap([dc, data, len] {
+        const auto *b = static_cast<const rtc::byte *>(data);
+        // send() 返回 false 仅表示「已缓冲」，上游 rtcSendMessage 同样忽略它。
         g_table.get_dc(dc)->send(rtc::binary(b, b + len));
         return DCU_OK;
     });
@@ -421,7 +427,7 @@ int dcu_dc_send(int dc, const char *data, int len) {
 int dcu_dc_close(int dc) {
     if (dc <= 0)
         return DCU_ERR_INVALID;
-    return dcu_wrap_flat([dc] {
+    return dcu_wrap([dc] {
         g_table.get_dc(dc)->close();
         return DCU_OK;
     });
@@ -430,7 +436,7 @@ int dcu_dc_close(int dc) {
 int dcu_dc_destroy(int dc) {
     if (dc <= 0)
         return DCU_ERR_INVALID;
-    return dcu_wrap_flat([dc] {
+    return dcu_wrap([dc] {
         auto d = g_table.get_dc(dc);
         d->close();
         d.reset();
@@ -439,11 +445,16 @@ int dcu_dc_destroy(int dc) {
     });
 }
 
-int dcu_dc_buffered_amount(int dc) {
+int dcu_dc_buffered_amount(int dc, int *out_amount) {
+    if (!out_amount)
+        return DCU_ERR_INVALID;
+    *out_amount = 0;
     if (dc <= 0)
         return DCU_ERR_INVALID;
-    int n = dcu_wrap([dc] { return static_cast<int>(g_table.get_dc(dc)->bufferedAmount()); });
-    return n < 0 ? DCU_ERR_FAILURE : n;
+    return dcu_wrap([dc, out_amount] {
+        *out_amount = static_cast<int>(g_table.get_dc(dc)->bufferedAmount());
+        return DCU_OK;
+    });
 }
 
 int dcu_event_peek(dcu_event_header *out_header) {
@@ -454,12 +465,12 @@ int dcu_event_peek(dcu_event_header *out_header) {
     return DCU_OK;
 }
 
-int dcu_event_copy_payload(char *buffer, int capacity) {
-    return g_queue.copy_payload(buffer, capacity, false);
+int dcu_event_copy_payload(void *buffer, int capacity, int *out_len) {
+    return g_queue.copy_payload(buffer, capacity, false, out_len);
 }
 
-int dcu_event_copy_payload2(char *buffer, int capacity) {
-    return g_queue.copy_payload(buffer, capacity, true);
+int dcu_event_copy_payload2(void *buffer, int capacity, int *out_len) {
+    return g_queue.copy_payload(buffer, capacity, true, out_len);
 }
 
 int dcu_event_pop(void) { return g_queue.pop(); }

@@ -13,11 +13,16 @@ namespace DataChannelUnity.Internal
         public const string DllName = "datachannel_unity";
 #endif
 
+        // 独立编号，刻意不与上游 RTC_ERR_* 逐值相同（SPEC §4）。
         public const int Success = 0;
-        public const int ErrInvalid = -1;
-        public const int ErrFailure = -2;
-        public const int ErrNotAvail = -3;
-        public const int ErrTooSmall = -4;
+        public const int ErrInvalid = (int)DataChannelError.Invalid;
+        public const int ErrFailure = (int)DataChannelError.Failure;
+        public const int ErrNotAvail = (int)DataChannelError.NotAvailable;
+        public const int ErrTooSmall = (int)DataChannelError.TooSmall;
+        public const int ErrUpstreamUnknown = (int)DataChannelError.UpstreamUnknown;
+
+        /// <summary>状态枚举越界时原生侧带出的值（dcu.h 的 DCU_STATE_UNKNOWN）。</summary>
+        public const int StateUnknown = -1;
 
         public enum EventType : int
         {
@@ -78,7 +83,7 @@ namespace DataChannelUnity.Internal
         }
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_abi_version();
+        public static extern int dcu_abi_version(out int version);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_init();
@@ -90,7 +95,7 @@ namespace DataChannelUnity.Internal
         public static extern int dcu_set_log_level(int level);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_pc_create(ref PcConfigNative config);
+        public static extern int dcu_pc_create(ref PcConfigNative config, out int pc);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_pc_close(int pc);
@@ -108,7 +113,7 @@ namespace DataChannelUnity.Internal
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_pc_create_data_channel(
-            int pc, byte[] label, int label_len, ref DcInitNative init);
+            int pc, byte[] label, int label_len, ref DcInitNative init, out int dc);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_dc_send(int dc, byte[] data, int len);
@@ -120,16 +125,16 @@ namespace DataChannelUnity.Internal
         public static extern int dcu_dc_destroy(int dc);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_dc_buffered_amount(int dc);
+        public static extern int dcu_dc_buffered_amount(int dc, out int amount);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_event_peek(out EventHeader header);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_event_copy_payload(byte[] buffer, int capacity);
+        public static extern int dcu_event_copy_payload(byte[] buffer, int capacity, out int len);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_event_copy_payload2(byte[] buffer, int capacity);
+        public static extern int dcu_event_copy_payload2(byte[] buffer, int capacity, out int len);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_event_pop();

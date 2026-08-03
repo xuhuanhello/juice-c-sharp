@@ -39,9 +39,9 @@ namespace DataChannelUnity
             get
             {
                 ThrowIfDisposed();
-                var n = NativeMethods.dcu_dc_buffered_amount(NativeHandle);
-                if (n < 0)
-                    throw new DataChannelException("dcu_dc_buffered_amount failed", n);
+                DataChannelRuntime.RequireOk(
+                    NativeMethods.dcu_dc_buffered_amount(NativeHandle, out var n),
+                    "dcu_dc_buffered_amount");
                 return n;
             }
         }

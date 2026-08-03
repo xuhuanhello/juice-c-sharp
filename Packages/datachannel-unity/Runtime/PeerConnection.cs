@@ -30,8 +30,9 @@ namespace DataChannelUnity
             using (var builder = new NativeConfigBuilder(config))
             {
                 var cfg = builder.Config;
-                var handle = NativeMethods.dcu_pc_create(ref cfg);
-                NativeHandle = DataChannelRuntime.RequireCreate(handle, "dcu_pc_create");
+                DataChannelRuntime.RequireOk(
+                    NativeMethods.dcu_pc_create(ref cfg, out var handle), "dcu_pc_create");
+                NativeHandle = handle;
             }
 
             HandleTable.Register(this);
@@ -60,9 +61,10 @@ namespace DataChannelUnity
                 max_packet_lifetime = init.MaxPacketLifeTime
             };
 
-            var dcHandle = NativeMethods.dcu_pc_create_data_channel(
-                NativeHandle, labelBytes, labelBytes.Length, ref ninit);
-            dcHandle = DataChannelRuntime.RequireCreate(dcHandle, "dcu_pc_create_data_channel");
+            DataChannelRuntime.RequireOk(
+                NativeMethods.dcu_pc_create_data_channel(
+                    NativeHandle, labelBytes, labelBytes.Length, ref ninit, out var dcHandle),
+                "dcu_pc_create_data_channel");
             var dc = new DataChannel(this, dcHandle, label, ownsCreation: true);
             HandleTable.Register(dc);
             return dc;

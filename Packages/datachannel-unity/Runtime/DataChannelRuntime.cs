@@ -33,7 +33,7 @@ namespace DataChannelUnity
             {
                 EnsureNative();
                 if (!_nativeReady) return 0;
-                return NativeMethods.dcu_abi_version();
+                return NativeMethods.dcu_abi_version(out var v) == NativeMethods.Success ? v : 0;
             }
         }
 
@@ -65,7 +65,8 @@ namespace DataChannelUnity
                 {
                     _nativeReady = true;
                     NativeMethods.dcu_set_log_level((int)DataChannelLog.Level);
-                    DataChannelLog.Emit(LogLevel.Info, "Native library initialized (abi=" + NativeMethods.dcu_abi_version() + ").");
+                    NativeMethods.dcu_abi_version(out var abi);
+                    DataChannelLog.Emit(LogLevel.Info, "Native library initialized (abi=" + abi + ").");
                 }
                 else
                 {
@@ -148,13 +149,19 @@ namespace DataChannelUnity
                 if (header.payload_len > 0)
                 {
                     EnsureCapacity(ref _payloadBuf, header.payload_len);
-                    var n = NativeMethods.dcu_event_copy_payload(_payloadBuf, _payloadBuf.Length);
-                    if (n == NativeMethods.ErrTooSmall)
+                    var rcCopy = NativeMethods.dcu_event_copy_payload(
+                        _payloadBuf, _payloadBuf.Length, out var n);
+                    if (rcCopy == NativeMethods.ErrTooSmall)
                     {
-                        EnsureCapacity(ref _payloadBuf, header.payload_len);
-                        n = NativeMethods.dcu_event_copy_payload(_payloadBuf, _payloadBuf.Length);
+                        // TOO_SMALL 带回的是**精确**所需长度，且事件未被消费；单消费者契约
+                        // 保证两次调用之间队首不变，所以扩容后**一次重试必然成功**。
+                        // 不写 while —— 第二次仍失败说明契约被破坏，那是要人看的 bug，
+                        // 循环只会把它变成静默活锁。
+                        EnsureCapacity(ref _payloadBuf, n);
+                        rcCopy = NativeMethods.dcu_event_copy_payload(
+                            _payloadBuf, _payloadBuf.Length, out n);
                     }
-                    if (n >= 0)
+                    if (rcCopy == NativeMethods.Success)
                     {
                         if (header.type == NativeMethods.EventType.DcMessage)
                         {
@@ -166,13 +173,25 @@ namespace DataChannelUnity
                             payload = Encoding.UTF8.GetString(_payloadBuf, 0, n);
                         }
                     }
+                    else
+                    {
+                        DataChannelLog.Emit(LogLevel.Warning,
+                            "dcu_event_copy_payload failed: " + MapError(rcCopy) + " (raw=" + rcCopy + ")");
+                    }
                 }
 
                 if (header.payload2_len > 0)
                 {
                     EnsureCapacity(ref _payload2Buf, header.payload2_len);
-                    var n2 = NativeMethods.dcu_event_copy_payload2(_payload2Buf, _payload2Buf.Length);
-                    if (n2 >= 0)
+                    var rc2 = NativeMethods.dcu_event_copy_payload2(
+                        _payload2Buf, _payload2Buf.Length, out var n2);
+                    if (rc2 == NativeMethods.ErrTooSmall)
+                    {
+                        EnsureCapacity(ref _payload2Buf, n2);
+                        rc2 = NativeMethods.dcu_event_copy_payload2(
+                            _payload2Buf, _payload2Buf.Length, out n2);
+                    }
+                    if (rc2 == NativeMethods.Success)
                         payload2 = Encoding.UTF8.GetString(_payload2Buf, 0, n2);
                 }
 
@@ -201,11 +220,11 @@ namespace DataChannelUnity
                     break;
                 case NativeMethods.EventType.ConnectionState:
                     if (HandleTable.TryGetPc(h.pc, out var pc3))
-                        pc3.RaiseConnectionState((ConnectionState)h.state);
+                        pc3.RaiseConnectionState(MapConnectionState(h.state));
                     break;
                 case NativeMethods.EventType.GatheringState:
                     if (HandleTable.TryGetPc(h.pc, out var pc4))
-                        pc4.RaiseGatheringState((GatheringState)h.state);
+                        pc4.RaiseGatheringState(MapGatheringState(h.state));
                     break;
                 case NativeMethods.EventType.IncomingDataChannel:
                     if (HandleTable.TryGetPc(h.pc, out var pc5))
@@ -234,16 +253,77 @@ namespace DataChannelUnity
             }
         }
 
-        internal static int RequireCreate(int code, string what)
+        /// <summary>
+        /// 把 ABI 的原始返回值映射到 <see cref="DataChannelError"/>。
+        /// 不认识的值落 <see cref="DataChannelError.Unknown"/>，原始数值仍由
+        /// <see cref="DataChannelException.RawCode"/> 带出。
+        /// </summary>
+        internal static DataChannelError MapError(int raw)
         {
-            if (code > 0) return code;
-            throw new DataChannelException(what + " failed with code " + code, code);
+            switch (raw)
+            {
+                case NativeMethods.ErrInvalid: return DataChannelError.Invalid;
+                case NativeMethods.ErrFailure: return DataChannelError.Failure;
+                case NativeMethods.ErrNotAvail: return DataChannelError.NotAvailable;
+                case NativeMethods.ErrTooSmall: return DataChannelError.TooSmall;
+                case NativeMethods.ErrUpstreamUnknown: return DataChannelError.UpstreamUnknown;
+                default: return DataChannelError.Unknown;
+            }
         }
 
+        // RequireCreate 已删除：#31 把 ABI 统一成「返回码 + out 参数」之后，
+        // 「返回值兼作数据」的两种形状都没了，判成功只剩 rc == DCU_OK 一种写法。
         internal static void RequireOk(int code, string what)
         {
             if (code == NativeMethods.Success) return;
-            throw new DataChannelException(what + " failed with code " + code, code);
+            throw NewException(code, what);
+        }
+
+        /// <summary>
+        /// 异常消息分**两类**措辞而非逐码一句：分流的价值是告诉人**该查自己还是该找我们**，
+        /// 再细就是维护负担。<c>RawCode</c> 始终带在消息里。
+        /// </summary>
+        private static DataChannelException NewException(int code, string what)
+        {
+            var err = MapError(code);
+            var selfFixable = err == DataChannelError.Invalid || err == DataChannelError.TooSmall;
+            var message = selfFixable
+                ? what + ": 参数无效 (code=" + err + ", raw=" + code
+                  + ")。检查通道是否已 Dispose、载荷是否超过协商的 MaxMessageSize。"
+                : what + ": 运行时失败 (code=" + err + ", raw=" + code
+                  + ")。这通常不是用法问题，请附 DataChannelLog 输出提 issue。";
+            return new DataChannelException(message, err, code);
+        }
+
+        private static ConnectionState MapConnectionState(int raw)
+        {
+            switch (raw)
+            {
+                case 0: return ConnectionState.New;
+                case 1: return ConnectionState.Connecting;
+                case 2: return ConnectionState.Connected;
+                case 3: return ConnectionState.Disconnected;
+                case 4: return ConnectionState.Failed;
+                case 5: return ConnectionState.Closed;
+                default:
+                    DataChannelLog.Emit(LogLevel.Warning,
+                        "Unrecognised ConnectionState from native: " + raw + " -> Unknown");
+                    return ConnectionState.Unknown;
+            }
+        }
+
+        private static GatheringState MapGatheringState(int raw)
+        {
+            switch (raw)
+            {
+                case 0: return GatheringState.New;
+                case 1: return GatheringState.InProgress;
+                case 2: return GatheringState.Complete;
+                default:
+                    DataChannelLog.Emit(LogLevel.Warning,
+                        "Unrecognised GatheringState from native: " + raw + " -> Unknown");
+                    return GatheringState.Unknown;
+            }
         }
     }
 }
