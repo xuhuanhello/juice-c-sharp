@@ -57,32 +57,32 @@ jobs:
           name: datachannel_unity-macos-arm64
           path: Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
 
-  editmode:
-    name: EditMode tests
-    # 需要 Unity 许可证。维护者配好下列 secrets 后，把仓库变量
-    # ENABLE_UNITY_TESTS 设为 'true' 即可启用（变量可用于 if，secrets 不可）：
-    #   UNITY_LICENSE / UNITY_EMAIL / UNITY_PASSWORD
-    # 未启用时本 job 显示为 skipped —— 这比注释掉一段死代码好：它是活的、
-    # 会随配置自动生效，且在 PR 检查列表里可见。
-    if: ${{ vars.ENABLE_UNITY_TESTS == 'true' }}
+  static-checks:
+    name: Script syntax
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
-      - uses: actions/cache@v4
-        with:
-          path: Library
-          key: Library-${{ hashFiles('Packages/packages-lock.json') }}
-          restore-keys: Library-
-      - uses: game-ci/unity-test-runner@v4
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        with:
-          projectPath: .
-          testMode: EditMode
-          # 原生插件未入库（#35），涉及 native 的用例在 CI 上不可用；
-          # 这里只跑纯托管断言。
-          customParameters: -assemblyNames DataChannelUnity.Tests.Editor
+
+      - name: Shell syntax
+        run: |
+          for s in native/scripts/*.sh; do bash -n "$s"; done
+
+      - name: Python syntax
+        run: |
+          python3 -m py_compile native/scripts/*.py
+
+# ────────────────────────────────────────────────────────────────────────────
+# 这里**故意没有** Unity 测试 job（决策 #43，推翻 #39 决议 1 的门禁归属）。
+#
+# 判据是「要不要 Unity」：需要 Unity 的一律本机在真 Editor 里跑，不需要的才上 CI。
+#
+# 别把它加回来。理由不是麻烦，是那条路会主动制造坏局面：
+# GitHub 不把 secrets 传给来自 fork 的 pull_request，但 vars 是可见的 ——
+# 一旦上游把 ENABLE_UNITY_TESTS 设为 true，外部 PR 会启动 job、拿到空许可证、
+# 变红，而贡献者自己没有任何修法。
+#
+# 三档 C# 测试（托管 / native EditMode / native PlayMode）的执行方式见
+# docs/verification-mcp.md；门禁条文见 CONTRIBUTING.md；判据见 SPEC §11。
+#
+# 已知且接受的代价：没有任何自动门禁覆盖 C#，编译错误要等打开 Editor 才发现。
+# ────────────────────────────────────────────────────────────────────────────

@@ -820,13 +820,13 @@ Risk order: WebGL > iOS > Win arm64 > Android > macOS > Win x64.
 | Role | Builds | Checks |
 |------|--------|--------|
 | **Local (default)** | **mac only** (`native/scripts/build-macos-arm64.sh`, optional x64) | Developer may run `audit-macos-plugin.sh` |
-| **CI** | **Full matrix** | Link audit (no system crypto dylibs), export allowlist (`dcu_*` only), managed-tier tests (§11) |
+| **CI** | **Full matrix** | Link audit (no system crypto dylibs), export allowlist (`dcu_*` only), script-executable-bit assertion, shell/Python syntax. **No Unity, therefore no C# tests** — §11 |
 
 ### Rules the workflows must keep
 
 - **No dependency installation that contradicts §3/§9.** `brew install openssl@3` + `OPENSSL_ROOT` was removed: it directly conflicts with the fully static vendored MbedTLS product path, which means that job had in fact been broken.
 - **No fallback `chmod +x`.** Instead the workflow **asserts** the scripts are executable and, on failure, prints the correct fix (`git update-index --chmod=+x`). Deleting the fallback alone would only fix today; the assertion makes the same regression surface immediately next time (§11).
-- **Disabled jobs stay visible.** The Unity test job is gated on `if: vars.ENABLE_UNITY_TESTS == 'true'` rather than commented out — `secrets` cannot be used in a job-level `if`, `vars` can. When unset it shows as *skipped*: visible, and therefore not forgotten.
+- **No Unity job, and the workflow says why in place.** A licensed Unity job was removed rather than left permanently skipped ([#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43), §11) — a job that will never be enabled is a gate-shaped thing that is not a gate. The comment left in its place exists so the next person does not reach for a licence again.
 
 ### Plugin binaries and LFS
 
@@ -836,7 +836,7 @@ Plugin binaries are **not** committed until the matrix produces all of them — 
 
 | Gate | Requirement |
 |------|-------------|
-| **PR** | EditMode + **at least one mac build + audit** |
+| **PR** | **At least one mac build + audit** (automated) + the local checklist in `CONTRIBUTING.md` (not automated — §11) |
 | **Release / maintainer LFS commit** | **Full matrix green**; artifacts → maintainer commit to `Plugins/` + Git LFS |
 
 ### GitHub Actions (spec-level matrix)
@@ -870,21 +870,41 @@ Workflow skeleton: `.github/workflows/pr.yml` (light), `.github/workflows/plugin
 - The sample is a **human-facing demo, not a gate**. Its protocol choreography is intentionally duplicated by the PlayMode smoke test: `Samples~` is never compiled by Unity, so no asmdef can reference it, and hoisting the choreography into `Runtime/` would ship test scaffolding in the public API. The two are not copies of one thing — they are two things for two audiences (a readable `MonoBehaviour` with narration; an assertion-only `[UnityTest]`).
 - Not required: public STUN/TURN lab scene; FishNet sample.
 
+### Where things run
+
+**Decision:** [#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43)
+
+The dividing line is **"does it need Unity?"** Anything that does runs **locally, in a real Editor**; only what does not need Unity runs in CI.
+
+| | Runs where |
+|--|-----------|
+| All three C# test tiers (below) | **Local Unity Editor** |
+| Native build, exported-symbol diff, crypto-dylib audit, script-executable-bit assertion | **CI** — `native-macos-arm64`, on every PR and push to `main` |
+| Shell / Python syntax checks | **CI** |
+
+**Unity tests must not be added to CI.** The reason is not cost or convenience: GitHub does not pass repository secrets to `pull_request` runs from a fork, but **repository variables are visible**. Enabling a licensed Unity job upstream therefore means every external contributor's PR starts the job, receives an empty licence, and turns red on something unrelated to their change and unfixable by them. (The converse worry — that a contributor could exfiltrate the maintainer's licence — does not arise for the same reason; that risk belongs to `pull_request_target`, which this repo does not use.)
+
+Tests that need Unity are also simply more trustworthy inside a real Editor: the PlayerLoop, domain reload and plugin loading are exactly the counter-intuitive paths the gate list exists for, and a CI-shaped imitation of them buys less confidence than it costs.
+
+> **Accepted cost, stated rather than hidden: no automated gate covers C# at all.** A compile error in `Runtime/` is caught when the Editor is next opened, not by CI. For a single-maintainer package whose author has the Editor open daily this is a reasonable trade — but nobody should read this spec and believe there is a net under the C# side. **The automated gate that turns red is the native build + audit job.**
+>
+> Compiling the pure-managed logic into a plain .NET project so `dotnet test` could gate it in CI is **rejected**: it means maintaining a second compilation of the same sources to verify what the maintainer's Editor verifies anyway. Recorded here so it is not repeatedly rediscovered.
+
 ### Test tiers
 
-Tier boundary is **"does it need the native plugin loaded?"** — which is exactly the CI-reachability boundary, since plugin binaries are not committed.
+Tier boundary is **"does it need the native plugin loaded?"**
 
-| Tier | Assembly | Content | Runner |
-|------|----------|---------|--------|
-| **Managed** | `DataChannelUnity.Tests.Editor` | Pure C# contracts, zero P/Invoke | **CI — the only automated gate that turns red** |
-| **Native / EditMode** | `DataChannelUnity.Tests.Editor.Native` | Contracts requiring the plugin | Local Editor |
-| **Native / PlayMode** | `DataChannelUnity.Tests.Runtime` | Dual-peer loopback, PlayerLoop pump | Local Editor; headless `-runTests -testPlatform PlayMode` |
+| Tier | Assembly | Content |
+|------|----------|---------|
+| **Managed** | `DataChannelUnity.Tests.Editor` | Pure C# contracts, zero P/Invoke |
+| **Native / EditMode** | `DataChannelUnity.Tests.Editor.Native` | Contracts requiring the plugin |
+| **Native / PlayMode** | `DataChannelUnity.Tests.Runtime` | Dual-peer loopback, PlayerLoop pump; headless via `-runTests -testPlatform PlayMode` |
 
-**Tier selection happens at the call site** (assembly filter), never inside a test. Assembly separation is chosen over `[Category("Native")]` because it fails safe: CI already filters by assembly name and needs no change, and native tests are physically absent from what it compiles. A category would require CI to *remember* an exclusion flag — and the principle below exists precisely to stop relying on remembering.
+The split survives the decision above, but for a different reason than it was originally given: not CI reachability, but **local ergonomics** — when the plugin is missing or freshly broken, the managed tier still runs, and that is exactly when knowing the pure logic is intact is worth most.
+
+**Tier selection happens at the call site** (assembly filter), never inside a test. Assembly separation is chosen over `[Category("Native")]` because it fails safe: a category would require whoever runs the suite to *remember* an exclusion flag, and the principle below exists precisely to stop relying on remembering.
 
 The PlayMode tier exists for what EditMode structurally cannot cover: `RegisterPump()` installs into `PlayerLoop`, so the smoke test must assert that messages flow **without anyone calling `Pump()` manually**. (Today no verification covers the registration path at all; the Edit-mode loopback calls `Pump()` by hand.)
-
-> **CI upgrade path, recorded but not adopted:** move the `editmode` job to `macos-latest` with `needs:` the native build job and `download-artifact`, and the native tiers become CI-runnable. Not adopted while no link in that chain is live (`UNITY_LICENSE` unset, `ENABLE_UNITY_TESTS` off) — a gate defined in terms of a dead chain is a gate that never runs.
 
 ### Hard constraint: absence must be failure
 
@@ -1096,6 +1116,12 @@ The scaffold, the CMake build, the desktop plugin and a first pass at the event 
 | Write these decisions back | [#40](https://github.com/xuhuanhello/juice-c-sharp/issues/40) | — |
 | C API vs C++ API research | [#41](https://github.com/xuhuanhello/juice-c-sharp/issues/41) | §2 |
 | C API vs C++ API decision | [#42](https://github.com/xuhuanhello/juice-c-sharp/issues/42) | §2 |
+
+### After the maps closed
+
+| Topic | Issue | Section |
+|-------|-------|---------|
+| Unity tests do not run in CI (supersedes part of #39) | [#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43) | §10, §11 |
 
 ---
 

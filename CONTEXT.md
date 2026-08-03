@@ -75,7 +75,8 @@
 
 ## Verification
 
-- **Test tiers** — Managed (no plugin, the only red-turning CI gate), Native/EditMode, Native/PlayMode. Split by **assembly**, not category, so CI needs no exclusion flag to remember.
+- **Test tiers** — Managed (no plugin needed), Native/EditMode, Native/PlayMode. Split by **assembly**, not category, so nobody has to remember an exclusion flag. All three run **locally in a real Editor**.
+- **"Does it need Unity?"** — The CI boundary. Unity never runs in CI (a licensed job would turn every fork PR red on an empty secret), so the only automated red-turning gate is the **native build + audit**; nothing automated covers C#.
 - **Absence must be failure** — `Assert.Ignore`, fallback `chmod`, `|| true` and ignored exit codes are one disease: they make "never ran" and "ran, green" look identical.
 - **Required contract** — A test earns a place on the gate list only if measurement or research **overturned an intuition**. Gates exist to stop a future implementer from reverting a decision by instinct.
 - **Machine-judged** — Even manual steps must produce an assertable artifact; reading a line out of the Console does not count.

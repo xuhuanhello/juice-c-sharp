@@ -35,7 +35,9 @@ It is written as a principle rather than three bans because a list of bans only 
 Applies to any change under `native/`, `Packages/datachannel-unity/Runtime/`, or the plugin packaging.
 
 1. **Check the sequencing constraint first.** The libdatachannel C++ API migration must land **before** the ownership / event-ABI / error-code / lifecycle rewrites (SPEC §2, §14). If your change is one of those and the migration has not happened, do the migration first.
-2. **Managed tier green** — `DataChannelUnity.Tests.Editor`. This is the only tier CI enforces today, so it is also the only one that will stop you automatically. Everything below is on you.
+2. **Managed tier green** — `DataChannelUnity.Tests.Editor`, in your local Editor.
+
+   > **Nothing on this list is enforced by CI.** Unity does not run in CI at all ([#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43), SPEC §11): licensing a Unity job would turn every fork PR red on an empty secret, and tests that need Unity are worth more inside a real Editor anyway. CI runs the native build, the exported-symbol diff, the crypto-dylib audit, the script-executable-bit assertion and shell/Python syntax — **that is the only thing that will stop you automatically.** Everything below is on you.
 3. **Native tiers green** — `DataChannelUnity.Tests.Editor.Native` and `DataChannelUnity.Tests.Runtime`. A tier that reports **zero tests run** is a failure, not a pass: it means the plugin did not load.
 4. **Offline native gate** — `native/scripts/audit-macos-plugin.sh` exits 0, with the exported-symbol diff clean against `native/exports/expected-symbols.txt`.
 5. **If you changed the ABI on purpose** — update `expected-symbols.txt` and bump `DCU_ABI_VERSION` **in the same commit**. That is the whole reason the expectations file lists names rather than a count: the two changes land in one diff, so a forgotten bump is visible in review.
