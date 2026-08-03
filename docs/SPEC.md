@@ -1054,7 +1054,7 @@ The scaffold, the CMake build, the desktop plugin and a first pass at the event 
 3. **Rewrite the managed layer** (§6): ownership and cascade disposal, weak lookup table, enqueue-only finalizers, the two-segment pump with per-subscriber isolation and snapshot iteration, the `fixed` send path, the naming and visibility changes, config validation.
 4. **Log bridge and credential path** (§7): bounded log queue, non-detaching level changes, structured `rtc::IceServer` assignment, one-directional initialization.
 5. **Lifecycle wiring** (§6): the five domain / play-mode / quit scenarios.
-6. **Tests** (§11): three assemblies, the required-contract list, the exported-symbol diff, the persistent domain-reload probe; delete `Assets/DataChannelVerify/`.
+6. **Tests** (§11): three assemblies, the required-contract list, the persistent domain-reload probe; delete `Assets/DataChannelVerify/`. *(The exported-symbol diff was pulled forward out of this step — it gates step 2, so it had to exist first, and it is already in place.)*
 7. Expand plugins: Android → iOS → Win arm64 → WebGL (+ jslib).
 8. `CONTRIBUTING.md` gates in force; GHA + LFS maintainer flow.
 9. ThirdPartyNotices + README (signaling ownership, signing, platforms).

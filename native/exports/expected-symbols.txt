@@ -1,0 +1,36 @@
+# 插件应当导出的 dcu_* 符号清单（SPEC §11）。
+#
+# 这里是**符号名逐条列举**，不是计数。计数放过改名（dcu_dc_state 打成
+# dcu_dc_stat 照样绿），也放过「删一个加一个」的意外净零变化。
+#
+# 改动本文件即声明这是一次**有意的 ABI 变更**，必须与 dcu.h 的
+# DCU_ABI_VERSION bump 落在**同一个 commit**里 —— 这样评审时忘记 bump 一眼可见。
+# 这是本文件唯一的维护成本，也正是它存在的理由。
+#
+# 由 native/scripts/audit-macos-plugin.sh 逐行 diff 实际导出，不符即非零退出。
+# 允许 # 注释与空行；其余每行一个符号名（不带平台前缀下划线），顺序无关。
+#
+# 当前对应 DCU_ABI_VERSION = 1。SPEC §4 定义的目标形态是 19 个导出、
+# DCU_ABI_VERSION = 2，属 §14 第 2 步，尚未实现。
+
+dcu_abi_version
+dcu_init
+dcu_shutdown
+dcu_set_log_level
+
+dcu_pc_create
+dcu_pc_close
+dcu_pc_destroy
+dcu_pc_set_remote_description
+dcu_pc_add_remote_candidate
+dcu_pc_create_data_channel
+
+dcu_dc_send
+dcu_dc_close
+dcu_dc_destroy
+dcu_dc_buffered_amount
+
+dcu_event_peek
+dcu_event_copy_payload
+dcu_event_copy_payload2
+dcu_event_pop
