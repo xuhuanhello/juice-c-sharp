@@ -1,45 +1,69 @@
-# Full plugin matrix (map #20): run on release, schedule, or workflow_dispatch.
-# Maintainer downloads artifacts and commits LFS plugins (map #13) — no auto-push to main.
+# 完整插件矩阵（map #20）：发版 / 定时 / 手动触发。
+# 维护者下载 artifact 后自行提交 LFS 插件（map #13）—— 不自动推 main。
 name: Plugins matrix
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * 1" # weekly Monday 06:00 UTC
+    - cron: "0 6 * * 1" # 每周一 06:00 UTC
   release:
     types: [published]
 
 jobs:
   macos-arm64:
+    name: macOS arm64
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: brew install cmake ninja openssl@3
-      - run: |
-          chmod +x native/scripts/*.sh
-          OPENSSL_ROOT="$(brew --prefix openssl@3)" ./native/scripts/build-macos-arm64.sh
+
+      # 只要 cmake + ninja。
+      # 曾经这里装 openssl@3 并传 OPENSSL_ROOT —— 与 #17/#23/#25 锁定的
+      # 「全静态 vendored MbedTLS、禁止 brew/系统 crypto 作为产品路径」直接冲突，
+      # 且脚本早已不读该变量。已移除。
+      - name: Install build tools
+        run: brew install cmake ninja
+
+      # 与 pr.yml 同款：不做兜底 chmod，让模式回归暴露出来（见 #35）
+      - name: Assert scripts are executable (no chmod fallback)
+        run: |
+          fail=0
+          for s in native/scripts/*.sh native/scripts/*.py; do
+            if [[ ! -x "$s" ]]; then
+              echo "::error file=$s::缺少可执行位。请用 'git update-index --chmod=+x $s' 修正。"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Fetch pinned upstream deps
+        run: ./native/scripts/fetch-deps.sh
+
+      - name: Build plugin (CMake)
+        run: ./native/scripts/build-macos-arm64.sh
+
+      - name: Audit plugin (symbols + no forbidden crypto dylibs)
+        run: |
+          ./native/scripts/audit-macos-plugin.sh \
+            Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
+
       - uses: actions/upload-artifact@v4
         with:
           name: plugins-macos-arm64
           path: Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
 
-  # --- Scaffold only: enable as scripts land ---
-  # macos-x64:
-  #   runs-on: macos-13
-  #   steps: ... build-macos-x64.sh
+  # --- 骨架：随各平台构建脚本落地逐个启用 ---
   #
-  # windows-x64:
-  #   runs-on: windows-latest
-  #   steps: ... build-windows-x64.ps1 + dumpbin audit
+  # 通用形状（照抄上面的 macos-arm64）：装 cmake+ninja → 断言可执行位 →
+  # fetch-deps → 构建 → 平台对应的 audit → 上传 artifact。
+  # 交叉编译一律通过 -DCMAKE_TOOLCHAIN_FILE=native/cross/<平台>.cmake 传入
+  # （#27 之后平台映射跟随 CMAKE_SYSTEM_NAME/PROCESSOR，不再按 host 猜）。
   #
-  # android-arm64:
-  #   runs-on: ubuntu-latest
-  #   steps: ... NDK + build-android-arm64.sh
+  # macos-x64:     runs-on: macos-13    —— -DCMAKE_OSX_ARCHITECTURES=x86_64
+  # windows-x64:   runs-on: windows-latest —— audit 换 dumpbin /exports
+  # windows-arm64: runs-on: windows-latest —— 交叉，需 toolchain file
+  # android-arm64: runs-on: ubuntu-latest  —— NDK toolchain file，audit 换 readelf --dyn-syms
+  # ios-arm64:     runs-on: macos-latest   —— 静态 .a，audit 换 nm -gU
+  # webgl:         runs-on: ubuntu-latest  —— Unity 的 Emscripten 3.1.8-unity + datachannel-wasm
   #
-  # ios-arm64:
-  #   runs-on: macos-latest
-  #   steps: ... build-ios-arm64.sh
-  #
-  # webgl:
-  #   runs-on: ubuntu-latest
-  #   steps: ... Unity Emscripten 3.1.8-unity + datachannel-wasm
+  # 注：WebGL 后端的形状与 native 差异很大（datachannel-wasm 的 Channel 没有
+  # receive/peek/availableAmount，无接收队列、无背压），详见 #30 与 #41。
