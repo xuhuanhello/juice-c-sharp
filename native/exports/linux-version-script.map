@@ -1,6 +1,0 @@
-{
-  global:
-    dcu_*;
-  local:
-    *;
-};

@@ -5,6 +5,13 @@
 #   3. 导出集必须与 native/exports/expected-symbols.txt **逐个符号**一致
 #
 # 第 3 条刻意不是计数。计数放过改名，也放过「删一个加一个」的净零变化。
+#
+# 第 3 条的作用范围在「白名单改为生成物」之后变窄了，这里写明，免得后人高估它：
+# 链接期白名单现在由 gen_exports.py 从同一份 expected-symbols.txt 生成，所以
+# 「有人从清单里删掉一个名字」不再被本脚本发现（实际导出会跟着少一个，两边照样
+# 相等）。那一类由 gen_exports.py 的 DCU_API 交叉校验在**配置期**拦下。
+# 本脚本第 3 条仍然拦得住的是：清单里有、二进制里却没有（声明并列入了清单，但
+# 实现缺失或改名），以及产物根本不是这次构建出来的那一份。
 set -euo pipefail
 BIN="${1:?usage: audit-macos-plugin.sh <path-to-bundle-or-dylib>}"
 

@@ -6,7 +6,7 @@
 #   native/subprojects/mbedtls/            上游，由 scripts/fetch-deps.sh 拉取
 #   native/subprojects/libdatachannel/     同上
 #   native/mbedtls/user_config.h   MbedTLS 用户配置（DTLS-SRTP）
-#   native/exports/                各平台的导出符号白名单
+#   native/exports/                唯一手写的导出符号清单（各平台白名单由它生成）
 #
 # 用法：
 #   ./scripts/fetch-deps.sh
@@ -55,6 +55,36 @@ if(NOT EXISTS "${DCU_SRC}/src/dcu_impl.cpp")
   message(FATAL_ERROR "缺少 ${DCU_SRC}/src/dcu_impl.cpp（项目自有源码，应随仓库提供）")
 endif()
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+# ---------- 各平台导出白名单：从唯一权威清单生成 ----------
+# 仓库里只手写 expected-symbols.txt 一份；三种链接器格式是**生成物**，
+# 落在构建目录、不入库（决议 #50）。入库的生成物会成为第二个真相源，
+# 而那正是这条决议要消灭的病 —— 曾经入库的 windows-exports.def 就烂了：
+# 带着 S2 已删除的四个符号（会 LNK2001 硬失败），又缺六个现存符号（静默通过）。
+set(DCU_EXPECTED_SYMBOLS "${EXPORTS_DIR}/expected-symbols.txt")
+set(DCU_GEN_EXPORTS_DIR  "${CMAKE_BINARY_DIR}/exports")
+
+# 改动权威清单必须触发重新配置。#27 拆掉 Meson 的理由之一就是「改了源文件
+# 不触发重建」—— 同一个缺陷不要在这里复现。
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${DCU_EXPECTED_SYMBOLS}" "${DCU_SRC}/include/dcu.h")
+
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}" "${NATIVE_ROOT}/scripts/gen_exports.py"
+          --expected "${DCU_EXPECTED_SYMBOLS}"
+          --header   "${DCU_SRC}/include/dcu.h"
+          --out-dir  "${DCU_GEN_EXPORTS_DIR}"
+  RESULT_VARIABLE DCU_GEN_EXPORTS_RC
+  OUTPUT_VARIABLE DCU_GEN_EXPORTS_OUT
+  ERROR_VARIABLE  DCU_GEN_EXPORTS_ERR
+)
+if(NOT DCU_GEN_EXPORTS_RC EQUAL 0)
+  message(FATAL_ERROR
+    "生成导出白名单失败（rc=${DCU_GEN_EXPORTS_RC}）：\n${DCU_GEN_EXPORTS_ERR}")
+endif()
+message(STATUS "${DCU_GEN_EXPORTS_OUT}")
+
 # ---------- MbedTLS 3.6.x 静态 + DTLS-SRTP ----------
 set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
@@ -100,25 +130,30 @@ set_target_properties(datachannel_unity PROPERTIES
   PREFIX "lib"
 )
 
-# 仅导出 dcu_*（决策 #18）
+# 仅导出 dcu_*（决策 #18）。白名单是生成物，见上面的 gen_exports.py 块。
 if(APPLE)
   target_link_libraries(datachannel_unity PRIVATE
     "-framework CoreFoundation"
     "-framework Security"
   )
+  set(DCU_EXPORT_FILE "${DCU_GEN_EXPORTS_DIR}/macos-exported-symbols.txt")
   target_link_options(datachannel_unity PRIVATE
-    "LINKER:-exported_symbols_list,${EXPORTS_DIR}/macos-exported-symbols.txt"
+    "LINKER:-exported_symbols_list,${DCU_EXPORT_FILE}"
   )
 elseif(WIN32)
-  target_link_options(datachannel_unity PRIVATE
-    "/DEF:${EXPORTS_DIR}/windows-exports.def"
-  )
+  set(DCU_EXPORT_FILE "${DCU_GEN_EXPORTS_DIR}/windows-exports.def")
+  target_link_options(datachannel_unity PRIVATE "/DEF:${DCU_EXPORT_FILE}")
 else()
+  set(DCU_EXPORT_FILE "${DCU_GEN_EXPORTS_DIR}/linux-version-script.map")
   target_link_options(datachannel_unity PRIVATE
-    "LINKER:--version-script=${EXPORTS_DIR}/linux-version-script.map"
+    "LINKER:--version-script=${DCU_EXPORT_FILE}"
     "LINKER:--exclude-libs,ALL"
   )
 endif()
+
+# 白名单变了就必须重链。少了这条，改 expected-symbols.txt 会重新配置、
+# 重新生成白名单，却仍然沿用旧的 .dylib —— 又是「改了源文件不重建」。
+set_target_properties(datachannel_unity PROPERTIES LINK_DEPENDS "${DCU_EXPORT_FILE}")
 
 # ---------- 暂存进 UPM Plugins 布局 ----------
 # 平台映射走 CMAKE_SYSTEM_*，因此交叉编译时会跟随 toolchain file，
@@ -141,8 +176,6 @@ if(DCU_STAGE_PLUGIN)
   else()
     set(DCU_PLUGIN_REL "Linux/${CMAKE_SYSTEM_PROCESSOR}")
   endif()
-
-  find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
   add_custom_command(TARGET datachannel_unity POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"
