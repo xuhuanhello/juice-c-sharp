@@ -31,7 +31,7 @@ namespace DataChannelUnity.Tests
 #endif
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        private static extern int dcu_shutdown();
+        private static extern int dcu_shutdown(out int undestroyed);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int dcu_init();
@@ -59,11 +59,12 @@ namespace DataChannelUnity.Tests
                 "控制事件队列没排空。队列无界、永不丢事件，积压只可能来自"
                 + "「pump 没跑」或「某个回调卡住了」。");
 
-            var rc = dcu_shutdown();
+            var rc = dcu_shutdown(out var undestroyed);
 
-            // 与 Editor.Native 档同一条注记：这条今天只覆盖「shutdown 没失败」，
-            // 「返回未销毁对象数」随 S8（#37 决议 7）落地。
-            Assert.AreEqual(0, rc, "dcu_shutdown 未干净返回（0 = OK / 无未销毁对象）。");
+            Assert.AreEqual(0, rc, "dcu_shutdown 调用本身失败。");
+            // 与 Editor.Native 档同一条：S8 之后这里才真的看住了「漏了几个」。
+            Assert.AreEqual(0, undestroyed,
+                "套件跑完时仍有 " + undestroyed + " 个原生对象没被销毁。");
 
             // 断言之后恢复原生库状态，见 Editor.Native 档同名方法的说明。
             dcu_init();

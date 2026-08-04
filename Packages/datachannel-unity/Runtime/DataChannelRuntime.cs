@@ -10,7 +10,7 @@ namespace DataChannelUnity
     /// <summary>
     /// Library lifecycle and main-thread event pump.
     /// </summary>
-    public static class DataChannelRuntime
+    public static partial class DataChannelRuntime
     {
         // 可观测性阈值。全部是 **internal 常量，不开配置面**（SPEC §6）：给旋钮就要
         // 定义语义、写进规格、测它，而没有任何证据说这些值是错的。90fps VR 与 30fps
@@ -46,6 +46,10 @@ namespace DataChannelUnity
         private static readonly System.Collections.Generic.List<DataChannel> ChannelSnapshot =
             new System.Collections.Generic.List<DataChannel>();
 
+        // DisposeAllLive 用。不在热路径上，但没理由每次新建。
+        private static readonly System.Collections.Generic.List<PeerConnection> PeerSnapshot =
+            new System.Collections.Generic.List<PeerConnection>();
+
         public static bool IsNativeAvailable
         {
             get
@@ -67,9 +71,23 @@ namespace DataChannelUnity
             }
         }
 
+        /// <summary>
+        /// 进入播放模式。**同时覆盖 Reload Domain 开与关两种配置**（#37 决议 4）。
+        /// </summary>
+        /// <remarks>
+        /// Reload Domain **关**的时候，静态量不会被域重载清掉 —— 上一次播放模式的
+        /// 对象会原样漏进这一次。所以先精确释放一遍再重置。
+        ///
+        /// Reload Domain **开**的时候域刚重建，表本来就是空的，
+        /// <see cref="DisposeAllLive"/> 是个空操作。**一条路径覆盖两种配置**，
+        /// 不需要先判断自己身处哪一种 —— 那种判断正是容易写反的东西。
+        ///
+        /// 这里**不 shutdown**：域还活着，用精确工具就够了。
+        /// </remarks>
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         private static void ResetStaticsOnEnterPlayMode()
         {
+            DisposeAllLive();
             _nativeReady = false;
             _initAttempted = false;
             _pumpRegistered = false;
@@ -89,6 +107,25 @@ namespace DataChannelUnity
         {
             EnsureNative();
             RegisterPump();
+            Application.quitting -= OnApplicationQuitting;
+            Application.quitting += OnApplicationQuitting;
+        }
+
+        /// <summary>
+        /// Player 退出：**只 <see cref="DisposeAllLive"/>，不 shutdown**（#37 决议 6）。
+        /// </summary>
+        /// <remarks>
+        /// 两半的价值完全不对称。<see cref="DisposeAllLive"/> 会发出 DTLS/SCTP 关闭
+        /// 通知，**对端立刻知道你走了**，而不是干等一次 ICE 超时 —— 对一个 P2P 库
+        /// 这是实打实的对外价值。而在一个即将终止的进程里回收线程池毫无意义，
+        /// <c>rtcCleanup</c> 却可能阻塞约 10 秒：iOS 终止时只给约 5 秒，Android 可能 ANR。
+        ///
+        /// 另注：这条钩子在 iOS（挂起而非退出）与 Android（后台被杀）**经常不触发**，
+        /// 见 SPEC §6。「切后台要不要主动断连」是产品语义，本包不替应用决定。
+        /// </remarks>
+        private static void OnApplicationQuitting()
+        {
+            DisposeAllLive();
         }
 
         /// <summary>
@@ -159,6 +196,95 @@ namespace DataChannelUnity
                     + "若这是有意的（自定义循环），请自行每帧调 DataChannelRuntime.Pump()。");
             PlayerLoop.SetPlayerLoop(loop);
             _pumpRegistered = true;
+        }
+
+        /// <summary>把 pump 从 <c>PlayerLoop</c> 摘掉。找不到条目不算失败。</summary>
+        internal static void UnregisterPump()
+        {
+            _pumpRegistered = false;
+            var loop = PlayerLoop.GetCurrentPlayerLoop();
+            if (loop.subSystemList == null) return;
+
+            var changed = false;
+            for (int i = 0; i < loop.subSystemList.Length; i++)
+            {
+                var subs = loop.subSystemList[i].subSystemList;
+                if (subs == null) continue;
+                var kept = new System.Collections.Generic.List<PlayerLoopSystem>(subs.Length);
+                for (int j = 0; j < subs.Length; j++)
+                {
+                    if (subs[j].type == typeof(DataChannelRuntime)) changed = true;
+                    else kept.Add(subs[j]);
+                }
+                if (changed) loop.subSystemList[i].subSystemList = kept.ToArray();
+            }
+            if (changed) PlayerLoop.SetPlayerLoop(loop);
+        }
+
+        /// <summary>
+        /// 精确释放当前所有存活对象。**域还活着时用的工具** —— 我们还握着引用，
+        /// 就不该抡 <c>dcu_shutdown</c> 那把大锤（#37 的贯穿原则）。
+        /// </summary>
+        /// <remarks>
+        /// 只遍历 PC 就够：每条 DataChannel 都由某个 PC 拥有，<c>Dispose</c> 会级联
+        /// 带走（#29 决议 1）。之后仍扫一遍 DC 收尾 —— 若真出现「表里有 DC 而它的 PC
+        /// 不在表里」，那是簿记出了错，得让它被释放而不是被忽略。
+        ///
+        /// 幂等：已 <c>Dispose</c> 的对象再调一次是空操作（S6 的门禁盯着这条）。
+        /// </remarks>
+        internal static void DisposeAllLive()
+        {
+            HandleTable.SnapshotPeerConnections(PeerSnapshot);
+            for (int i = 0; i < PeerSnapshot.Count; i++)
+            {
+                try { PeerSnapshot[i].Dispose(); }
+                catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "DisposeAllLive: 释放 PeerConnection 失败", e); }
+            }
+            PeerSnapshot.Clear();
+
+            HandleTable.SnapshotDataChannels(ChannelSnapshot);
+            for (int i = 0; i < ChannelSnapshot.Count; i++)
+            {
+                var dc = ChannelSnapshot[i];
+                if (dc == null || dc.IsDisposed) continue;
+                try { dc.Dispose(); }
+                catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "DisposeAllLive: 释放 DataChannel 失败", e); }
+            }
+            ChannelSnapshot.Clear();
+        }
+
+        /// <summary>
+        /// 抡大锤。**只在域将死时用**，并把未销毁对象数如实报出来。
+        /// </summary>
+        /// <remarks>
+        /// 正常收尾这个数应当是 0 —— 因为调用方总是先 <see cref="DisposeAllLive"/>。
+        /// 非 0 意味着有对象在托管侧已经失联（应用忘了 Dispose，且它已被 GC 而
+        /// 终结器只入队不销毁原生对象），这正是这个计数存在的理由。
+        /// </remarks>
+        private static void ShutdownNative()
+        {
+            if (!_nativeReady) return;
+            try
+            {
+                var rc = NativeMethods.dcu_shutdown(out var undestroyed);
+                if (rc != NativeMethods.Success)
+                    DataChannelLog.Emit(LogLevel.Error,
+                        "dcu_shutdown 失败：" + MapError(rc) + "（raw=" + rc + "）。"
+                        + "上游 Cleanup 超时会落到这里 —— 通常意味着有对象析构时卡住了。");
+                else if (undestroyed > 0)
+                    DataChannelLog.Emit(LogLevel.Error,
+                        "dcu_shutdown 时仍有 " + undestroyed + " 个原生对象未被销毁。"
+                        + "它们是被强行丢弃的，不是正常释放的 —— 说明有 PeerConnection / DataChannel "
+                        + "没被 Dispose，且托管侧已经失联。Editor / Development 构建下"
+                        + "泄漏诊断会点名到创建栈（DataChannelLog.LeakDetection）。");
+            }
+            catch (DllNotFoundException) { }
+            catch (EntryPointNotFoundException) { }
+            catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "dcu_shutdown 抛出异常", e); }
+
+            // 允许之后重新 init：域重载后 EnsureNative 得能再走一遍。
+            _nativeReady = false;
+            _initAttempted = false;
         }
 
         private static bool InsertPump(ref PlayerLoopSystem loop)

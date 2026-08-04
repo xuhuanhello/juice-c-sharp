@@ -84,6 +84,25 @@ namespace DataChannelUnity.Internal
         }
 
         /// <summary>
+        /// 把当前所有存活的 PeerConnection 拷进调用方提供的 List。
+        /// </summary>
+        /// <remarks>
+        /// 供 <c>DisposeAllLive()</c> 用（#37）。只需要 PC —— 每个 DataChannel 都由
+        /// 某个 PC 拥有，<c>PeerConnection.Dispose</c> 会级联带走它们（#29 决议 1）。
+        /// 调用方仍会再扫一遍 DC 收尾，因为「表里有 DC 而它的 PC 已经不在表里」
+        /// 这件事若真发生了，那是簿记出了错，得让它被释放而不是被忽略。
+        /// </remarks>
+        public static void SnapshotPeerConnections(List<PeerConnection> into)
+        {
+            into.Clear();
+            lock (Gate)
+            {
+                foreach (var kv in Pcs)
+                    if (kv.Value.TryGetTarget(out var pc)) into.Add(pc);
+            }
+        }
+
+        /// <summary>
         /// 把当前所有存活的 DataChannel 拷进调用方提供的复用 List，**并顺带清扫**
         /// 两张表里目标已被回收的条目。
         /// </summary>

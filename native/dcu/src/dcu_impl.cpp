@@ -276,20 +276,25 @@ int dcu_init(void) {
     });
 }
 
-int dcu_shutdown(void) {
+int dcu_shutdown(int *out_undestroyed) {
+    if (!out_undestroyed)
+        return DCU_ERR_INVALID;
+    *out_undestroyed = 0;
     if (!g_inited.exchange(false))
         return DCU_OK;
     // 顺序对应上游 rtcCleanup：先丢对象（eraseAll），再 Cleanup。队列在对象销毁
     // **之后**清，这样销毁期间回调推进来的事件也一并清掉。
-    return dcu_wrap([] {
-        g_table.clear();
+    return dcu_wrap([out_undestroyed] {
+        // clear() 返回它丢掉的对象数 —— 那正是「到调用 shutdown 为止都没人销毁的」。
+        // 托管侧把它当泄漏账单用：正常收尾应当是 0，因为域将死之前会先
+        // DisposeAllLive() 精确释放一遍（#37 决议 2、5）。
+        *out_undestroyed = static_cast<int>(g_table.clear());
         g_queue.clear();
         g_log_queue.clear();
         if (rtc::Cleanup().wait_for(std::chrono::seconds(10)) == std::future_status::timeout)
             throw std::runtime_error("Cleanup timeout (possible deadlock or undestructible object)");
         return DCU_OK;
     });
-    // 返回未销毁对象数（经 out 参数）归 #37 决议 7，随 S8 落地。
 }
 
 int dcu_set_log_level(int level) {

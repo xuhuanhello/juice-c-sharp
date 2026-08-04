@@ -37,7 +37,7 @@ namespace DataChannelUnity.Tests
         private const string Dll = "datachannel_unity";
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        private static extern int dcu_shutdown();
+        private static extern int dcu_shutdown(out int undestroyed);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int dcu_init();
@@ -66,13 +66,18 @@ namespace DataChannelUnity.Tests
                 "控制事件队列没排空。队列是无界的、永不丢事件，所以积压只可能来自"
                 + "「pump 没跑」或「某个回调卡住了」—— 两者都是缺陷。");
 
-            var rc = dcu_shutdown();
+            var rc = dcu_shutdown(out var undestroyed);
 
-            // **这条判据今天只覆盖一半。** 它现在断的是 shutdown 本身没失败
-            // （例如 rtc::Cleanup 超时会落到这里）。「返回未销毁对象数」是 #37 决议 7，
-            // 随 S8 落地；在那之前，泄漏了多少个对象这一位还没有被这条断言看住。
-            // 写在这里而不是留白，是为了让接手的人知道差的是哪一半。
-            Assert.AreEqual(0, rc, "dcu_shutdown 未干净返回（0 = OK / 无未销毁对象）。");
+            Assert.AreEqual(0, rc,
+                "dcu_shutdown 调用本身失败（上游 Cleanup 超时会落到这里）。");
+
+            // S6 时这条判据只覆盖了一半 —— 当时 dcu_shutdown 只返回状态码，
+            // 「漏了几个对象」那一位没人看着。S8 让它经 out 参数带出未销毁计数，
+            // 这里才补齐。计数由 dcu 层的句柄表自己给出，不依赖上游、也不依赖日志桥
+            // （上游 rtcCleanup 返回 void 且把自己最有价值的两条诊断吞进 plog）。
+            Assert.AreEqual(0, undestroyed,
+                "套件跑完时仍有 " + undestroyed + " 个原生对象没被销毁。"
+                + "有 PeerConnection / DataChannel 没被 Dispose —— 找那个忘了 using 的测试。");
 
             // 收尾之后把原生库恢复到托管侧以为的状态：DataChannelRuntime 的
             // _initAttempted / _nativeReady 仍是 true，不重新 init 的话，同一个域里

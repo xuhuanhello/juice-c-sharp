@@ -91,8 +91,17 @@ namespace DataChannelUnity.Internal
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_init();
 
+        /// <summary>
+        /// 关闭并回收；<paramref name="undestroyed"/> 带出此刻**仍未被销毁**的对象数。
+        /// </summary>
+        /// <remarks>
+        /// 计数由 dcu 层自己的句柄表给出，**不依赖上游也不依赖日志桥** ——
+        /// 上游 <c>rtcCleanup()</c> 返回 void，还把「N objects were not properly
+        /// destroyed」和「Cleanup timeout」两条最有价值的诊断 try/catch 吞进 plog，
+        /// 于是它在死锁时也报成功。
+        /// </remarks>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_shutdown();
+        public static extern int dcu_shutdown(out int undestroyed);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_set_log_level(int level);

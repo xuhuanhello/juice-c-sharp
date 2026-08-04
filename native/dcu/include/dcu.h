@@ -133,7 +133,17 @@ typedef struct dcu_dc_init {
 
 DCU_API int dcu_abi_version(int *out_version);
 DCU_API int dcu_init(void);
-DCU_API int dcu_shutdown(void);
+
+/* 关闭并回收。**out_undestroyed 带出调用此刻仍未被销毁的对象数**（PC + DC 合计），
+ * 计数由 dcu 层自己的句柄表给出，不依赖上游、也不依赖日志桥。
+ *
+ * 为什么要自己数：上游 rtcCleanup() 返回 void，而且**自己 try/catch 吞掉了两条最有
+ * 价值的诊断** —— "N objects were not properly destroyed" 与 "Cleanup timeout"
+ * （capi.cpp:1754-1768），两条都只进 plog。于是它在死锁时也报成功。
+ *
+ * 未初始化时填 0 并返回 DCU_OK。返回码与计数分开：计数走 out 参数，
+ * 返回值只表示成败（SPEC §4 的调用约定，没有任何函数的返回值兼作数据）。 */
+DCU_API int dcu_shutdown(int *out_undestroyed);
 /* 设置级别。**永远不会拆掉日志桥** —— 内部始终把同一个静态 trampoline 传给上游。
  *
  * 上游 InitLogger 在 appender 已存在时会 `appender->callback = std::move(callback)`，

@@ -560,12 +560,14 @@ Therefore the data segment copies live, open channels into a **reused `List` sna
 
 | Scenario | Action |
 |----------|--------|
-| **Edit mode** | Pump is **resident**; native init is **lazy**. `beforeAssemblyReload` records "was it initialised" in `SessionState`; `afterAssemblyReload` re-creates **only if it was** |
+| **Edit mode** | Pump is **resident** — driven by `EditorApplication.update`, **not** `PlayerLoop` (see below); native init is **lazy**. `beforeAssemblyReload` records "was it initialised" in `SessionState`; `afterAssemblyReload` re-creates **only if it was** |
 | `beforeAssemblyReload` (edit-mode recompile, and entering play mode with Reload Domain on) | `DisposeAllLive()` → `UnregisterPump()` → **`dcu_shutdown()`** |
-| `ExitingPlayMode` | `DisposeAllLive()` → `UnregisterPump()`, **no shutdown**; `EnteredEditMode` → `RegisterPump()` (deduplicated by type) |
+| `ExitingPlayMode` | `DisposeAllLive()` → `UnregisterPump()`, **no shutdown**. Nothing to re-install on `EnteredEditMode` — the edit-mode pump is a separate, always-subscribed `EditorApplication.update` handler |
 | Reload Domain **disabled** | `[RuntimeInitializeOnLoadMethod(SubsystemRegistration)]` → `DisposeAllLive()` + pump dedup, **no shutdown** |
 | `EditorApplication.quitting` | Unsubscribe our own handlers first, then `DisposeAllLive()` + full shutdown |
 | Player `Application.quitting` | `DisposeAllLive()` only, **no shutdown** |
+
+**The edit-mode pump cannot be a `PlayerLoop` entry — `PlayerLoop` does not run in edit mode.** This was measured, not read off a doc: a pump entry inserted into the tree in edit mode was verifiably present *and* `Pump()` had not run for 934.8 s. An earlier version of this table said "`EnteredEditMode` → `RegisterPump()`", which cannot deliver the resident pump it was asking for. `EditorApplication.update` is the only mechanism that does; it is subscribed once from `[InitializeOnLoadMethod]` and skips itself while `isPlaying`, leaving play mode to the `PlayerLoop` entry so there is exactly one answer to "what is driving the pump right now".
 
 Rationale for the two asymmetric ones:
 
@@ -1000,6 +1002,12 @@ Both are far better than grepping the Console for an English log line, and neith
 ### Manual steps must still be machine-judged
 
 Domain-reload verification cannot live in the test framework — the framework does not survive the reload. It is verified by a **persistent Editor probe script**; a dynamically compiled probe is destroyed along with the domain, so measuring the transition with something the transition destroys does not work. The probe must emit a **machine-assertable artifact** (e.g. a live-object count in a file or `SessionState`); reading a log line out of the Console does not satisfy this gate — that is the same disease as `|| true`, in its fourth form.
+
+It lives at `Assets/DataChannelUnity.Verification/Editor/` — the host project, not the package, since it is not something a consumer of the UPM package should receive. Three menu items under *Tools/DataChannelUnity/域重载自证/*: plant, judge, clear. The artifact is `Library/dcu-domain-reload-probe.json`.
+
+**The judgement.** Planting creates objects and deliberately does not dispose them, **holding them in a static field** — without that they may be collected before the reload, `DisposeAllLive()` would never see them, and the verdict would track GC timing rather than code correctness. After the reload, `dcu_shutdown`'s undestroyed count separates the two outcomes cleanly: **0** means the teardown hooks ran; **exactly the planted count** means they did not run at all; anything between means they ran partially.
+
+**The probe records `EnterPlayModeOptions` before judging**, because that switch decides which of the two paths in §6 is under test — `DisableDomainReload` means entering play mode does *not* reload the domain, so that route exercises `SubsystemRegistration` and never touches `beforeAssemblyReload`. Without sampling the setting first, a green run does not tell you which path it proved.
 
 ### Upstream-upgrade gate
 

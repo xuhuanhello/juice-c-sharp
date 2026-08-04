@@ -118,7 +118,9 @@ namespace DataChannelUnity.Tests
             }
             finally
             {
-                // 本用例刻意制造的原生泄漏，由本用例自己收拾。
+                // 本用例刻意制造的原生泄漏，由本用例自己收拾 —— 否则它会被记在套件收尾的
+                // 未销毁计数上。**这一行拿掉，整个套件就会红**（S8 实测：resultState
+                // 由 Passed 翻成 Failed(Child)），那正是收尾断言在起作用的证据。
                 dcu_pc_destroy(handle);
             }
         }

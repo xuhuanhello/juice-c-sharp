@@ -176,15 +176,24 @@ Entering play mode may briefly drop the MCP session; retry after `refresh_unity`
 
 The test framework does not survive a domain reload, so this cannot be an ordinary test — and a probe compiled dynamically through `execute_code` is destroyed by the very transition it is trying to observe. Use a **persistent Editor script** committed to the project.
 
+The probe is `Assets/DataChannelUnity.Verification/Editor/DomainReloadProbe.cs`, exposed as three menu items.
+
 | Step | |
 |------|--|
-| 1 | With the persistent probe present, create a PeerConnection and a DataChannel in edit mode |
-| 2 | Force a domain reload (recompile, or `manage_editor` play/stop with Reload Domain on) |
-| 3 | Read the probe's **artifact** — a live-object count written to `SessionState` or a file |
+| 1 | **Tools/DataChannelUnity/域重载自证/1. 布置** — creates objects, deliberately leaves them undisposed, holds them in a static field, and records the current `EnterPlayModeOptions` |
+| 2 | Force a domain reload — recompile a script, or `manage_editor` play/stop **if** the setting recorded in step 1 says that route reloads the domain |
+| 3 | **…/2. 判定** — reads `dcu_shutdown`'s undestroyed count and writes the verdict |
+| 4 | Read `Library/dcu-domain-reload-probe.json` |
 
-**Expect:** live objects **0** after `beforeAssemblyReload`, and after exiting play mode.
+**Expect:** `undestroyedAfterReload` = **0**, `verdict` starting with `通过`.
+
+The artifact separates the failure modes rather than just saying "not zero": a count **equal to `plantedObjects`** means the teardown hooks never ran; anything strictly between means they ran partially.
+
+**Check `expectedPath` in the artifact before believing a green run.** With `DisableDomainReload` on, entering play mode does *not* reload the domain — that route exercises `SubsystemRegistration` and never reaches `beforeAssemblyReload`, so a pass there has not tested the path you may think it did. Step 2 must be a script recompile to reach `beforeAssemblyReload` under that setting.
 
 **Reading a line out of the Console does not satisfy this step.** The probe must emit something assertable; otherwise this is the same disease as `|| true` (SPEC §11).
+
+> Step 3 calls `dcu_shutdown`, which tears the native library down — that is the point, it is the only way to ask "how many objects survived". The probe therefore calls `dcu_init()` again **after** reading the count, and you should leave that in place: `DataChannelRuntime` has no idea the library went away, its `_initAttempted` is still `true`, so `EnsureNative()` returns immediately and does **not** re-initialise. Measured consequence of getting this wrong: every subsequent `dcu_pc_create` in the session fails with `raw=-102`, taking 25 native-tier tests down with it.
 
 ---
 
@@ -196,7 +205,7 @@ The test framework does not survive a domain reload, so this cannot be an ordina
 
 These are machine-checkable and independent of the log bridge, which is exactly why they replace "grep the Console for an English success line". Read the result off `resultState`, not `summary.failed` — see the note in step 3.
 
-> **Half of this is not covered yet, stated rather than implied.** `dcu_shutdown()` currently returns only a status code, so the assertion catches a failing shutdown (e.g. `rtc::Cleanup` timing out) but *not* how many objects were left undestroyed. Making it return that count is [#37](https://github.com/xuhuanhello/juice-c-sharp/issues/37) decision 7 and lands with step 5 of §14.
+Both halves are now real: the status code catches a failing shutdown (e.g. `rtc::Cleanup` timing out), and `out_undestroyed` catches objects nobody disposed. The count comes from the dcu layer's own handle table — **not** from upstream, whose `rtcCleanup()` returns `void` and swallows its two most useful diagnostics into plog, reporting success even when it deadlocks.
 
 The fixture calls `dcu_init()` again after the assertion, so the Editor is not left holding a library the managed side still believes is initialised. That restore happens **after** the assertion and hides nothing.
 
