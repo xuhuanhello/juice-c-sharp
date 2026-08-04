@@ -24,6 +24,9 @@ namespace DataChannelUnity.Internal
         /// <summary>状态枚举越界时原生侧带出的值（dcu.h 的 DCU_STATE_UNKNOWN）。</summary>
         public const int StateUnknown = -1;
 
+        /// <summary>dcu.h 的 DCU_LABEL_MAX_BYTES。实测上界，不是理论值。</summary>
+        public const int LabelMaxBytes = 65535;
+
         public enum EventType : int
         {
             None = 0,
@@ -126,6 +129,13 @@ namespace DataChannelUnity.Internal
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_dc_buffered_amount(int dc, out int amount);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int dcu_dc_state(int dc, out int state);
+
+        /// <summary>仅供契约测试，默认惰性。见 dcu.h。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int dcu_test_set_open_race_delay_ms(int ms);
 
         // 单次原子取事件：填充 header + 两段载荷并弹出；缓冲不足则填好 header
         // （含两个精确长度）但**不弹出**，返回 ErrTooSmall。

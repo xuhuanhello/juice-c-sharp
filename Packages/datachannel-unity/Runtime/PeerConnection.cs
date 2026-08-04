@@ -6,6 +6,16 @@ namespace DataChannelUnity
 {
     public sealed class PeerConnection : IDisposable
     {
+        /// <summary>
+        /// DataChannel label 的上界，单位 UTF-8 字节。超过即抛 <see cref="ArgumentException"/>。
+        /// </summary>
+        /// <remarks>
+        /// 这是**实测的**线格式上界（SCTP DCEP 用 uint16 表示 label 长度），不是理论值：
+        /// 65535 端到端可用，65536 越界。公开它是因为让用户命名通道的应用需要自己先校验，
+        /// 而超界的失败形态极其隐蔽（见 <c>docs/SPEC.md</c> §4）。
+        /// </remarks>
+        public const int MaxDataChannelLabelBytes = 65535;
+
         private readonly object _gate = new object();
         private bool _disposed;
         private IPeerConnectionObserver _observer;
@@ -53,6 +63,14 @@ namespace DataChannelUnity
             init.Validate();
 
             var labelBytes = Encoding.UTF8.GetBytes(label);
+            // 超界 label 在「连接前创建」这条路径上是**静默失败**：正句柄、不 open、
+            // 不 closed、无 error，而 Send 仍返回成功且消息真发上线，对端判协议违规
+            // 关流。两层都校验，这里是第一层（能给出可读的错误）。
+            if (labelBytes.Length > MaxDataChannelLabelBytes)
+                throw new ArgumentException(
+                    "DataChannel label 超过 " + MaxDataChannelLabelBytes
+                    + " 字节（UTF-8），实际 " + labelBytes.Length + "。这是上游 SCTP 线格式的实测上界。",
+                    nameof(label));
             var ninit = new NativeMethods.DcInitNative
             {
                 ordered = init.Ordered ? 1 : 0,

@@ -7,15 +7,33 @@ namespace DataChannelUnity
     {
         private readonly object _gate = new object();
         private bool _disposed;
-        private bool _open;
         private IDataChannelObserver _observer;
 
         public PeerConnection Peer { get; }
         internal int NativeHandle { get; }
         public string Label { get; }
-        public bool IsOpen => _open && !_disposed;
+        /// <summary>
+        /// 通道当前状态。**每次读都是一次活查询**，不是缓存的事件结果。
+        /// </summary>
+        public DataChannelState State
+        {
+            get
+            {
+                if (_disposed) return DataChannelState.Closed;
+                DataChannelRuntime.RequireOk(
+                    NativeMethods.dcu_dc_state(NativeHandle, out var raw), "dcu_dc_state");
+                switch (raw)
+                {
+                    case 1: return DataChannelState.Open;
+                    case 2: return DataChannelState.Closed;
+                    default: return DataChannelState.Connecting;
+                }
+            }
+        }
 
-        /// <summary>供 pump 在派发过程中逐项验活。</summary>
+        public bool IsOpen => State == DataChannelState.Open;
+
+        /// <summary>供 pump 在派发过程中逐项验活。不走 P/Invoke。</summary>
         internal bool IsDisposed => _disposed;
 
         public event Action Opened;
@@ -62,8 +80,9 @@ namespace DataChannelUnity
             if (data == null) throw new ArgumentNullException(nameof(data));
             if (offset < 0 || count < 0 || offset + count > data.Length)
                 throw new ArgumentOutOfRangeException(nameof(count));
-            if (!_open)
-                throw new InvalidOperationException("DataChannel is not open.");
+            // **刻意不预检 open 状态**（#32 决议 1）：门禁建在缓存上时，一次丢失的
+            // 通知就等于一个永久卡死的通道。未 open 时发送由原生侧失败并如实报错。
+            // （上面这个越界检查在 int.MaxValue 附近会溢出，改写归 S7。）
 
             byte[] slice = data;
             if (offset != 0 || count != data.Length)
@@ -80,8 +99,6 @@ namespace DataChannelUnity
         public void Send(ReadOnlySpan<byte> data)
         {
             ThrowIfDisposed();
-            if (!_open)
-                throw new InvalidOperationException("DataChannel is not open.");
             var arr = data.ToArray();
             DataChannelRuntime.RequireOk(
                 NativeMethods.dcu_dc_send(NativeHandle, arr, arr.Length),
@@ -94,7 +111,6 @@ namespace DataChannelUnity
             {
                 if (_disposed) return;
                 _disposed = true;
-                _open = false;
             }
 
             try { NativeMethods.dcu_dc_close(NativeHandle); } catch { /* ignore */ }
@@ -123,14 +139,12 @@ namespace DataChannelUnity
 
         internal void RaiseOpen()
         {
-            _open = true;
             Opened?.Invoke();
             _observer?.OnOpen();
         }
 
         internal void RaiseClosed()
         {
-            _open = false;
             Closed?.Invoke();
             _observer?.OnClosed();
         }

@@ -61,6 +61,20 @@ extern "C" {
  * **将来若给它新增错误码，必须同时声明它是否消费队首。**
  */
 
+/* DataChannel 三态。**活查询，不是缓存** —— 回调是通知、状态是查询，与浏览器
+ * readyState、libwebrtc state()、libdatachannel isOpen() 同构。 */
+#define DCU_DC_STATE_CONNECTING 0
+#define DCU_DC_STATE_OPEN 1
+#define DCU_DC_STATE_CLOSED 2
+
+/* DataChannel label 的上界，单位是 UTF-8 字节。**实测值，不是理论值**：
+ * 65535 端到端可用，65536 越界。上游 OutgoingDataChannel::open() 的
+ * to_uint16(mLabel.size()) 会抛，而若 DC 在**连接前**创建，该异常被
+ * iterateDataChannels 的 catch 吞成一行 PLOG_WARNING —— 调用方拿到正句柄、
+ * 通道不 open 不 closed 无 error，而 rtcSendMessage 仍返回成功且消息真发上线，
+ * 对端判协议违规关流。故两层都要前置校验。 */
+#define DCU_LABEL_MAX_BYTES 65535
+
 /* 状态枚举越界时的取值。上游新增成员时映射到它，绝不抛、绝不丢事件、
  * 也绝不冒充某个既有成员。 */
 #define DCU_STATE_UNKNOWN -1
@@ -143,6 +157,11 @@ DCU_API int dcu_dc_close(int dc);
 DCU_API int dcu_dc_destroy(int dc);
 DCU_API int dcu_dc_buffered_amount(int dc, int *out_amount);
 
+/* 三态活查询，一次 ABI 穿越内合成，调用方不必分别问 open 与 closed。
+ * （上游只暴露 isOpen()/isClosed() 两个独立读，无法做到真正原子；此处保证的是
+ * 「一次穿越 + 有序读」，最坏情况是刚关闭的通道被报成 Connecting，下次查询即纠正。） */
+DCU_API int dcu_dc_state(int dc, int *out_state);
+
 /* --- 事件泵 -------------------------------------------------------------- */
 
 /* 单次原子取事件：填充 header + 两段载荷并弹出；缓冲不足则填好 header（含两个
@@ -170,6 +189,21 @@ DCU_API int dcu_event_queue_depth(int *out_depth);
  * onmessage 不可阻塞），见 SPEC §8。
  */
 DCU_API int dcu_dc_receive(int dc, void *buf, int cap, int *out_len);
+
+/* --- 仅供契约测试 -------------------------------------------------------- */
+
+/*
+ * 在出向 createDataChannel 之后、wire 回调之前插入人为延迟（毫秒）。
+ *
+ * **它存在的唯一理由**是让「出向 open 补发」这条分支可被确定性地验证。那条分支
+ * 的竞态窗口约 1µs 对一个 SCTP RTT，正常跑几乎总是走回调路径 —— 不注入延迟，
+ * 测试只能证明「连接后建通道能开」，证明不了补发本身是对的。
+ *
+ * 为什么是导出而不是编译期开关：编译期开关会让**被测二进制与出货二进制不是同一个**。
+ * 这个函数随产品一起出货、默认 0、不设就完全惰性，代价是公开面多一个显然叫 test 的
+ * 符号 —— 用「测你出货的那个」换它，值。
+ */
+DCU_API int dcu_test_set_open_race_delay_ms(int ms);
 
 #ifdef __cplusplus
 }

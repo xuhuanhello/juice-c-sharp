@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <thread>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,7 @@ namespace {
 std::atomic<bool> g_inited{false};
 DcuEventQueue g_queue;
 DcuHandleTable g_table;
+std::atomic<int> g_open_race_delay_ms{0}; // 仅契约测试用，见 dcu.h
 
 // ---------------------------------------------------------------------------
 // 异常边界
@@ -133,8 +135,12 @@ std::vector<uint8_t> bytes_from_string(const std::string &s) {
 
 // 回调只捕获 int 句柄，绝不捕获 shared_ptr —— 后者会让对象经由自己的回调持有
 // 自己，形成永不释放的环。
-void wire_dc_callbacks(int h, const std::shared_ptr<rtc::DataChannel> &dc) {
-    dc->onOpen([h] {
+void wire_dc_callbacks(int h, const std::shared_ptr<rtc::DataChannel> &dc,
+                       const std::shared_ptr<std::atomic<bool>> &openReported) {
+    dc->onOpen([h, openReported] {
+        // 与出向补发共用一个去重标志：先到者投递，另一条路径静默跳过。
+        if (openReported->exchange(true))
+            return;
         DcuEvent ev;
         ev.type = DCU_EVENT_DC_OPEN;
         ev.dc = h;
@@ -160,6 +166,25 @@ void wire_dc_callbacks(int h, const std::shared_ptr<rtc::DataChannel> &dc) {
     // `while (messageCallback)` —— 不设回调，消息就留在它自己的 mRecvQueue 里，
     // 由 dcu_dc_receive 拉取。这是真背压的前提（见 dcu.h「控制推、数据拉」）。
     // 加回这个回调会**静默**摧毁背压闭环：消息会立刻被推进无界的控制队列。
+}
+
+// 出向专用：wire 完之后查一次 isOpen() 补发。**入向路径绝不能加这个** ——
+// 此刻 mIsOpen 已为 true（processOpenMessage 末尾设的）而 mOpenTriggered 刚被
+// resetOpenCallback 清掉，补查会立刻返回 true，在 INCOMING_DATA_CHANNEL 之前
+// 先推出 DC_OPEN，把事件顺序倒过来。
+void resend_open_if_already_open(int h, const std::shared_ptr<rtc::DataChannel> &dc,
+                                 const std::shared_ptr<std::atomic<bool>> &openReported) {
+    // isOpen() 是 !mIsClosed && mIsOpen。窗口内 open 完又 close 的通道这里为 false，
+    // 于是只投 DC_CLOSED 不投 DC_OPEN —— 这不是取舍，是被事实逼的：C++ 公开面
+    // 不暴露 mIsOpen，无法区分「open 过又关了」与「从没 open 过」，补 OPEN 等于伪造。
+    if (!dc->isOpen())
+        return;
+    if (openReported->exchange(true))
+        return;
+    DcuEvent ev;
+    ev.type = DCU_EVENT_DC_OPEN;
+    ev.dc = h;
+    push_event(std::move(ev));
 }
 
 void wire_pc_callbacks(int h, const std::shared_ptr<rtc::PeerConnection> &pc) {
@@ -200,7 +225,8 @@ void wire_pc_callbacks(int h, const std::shared_ptr<rtc::PeerConnection> &pc) {
     // 不变量 1：登记 + wire + push 全部在本回调体内同步完成。
     pc->onDataChannel([h](std::shared_ptr<rtc::DataChannel> dc) {
         int dh = g_table.add_dc(dc);
-        wire_dc_callbacks(dh, dc);
+        wire_dc_callbacks(dh, dc, std::make_shared<std::atomic<bool>>(false));
+        // 此处**不做** resend_open_if_already_open，理由见该函数注释。
 
         DcuEvent ev;
         ev.type = DCU_EVENT_INCOMING_DATA_CHANNEL;
@@ -374,6 +400,10 @@ int dcu_pc_create_data_channel(int pc, const char *label, int label_len, const d
     *out_dc = 0;
     if (pc <= 0 || !label || label_len < 0)
         return DCU_ERR_INVALID;
+    // 超界 label 在「连接前创建」这条路径上是**静默失败**（见 dcu.h 的
+    // DCU_LABEL_MAX_BYTES 注释）。两层都校验，这里是第二层。
+    if (label_len > DCU_LABEL_MAX_BYTES)
+        return DCU_ERR_INVALID;
     std::string lab = string_from_buf(label, label_len);
 
     return dcu_wrap([pc, &lab, init, out_dc] {
@@ -393,9 +423,17 @@ int dcu_pc_create_data_channel(int pc, const char *label, int label_len, const d
 
         auto dc = g_table.get_pc(pc)->createDataChannel(lab, std::move(dci));
         int h = g_table.add_dc(dc);
-        // 出向路径：wire 与创建之间存在 open 竞态窗口（#32 T1），与迁移前同样大。
-        // 补发随 S4 落地，见文件头不变量 3。
-        wire_dc_callbacks(h, dc);
+
+        // 契约测试用的人为延迟，把竞态窗口撑开到可确定性观测。默认 0，完全惰性。
+        const int delay = g_open_race_delay_ms.load();
+        if (delay > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+
+        auto openReported = std::make_shared<std::atomic<bool>>(false);
+        wire_dc_callbacks(h, dc, openReported);
+        // 出向专用补发：wire 之前若已经 open，回调就永远不会来了。
+        resend_open_if_already_open(h, dc, openReported);
+
         *out_dc = h;
         return DCU_OK;
     });
@@ -431,6 +469,31 @@ int dcu_dc_destroy(int dc) {
         g_table.erase_dc(dc);
         return DCU_OK;
     });
+}
+
+int dcu_dc_state(int dc, int *out_state) {
+    if (!out_state)
+        return DCU_ERR_INVALID;
+    *out_state = DCU_DC_STATE_CONNECTING;
+    if (dc <= 0)
+        return DCU_ERR_INVALID;
+    return dcu_wrap([dc, out_state] {
+        auto ch = g_table.get_dc(dc);
+        // 有序读：先问 closed。closed 是终态，读到就不会再变；反过来先问 open
+        // 则可能报出「已关闭却说 Open」。
+        if (ch->isClosed())
+            *out_state = DCU_DC_STATE_CLOSED;
+        else if (ch->isOpen())
+            *out_state = DCU_DC_STATE_OPEN;
+        else
+            *out_state = DCU_DC_STATE_CONNECTING;
+        return DCU_OK;
+    });
+}
+
+int dcu_test_set_open_race_delay_ms(int ms) {
+    g_open_race_delay_ms.store(ms < 0 ? 0 : ms);
+    return DCU_OK;
 }
 
 int dcu_dc_buffered_amount(int dc, int *out_amount) {

@@ -27,6 +27,21 @@ namespace DataChannelUnity
         Complete = 2
     }
 
+    /// <summary>
+    /// DataChannel 三态。**这是活查询的结果，不是缓存的事件**。
+    /// </summary>
+    /// <remarks>
+    /// 回调是通知、状态是查询 —— 与浏览器 <c>readyState</c>、libwebrtc <c>state()</c>、
+    /// libdatachannel <c>isOpen()</c> 同构。六份参照实现里缓存 open 状态的只有本项目
+    /// 旧版一家，而那个缓存正是「一次丢失的通知 = 一个永久卡死的通道」的成因。
+    /// </remarks>
+    public enum DataChannelState
+    {
+        Connecting = 0,
+        Open = 1,
+        Closed = 2
+    }
+
     public enum IceTransportPolicy
     {
         All = 0,

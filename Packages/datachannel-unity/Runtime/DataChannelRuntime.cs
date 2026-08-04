@@ -201,19 +201,23 @@ namespace DataChannelUnity
             for (int i = 0; i < ChannelSnapshot.Count; i++)
             {
                 var dc = ChannelSnapshot[i];
-                if (dc == null || dc.IsDisposed || !dc.IsOpen) continue;
-                DrainChannel(dc, requireOpen: true);
+                // 不按 open 状态过滤：State 现在是活查询（一次 P/Invoke），
+                // 而 dcu_dc_receive 对未 open 的通道本来就返回 NOT_AVAIL ——
+                // 让它来判，省掉每通道每帧一次多余的穿越。
+                if (dc == null || dc.IsDisposed) continue;
+                DrainChannel(dc);
             }
             ChannelSnapshot.Clear();
         }
 
         /// <summary>拉空一个通道的接收队列。每次拉取前**逐项验活**。</summary>
-        private static void DrainChannel(DataChannel dc, bool requireOpen)
+        private static void DrainChannel(DataChannel dc)
         {
             while (true)
             {
-                // 回调可能刚把它 Dispose 掉，也可能刚把它关掉。
-                if (dc.IsDisposed || (requireOpen && !dc.IsOpen)) return;
+                // 回调可能刚把它 Dispose 掉。只查这个 —— 不查 open，因为关闭中的
+                // 通道仍可能有残留消息要投递（见 DcClosed 的处理）。
+                if (dc.IsDisposed) return;
 
                 var rc = NativeMethods.dcu_dc_receive(
                     dc.NativeHandle, _messageBuf, _messageBuf.Length, out var n);
@@ -282,8 +286,7 @@ namespace DataChannelUnity
                         // 先把该通道的接收队列拉空再报 Closed，否则「关闭前收到的
                         // 消息」会丢或乱序（SPEC §4）。此刻句柄仍可解析 —— 原生对象
                         // 要到 dcu_dc_destroy 才从表里摘除。
-                        // requireOpen: false —— 通道已经关了，但残留消息仍该投递。
-                        DrainChannel(d2, requireOpen: false);
+                        DrainChannel(d2);
                         d2.RaiseClosed();
                     }
                     break;
