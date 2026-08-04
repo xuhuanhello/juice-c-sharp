@@ -1,5 +1,12 @@
-# 完整插件矩阵（map #20）：发版 / 定时 / 手动触发。
-# 维护者下载 artifact 后自行提交 LFS 插件（map #13）—— 不自动推 main。
+# 完整插件矩阵（map #46 / 决议 #51）：发版 / 定时 / 手动触发。
+# 维护者下载 artifact 后自行提交 LFS 插件（#53/#54）—— 不自动推 main。
+#
+# 按**宿主**分 job，每个 job 内部用 matrix 列它负责的目标。这样同宿主共享准备
+# 步骤（Xcode / apt / MSVC），一个 `if:` 都不需要；加目标 = 加一行 matrix。
+#
+# 不用 Docker（#51）：Xcode、MSVC 工具集、NDK 都能用 GHA 原生手段钉死；唯一钉
+# 不死的是 glibc 下限，而那条已由「声明支持下限 = Ubuntu 22.04」解决。为一件事
+# 扛一整套 Dockerfile 不划算。
 name: Plugins matrix
 
 on:
@@ -9,63 +16,179 @@ on:
   release:
     types: [published]
 
+defaults:
+  run:
+    # Windows runner 默认 pwsh；不写这行，下面的 bash 语法会直接语法错，
+    # 而语法错会让可执行位断言变成**恒假** —— 同样违反第一原则（#48）。
+    shell: bash
+
 jobs:
-  macos-arm64:
-    name: macOS arm64
-    runs-on: macos-latest
+  macos:
+    name: ${{ matrix.name }}
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal
+            platform: darwin
+            artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle
     steps:
       - uses: actions/checkout@v4
 
-      # 只要 cmake + ninja。
-      # 曾经这里装 openssl@3 并传 OPENSSL_ROOT —— 与 #17/#23/#25 锁定的
-      # 「全静态 vendored MbedTLS、禁止 brew/系统 crypto 作为产品路径」直接冲突，
-      # 且脚本早已不读该变量。已移除。
+      # 显式钉版本，不用默认 —— 托管 mac runner 拿不到「锁工具链」的等价好处
+      # （Xcode 装不进 Linux 容器），用默认的话 GitHub 换镜像时产物会悄悄变。
+      # 26.6 与本机开发环境同版本。
+      - name: Pin Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          xcodebuild -version
+
       - name: Install build tools
         run: brew install cmake ninja
 
-      # 与 pr.yml 同款：不做兜底 chmod，让模式回归暴露出来（见 #35）
-      - name: Assert scripts are executable (no chmod fallback)
+      - name: Assert scripts are executable in git
         run: |
           fail=0
-          for s in native/scripts/*.sh native/scripts/*.py; do
-            if [[ ! -x "$s" ]]; then
-              echo "::error file=$s::缺少可执行位。请用 'git update-index --chmod=+x $s' 修正。"
-              fail=1
-            fi
-          done
+          while read -r mode _ _ file; do
+            [[ "$mode" == "100755" ]] || { echo "::error file=$file::mode=$mode，应为 100755"; fail=1; }
+          done < <(git ls-files -s native/scripts/)
           exit $fail
 
       - name: Fetch pinned upstream deps
         run: ./native/scripts/fetch-deps.sh
 
       - name: Build plugin (CMake)
-        run: ./native/scripts/build-macos.sh
-
-      - name: Audit plugin (symbols + no forbidden crypto dylibs)
         run: |
-          python3 ./native/scripts/audit_plugin.py \
-            --binary Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle \
-            --platform darwin \
+          cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build native/build/ci
+
+      - name: Audit plugin
+        run: |
+          python3 native/scripts/audit_plugin.py \
+            --binary "${{ matrix.artifact_path }}" \
+            --platform ${{ matrix.platform }} \
             --expected native/exports/expected-symbols.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: plugins-macos-arm64
-          path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle
+          name: datachannel_unity-${{ matrix.platform }}
+          path: ${{ matrix.artifact_path }}
 
-  # --- 骨架：随各平台构建脚本落地逐个启用 ---
-  #
-  # 通用形状（照抄上面的 macos-arm64）：装 cmake+ninja → 断言可执行位 →
-  # fetch-deps → 构建 → 平台对应的 audit → 上传 artifact。
-  # 交叉编译一律通过 -DCMAKE_TOOLCHAIN_FILE=native/cross/<平台>.cmake 传入
-  # （#27 之后平台映射跟随 CMAKE_SYSTEM_NAME/PROCESSOR，不再按 host 猜）。
-  #
-  # macos-x64:     runs-on: macos-13    —— -DCMAKE_OSX_ARCHITECTURES=x86_64
-  # windows-x64:   runs-on: windows-latest —— audit 换 dumpbin /exports
-  # windows-arm64: runs-on: windows-latest —— 交叉，需 toolchain file
-  # android-arm64: runs-on: ubuntu-latest  —— NDK toolchain file，audit 换 readelf --dyn-syms
-  # ios-arm64:     runs-on: macos-latest   —— 静态 .a，audit 换 nm -gU
-  # webgl:         runs-on: ubuntu-latest  —— Unity 的 Emscripten 3.1.8-unity + datachannel-wasm
-  #
-  # 注：WebGL 后端的形状与 native 差异很大（datachannel-wasm 的 Channel 没有
-  # receive/peek/availableAmount，无接收队列、无背压），详见 #30 与 #41。
+  ubuntu:
+    name: ${{ matrix.name }}
+    # 现存最老的 ubuntu 标签（ubuntu-20.04 已下架）。它决定本包声明的 glibc
+    # 下限 = 2.35 —— 比 Unity 2022.3 声明的 Ubuntu 20.04（2.31）高一档，
+    # 必须显式告知采用者（#51）。
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            platform: linux
+            artifact_path: Packages/datachannel-unity/Plugins/Linux/x86_64/libdatachannel_unity.so
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      - name: Assert scripts are executable in git
+        run: |
+          fail=0
+          while read -r mode _ _ file; do
+            [[ "$mode" == "100755" ]] || { echo "::error file=$file::mode=$mode，应为 100755"; fail=1; }
+          done < <(git ls-files -s native/scripts/)
+          exit $fail
+
+      - name: Fetch pinned upstream deps
+        run: ./native/scripts/fetch-deps.sh
+
+      - name: Build plugin (CMake)
+        run: |
+          cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build native/build/ci
+
+      - name: Audit plugin
+        run: |
+          python3 native/scripts/audit_plugin.py \
+            --binary "${{ matrix.artifact_path }}" \
+            --platform ${{ matrix.platform }} \
+            --expected native/exports/expected-symbols.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datachannel_unity-${{ matrix.platform }}
+          path: ${{ matrix.artifact_path }}
+
+  windows:
+    name: ${{ matrix.name }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            platform: windows
+            artifact_path: Packages/datachannel-unity/Plugins/Windows/x86_64/datachannel_unity.dll
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert scripts are executable in git
+        run: |
+          fail=0
+          while read -r mode _ _ file; do
+            [[ "$mode" == "100755" ]] || { echo "::error file=$file::mode=$mode，应为 100755"; fail=1; }
+          done < <(git ls-files -s native/scripts/)
+          exit $fail
+
+      - name: Fetch pinned upstream deps
+        run: ./native/scripts/fetch-deps.sh
+
+      # 用 CMake 自带的 Visual Studio 生成器：CMake 自己就能定位 MSVC，不需要预先
+      # vcvars，也就不需要为此引入第三方 action。多配置生成器，所以 --config Release。
+      - name: Build plugin (CMake)
+        run: |
+          cmake -S native -B native/build/ci -G "Visual Studio 17 2022" -A x64
+          cmake --build native/build/ci --config Release
+
+      - name: Audit plugin
+        run: |
+          python3 native/scripts/audit_plugin.py \
+            --binary "${{ matrix.artifact_path }}" \
+            --platform ${{ matrix.platform }} \
+            --expected native/exports/expected-symbols.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datachannel_unity-${{ matrix.platform }}
+          path: ${{ matrix.artifact_path }}
+
+# ────────────────────────────────────────────────────────────────────────────
+# 移动两平台**尚未启用**，各自卡在一件具体的事上。把原因写清楚而不是留一行
+# 乐观的注释，是因为「骨架里列着但从没跑过」正是这个仓库已经吃过亏的形状 ——
+# windows-exports.def 就是那样烂掉的（带着四个已删符号，缺六个现存符号）。
+#
+# **iOS arm64** —— 加一行 matrix 不够，`native/` 先要改：
+#   - `add_library(datachannel_unity SHARED ...)` 是硬编码的，iOS 要 STATIC
+#   - staging 按 `if(APPLE)` 判断，会给静态库造一个 .bundle
+#   - 静态 .a 没有导出表，符号收窄要走 `ld -r -exported_symbols_list`（#47 实测
+#     通过；注意它**只能降级不能提升**，白名单必须恰好等于 DCU_API 那一组）
+#   - audit 的静态库分支尚未实现；依赖检查在 .a 上不建，缺口写进 SPEC（#50）
+#
+# **Android arm64-v8a** —— 有一个**尚未拍板**的问题，现在启用等于静默替人决定：
+#   - 两个下界打架：Unity 2022.3 最低 API 22，而 libjuice 的 getifaddrs 需 API 24
+#   - runner 默认 NDK 27.3 需显式加 16 KB page 对齐 flags（Play 自 2025-11-01
+#     起要求，官方点名 prebuilt 也要重编）
+#   toolchain 形状：
+#     -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake
+#     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-<未定>
+#
+# **Windows ARM64 已出图**：2022.3 的 Standalone Windows 没有 ARM64 槽位（编辑器
+# 源码显式返回空路径，Unity 6000.0 才改成多架构）。产出它等于产出一个装不进任何
+# Player 的二进制。
+#
+# **WebGL 也出图**：它不是多一个 toolchain —— 需要 datachannel-wasm 的 C facade，
+# 且接收缓冲策略在 SPEC §16 明确未决，§8 更写明背压保证在它上面物理不成立。
+# ────────────────────────────────────────────────────────────────────────────
