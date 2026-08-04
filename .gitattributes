@@ -179,3 +179,6 @@ Packages/datachannel-unity/Plugins/**/*.bundle/**  filter=lfs diff=lfs merge=lfs
 Packages/datachannel-unity/Plugins/**/*.dylib      filter=lfs diff=lfs merge=lfs -text
 # *.jslib 是 JS 文本，不进 LFS
 Packages/datachannel-unity/Plugins/**/*.jslib      text eol=lf
+# .bundle 里的 Info.plist 是文本，上面那条按路径匹配的规则会把它一起吸进 LFS。
+# 进 LFS 不算错，但没意义且 diff 不可读 —— 单独放行。
+Packages/datachannel-unity/Plugins/**/*.bundle/**/*.plist  text eol=lf -filter -diff -merge

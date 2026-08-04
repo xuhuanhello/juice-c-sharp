@@ -74,6 +74,17 @@ jobs:
         run: |
           python3 -m py_compile native/scripts/*.py
 
+      # .meta 的产生与校验是同一个机制（#52）：重跑生成器并 diff，不一致就红。
+      # 不需要 Unity，所以能待在这个 job 里 —— 而 CI 里没有 Unity（#43）。
+      # 它同时核对黄金样本（真 Editor 实写的字节），否则生成器自己写错时
+      # 生成物与仓库永远一致、门禁永远绿。
+      - name: Plugin .meta matches generator and golden samples
+        run: |
+          python3 native/scripts/gen_plugin_meta.py \
+            --plugin-root Packages/datachannel-unity/Plugins \
+            --golden native/exports/plugin-meta-golden \
+            --check
+
 # ────────────────────────────────────────────────────────────────────────────
 # 这里**故意没有** Unity 测试 job（决策 #43，推翻 #39 决议 1 的门禁归属）。
 #

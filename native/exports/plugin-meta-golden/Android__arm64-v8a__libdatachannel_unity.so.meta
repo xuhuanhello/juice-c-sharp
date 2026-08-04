@@ -1,5 +1,5 @@
 fileFormatVersion: 2
-guid: 948288c09aee54c6389a47db5bf19479
+guid: b9e03adb67c0c46fd93c80586323a230
 PluginImporter:
   externalObjects: {}
   serializedVersion: 2
@@ -7,10 +7,17 @@ PluginImporter:
   executionOrder: {}
   defineConstraints: []
   isPreloaded: 0
-  isOverridable: 1
+  isOverridable: 0
   isExplicitlyReferenced: 0
   validateReferences: 1
   platformData:
+  - first:
+      Android: Android
+    second:
+      enabled: 1
+      settings:
+        CPU: ARM64
+        Is16KbAligned: false
   - first:
       Any: 
     second:
@@ -19,17 +26,9 @@ PluginImporter:
   - first:
       Editor: Editor
     second:
-      enabled: 1
+      enabled: 0
       settings:
-        CPU: ARM64
         DefaultValueInitialized: true
-        OS: OSX
-  - first:
-      Standalone: OSXUniversal
-    second:
-      enabled: 1
-      settings:
-        CPU: ARM64
   userData: 
   assetBundleName: 
   assetBundleVariant: 
