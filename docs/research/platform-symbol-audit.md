@@ -34,7 +34,7 @@
 | 默认（惰性）链接会报错吗 | **不会 —— 这才是真正危险的形态。** 归档成员按需拉取，只有一份 mbedtls 被拉进来，链接通过，两个插件**静默共用一份实现**。我们的 mbedtls 开了 `MBEDTLS_SSL_DTLS_SRTP`，对方的多半没开（§2.2） |
 | 什么时候会变成硬失败 | 任一侧被 `-force_load` / `-all_load` 强拉时。实测立刻报 `_psa_cipher_encrypt_setup` / `_mbedtls_aes_crypt_xts` 等重复。Unity trampoline 只在 **GameAssembly** target 上加 `-ObjC`，而 `-ObjC` 只强拉「实现了 ObjC 类/分类或 Swift 类型」的成员——我们的归档是纯 C/C++，**不会**被 `-ObjC` 强拉（§2.3） |
 | 工具级收窄手段哪个真的有效 | **`ld -r`（部分链接）**：把所有 hidden 符号变成 `non-external`（真正的 local）。冲突面从 4854 个 private-external 塌缩到 0；再叠 **`nmedit -s`** 可把外部面精确收到 **20 个 `dcu_*`**（§3） |
-| `ld -r -exported_symbols_list` 能用吗 | **不能。** 实测 `ld: cannot export hidden symbol _dcu_init` —— 它无法把 hidden 符号「提升」为 export。允许列表在这里也是多余的：可见性已经把意图编码在源码里了（§3.2） |
+| `ld -r -exported_symbols_list` 能用吗 | **能，但只能降级不能提升**（原写「不能」，见 §3.2 补注）。列已 `external` 的 `DCU_API` 组 → exit 0 且其余真本地化；列一个已 hidden 的符号 → `ld: cannot export hidden symbol`。约束：白名单须与 `DCU_API` 集合完全一致（§3.2） |
 | `objcopy --localize-hidden` 呢 | **Apple 工具链里没有 `objcopy`/`llvm-objcopy`**（`xcrun --find` 失败）。它是 GNU/ELF 方向的工具，Apple 侧的对应物是 `nmedit`（§3.3） |
 | `ld -r` 会牺牲什么 | 死代码剥离**不受影响**：`ld -r` 输出保留 `MH_SUBSECTIONS_VIA_SYMBOLS`（`otool -h` flags `0x2000`），实测 `-dead_strip` 后最终可执行文件字节数完全相同。真正的代价在别处（§3.5） |
 | 参照实现怎么做的 | 五份实测。**没有一份用 `ld -r`+`nmedit`。** Unity 官方 WebRTC 用**动态 framework** 绕开整个问题；Unity 自己的 `libiPhone-lib.a` 用 hidden + **给第三方库加前缀改名**（`Unityplcrash*`、`Unityprotobuf*`），但把 FreeType（`FT_*`，42 个）大喇喇留在外面（§4） |
@@ -221,7 +221,7 @@ app 3 031 800 bytes；dcu 导出 20 个；_mbedtls_sha256 本地副本 2 份；�
 
 `-all_load` 全局开关下同样通过（A 形态则报重复）。
 
-### 3.2 `ld -r -exported_symbols_list` —— 用不了
+### 3.2 `ld -r -exported_symbols_list` —— 只能降级，不能提升（标题原为「用不了」，见下方补注）
 
 ```
 $ ld -r -exported_symbols_list keep.txt -o merged.o a.o
@@ -229,6 +229,21 @@ ld: cannot export hidden symbol _dcu_init file 'a.o' for architecture arm64
 ```
 
 `-exported_symbols_list` 的语义（`man ld`）是把**未列出的**全局符号当作 `__private_extern__`；它不能把一个已经 hidden 的符号**提升**回 export。在我们的场景里它也没必要 —— `DCU_API` 的 `visibility("default")` 已经把「谁是公开面」编码在源码里。反向的 `-unexported_symbols_list` / `-unexported_symbol` 可用：实测 `ld -r -unexported_symbol _timingsafe_bcmp` 能把那个逃逸符号一并本地化，同时 `_dcu_init` 保持 external。
+
+> **补注（2026-08-04，起因是对照 [unity-sqlcipher-net-openharmony](https://github.com/xuhuanhello/unity-sqlcipher-net-openharmony) 的 `merge-static-libs.sh` 在产线上正是这么用的）**
+>
+> 上面的结论**对它测的那个输入成立，但标题「用不了」过头了**。分两种输入实测（Xcode 26.6 / ld-1267 / iPhoneOS26.5 SDK，`-fvisibility=hidden` 编译）：
+>
+> | 白名单内容 | 结果 |
+> |---|---|
+> | 只列**已经是 `external`** 的符号（打了 `DCU_API` 的那组） | **exit 0**；未列出的 `private external` 全部变 `non-external (was a private external)`，即真 local |
+> | 列了一个**已 hidden** 的符号 | `ld: cannot export hidden symbol ...`，失败 —— 即本节原本记录的现象 |
+>
+> 也就是说 `-exported_symbols_list` **只能降级，不能提升**。**在我们的真实情形里它可用**，因为白名单就等于 `DCU_API` 那一组，本来就是 default，从不要求提升。
+>
+> **由此得到一条硬约束（且是好性质）**：白名单必须与源码中 `DCU_API` 标注的集合**完全一致**。多写一个没标注的名字，iOS 链接**直接红** —— 硬失败而非静默通过，正好与「一份权威符号清单」的决议（[#50](https://github.com/xuhuanhello/juice-c-sharp/issues/50)）互相加固。
+>
+> 本节其余内容（`-unexported_symbol` 可用、`objcopy` 在 Apple 侧不存在、`ld -r` 默认本地化）不受影响。
 
 ### 3.3 `objcopy --localize-hidden` —— Apple 侧不存在
 
