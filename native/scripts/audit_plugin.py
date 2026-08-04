@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -130,6 +131,52 @@ def resolve_tool(explicit: str | None, fallback: str, why: str) -> str:
         f"找不到 {fallback}（{why}）。\n"
         "  本门禁不会因为工具缺失而跳过检查 —— 那会让「没验过」和「验过且通过」\n"
         "  在报告里长得一模一样。请安装该工具，或由 CMake 显式传入其路径。")
+
+
+def find_dumpbin(linker: str | None) -> str:
+    """定位 dumpbin.exe。三条路依次尝试，全失败才硬失败。
+
+    CMake 的 MSVC 分支不提供 NM，dumpbin 更是完全没建模（CMakeFindBinUtils 只给
+    LINKER/MT/AR），而 dumpbin 在 runner 镜像里**不在 PATH**（#48 查实）。
+
+    1. `--linker` 的同目录 —— dumpbin.exe 与 link.exe 同在 VC/Tools/MSVC/*/bin/。
+       CMake 从 POST_BUILD 调用时走这条。
+    2. PATH —— 开发者在 Developer Command Prompt 里手跑时走这条。
+    3. vswhere —— 上面两条都没有时（例如 CI 里从普通 bash 直接调本脚本，
+       首次 Windows 实跑就栽在这儿）。vswhere.exe 的路径是 Microsoft 固定的，
+       所有装了 VS 的机器都在同一处。
+
+    第 3 条是本脚本能**独立使用**的关键：审计工具不该要求调用者先懂 MSVC 的
+    目录结构。
+    """
+    if linker and not linker.endswith("-NOTFOUND"):
+        candidate = Path(linker).parent / "dumpbin.exe"
+        if candidate.is_file():
+            return str(candidate)
+
+    found = shutil.which("dumpbin")
+    if found:
+        return found
+
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) \
+        / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if vswhere.is_file():
+        try:
+            root = run([str(vswhere), "-latest", "-products", "*",
+                        "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                        "-property", "installationPath"]).strip()
+        except AuditError:
+            root = ""
+        if root:
+            hits = sorted(Path(root).glob("VC/Tools/MSVC/*/bin/Host*/*/dumpbin.exe"))
+            if hits:
+                return str(hits[-1])
+
+    raise AuditError(
+        "找不到 dumpbin.exe（读取导出表与依赖）。\n"
+        "  依次试过：--linker 的同目录、PATH、vswhere 定位的 VS 安装。\n"
+        "  本门禁不会因为工具缺失而跳过检查 —— 那会让「没验过」和「验过且通过」\n"
+        "  在报告里长得一模一样。")
 
 
 # ---------- 导出符号 ----------
@@ -355,14 +402,7 @@ def main() -> int:
         readelf = resolve_tool(args.readelf, "readelf", "读取 DT_NEEDED")
         actual, deps = exports_linux(binary, nm), deps_linux(binary, readelf)
     else:
-        # CMake 的 MSVC 分支不提供 NM，dumpbin 也完全没建模；但 dumpbin.exe 就在
-        # link.exe 同目录（#48：它在镜像里，只是不在 PATH）。
-        dumpbin = None
-        if args.linker:
-            candidate = Path(args.linker).parent / "dumpbin.exe"
-            if candidate.is_file():
-                dumpbin = str(candidate)
-        dumpbin = resolve_tool(dumpbin, "dumpbin", "读取导出表与依赖")
+        dumpbin = find_dumpbin(args.linker)
         actual, deps = exports_windows(binary, dumpbin), deps_windows(binary, dumpbin)
 
     print(f"==> 依赖 ({args.platform})")
