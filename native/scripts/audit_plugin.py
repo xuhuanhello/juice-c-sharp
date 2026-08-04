@@ -44,6 +44,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+def _force_utf8_output() -> None:
+    """Windows 上非 TTY 的 stdout 默认是 cp1252，本脚本的中文输出会直接
+    UnicodeEncodeError（首次 Windows CI 实跑时炸在这里）。在脚本自身修而不是
+    靠 workflow 设 PYTHONIOENCODING —— 那样无论谁怎么调用它都成立。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
+_force_utf8_output()
+
+
 # 即便落在系统路径下也一律拒绝。macOS 的 /usr/lib/libssl.dylib 是真实存在的
 # （系统自带的老版本），只靠路径前缀会把它放过去。
 CRYPTO_DENY = re.compile(

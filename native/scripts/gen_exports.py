@@ -36,6 +36,19 @@ import re
 import sys
 from pathlib import Path
 
+def _force_utf8_output() -> None:
+    """Windows 上非 TTY 的 stdout 默认是 cp1252，本脚本的中文输出会直接
+    UnicodeEncodeError（首次 Windows CI 实跑时炸在这里）。在脚本自身修而不是
+    靠 workflow 设 PYTHONIOENCODING —— 那样无论谁怎么调用它都成立。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
+_force_utf8_output()
+
+
 SYMBOL_RE = re.compile(r"^dcu_[A-Za-z0-9_]+$")
 
 # `DCU_API int dcu_pc_create(const dcu_pc_config *config, int *out_pc);`
