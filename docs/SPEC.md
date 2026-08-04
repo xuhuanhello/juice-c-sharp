@@ -408,7 +408,7 @@ Applications may still embed credentials in `urls` themselves; the API does not 
 | `DataChannelException.ErrorCode` (`int`) | `ErrorCode` (`DataChannelError`) **+** new `RawCode` (`int`) | §4 error codes |
 | — | `ConnectionState` / `GatheringState` gain an `Unknown` member | §4 state enums |
 | — | new `DataChannelState` (`Connecting` / `Open` / `Closed`) + `DataChannel.State` | §4 open semantics |
-| — | new `DataChannelLog.LeakDetection` (`Disabled` / `Enabled` / `EnabledWithStackTrace`) | Shape borrowed from `Unity.Collections.NativeLeakDetection.Mode` |
+| — | new `DataChannelLog.LeakDetection` (`Disabled` / `Enabled`) | Two modes, not three ([#45](https://github.com/xuhuanhello/juice-c-sharp/issues/45)) — see *Ownership and lifetime* |
 
 **Deliberately unchanged** (so nobody "fixes" them): `AbiVersion` / `Mtu` — PascalCase is correct for acronyms of three letters or more; `DataChannelInit` — it mirrors the W3C `RTCDataChannelInit` and is domain vocabulary; `LocalDescriptionGenerated`, `LocalCandidateGenerated`, `ConnectionStateChanged`, `GatheringStateChanged` — already right.
 
@@ -449,12 +449,16 @@ PeerConnection ──owns──▶ DataChannel        (strong reference, list of
 | **Disposing a child directly is fine** | The parent must drop it from its child list so it is not destroyed twice |
 | **The lookup table holds weak references** | Liveness comes from the ownership edge, not from the table. DataChannel events do not carry their `pc` handle, so a parent-first lookup would need an ABI change plus a native dc→pc map — not worth it |
 | **Incoming DataChannels are always accepted** | Created and owned by the PC even with no subscriber. Rejecting "unwanted" channels is timing-sensitive: an application that subscribes one frame later (or after an `await`) would have its channel silently closed — far harder to diagnose than a leak. Exceeding a child-count threshold warns; it never refuses |
-| **Leak diagnostics are mandatory** | On by default in Editor / Development builds, off in Release, with the **creation-time** stack trace when `LeakDetection.EnabledWithStackTrace` is set |
+| **Leak diagnostics are mandatory** | On by default in Editor / Development builds, off in Release. `Enabled` includes the **creation-time** stack trace |
 | **Cascade-disposed children behave like directly-disposed ones** | …except the exception message names the cause. They do **not** raise `Closed`: doing so would run user callbacks while the parent is half-torn-down, and `Closed` should mean "the channel was closed", not "you just released it" |
 
 **Finalizers do exactly one thing: enqueue.** A finalizer records the handle and leak info on a lock-free queue; the main-thread pump logs it and removes the table entry. Finalizers must **not** call any `dcu_*` function, must **not** take the handle-table lock, and must **not** call `Debug.LogError` — 2022.3 makes no thread-safety promise for it off the main thread, and P/Invoking `rtcDelete*` from the finalizer thread blocks until callbacks quiesce, which during a domain unload means the Editor hangs on every entry into play mode.
 
-Finalizers exist **only** under `#if UNITY_EDITOR || DEVELOPMENT_BUILD`; the stack-trace capture is separately gated by `LeakDetection`. Both layers are needed, not one: having a finalizer at all is a per-type cost (every instance is queued for finalization and survives an extra GC generation) that no runtime switch can remove. Unity's own `DisposeSentinel` is conditionally compiled for the same reason.
+Finalizers exist **only** under `#if UNITY_EDITOR || DEVELOPMENT_BUILD`; `LeakDetection` gates the reporting at runtime. Both layers are needed, not one: having a finalizer at all is a per-type cost (every instance is queued for finalization and survives an extra GC generation) that no runtime switch can remove. Unity's own `DisposeSentinel` is conditionally compiled for the same reason.
+
+**Two modes, not three** ([#45](https://github.com/xuhuanhello/juice-c-sharp/issues/45)): `Enabled` captures the creation stack. A middle mode that reports leaks *without* the stack was dropped — "where was it created" is essentially the whole diagnostic payload, and a third mode costs its own semantics, spec text and tests. Object creation is not a hot path (single digits to a few dozen per session), so the capture is affordable; an application that creates far more can select `Disabled`.
+
+Removing leak diagnostics **entirely** was considered and rejected, even though it would delete the finalizer machinery outright — a genuine structural simplification. Forgetting `Dispose` is the highest-probability failure on this list, and the only fallback (§4, `dcu_shutdown`'s undestroyed count) reports *that* something leaked, never *which object* or *where it came from* — a needle-in-haystack for anyone consuming this as a package.
 
 **`SafeHandle` is not used.** It does not solve the blocking problem, CER support is an `[Obsolete]` no-op on modern runtimes, and these handles are `int`, not `IntPtr`.
 
@@ -494,10 +498,16 @@ Internal constants; **no configuration surface** (a knob has to be given semanti
 |--------|-----------|
 | Slow pump frame | **4 ms** (of a 16.7 ms frame at 60 fps). `Stopwatch.GetTimestamp()` twice per frame; always compiled in |
 | Control-queue backlog | depth > **1024** — same order as upstream's `RECV_QUEUE_LIMIT`; reaching it means the pump is not running or a callback is stuck |
-| Pump liveness | Each `Pump()` stamps a monotonic counter and a wall-clock timestamp. `PeerConnection` creation, `CreateDataChannel` and `Send` check "how long since the last pump"; past a seconds-scale threshold, log an error and attempt re-registration |
+| Pump liveness | Each `Pump()` stamps a monotonic counter and a wall-clock timestamp. `PeerConnection` creation, `CreateDataChannel` and `Send` check "how long since the last pump"; past a seconds-scale threshold, log an error naming the likely cause and fix, then **re-register once** |
 | Throttling | One warning per category per **5 s**, carrying the occurrence count and peak for the period |
 
-The liveness check is not about registration failing at startup (nearly impossible) but about being **erased afterwards**: any third-party package that rebuilds from `GetDefaultPlayerLoop()` and calls `SetPlayerLoop` drops our entry while our `_pumpRegistered` flag still says `true`. Detection is an integer comparison and recovery reuses the existing type-keyed re-installation — cheaper than diagnosing it later. The threshold must not be measured in `Time.frameCount` (unreliable in edit mode, where the pump is resident); use `EditorApplication.timeSinceStartup` there. Check only when the application calls an API; never poll in the background.
+The liveness check is not about registration failing at startup (nearly impossible) but about being **erased afterwards**: any third-party package that rebuilds from `GetDefaultPlayerLoop()` and calls `SetPlayerLoop` drops our entry while our `_pumpRegistered` flag still says `true`. That is not hypothetical here — R3, already vendored in this repository, inserts into the PlayerLoop.
+
+**The value is detection, not repair.** The failure is loud (nothing works at all) but the *attribution* is terrible — the first suspicion is always the network or the TURN server, never the frame loop. So the error message must name the likely cause and the fix.
+
+**Re-registration is attempted exactly once** ([#45](https://github.com/xuhuanhello/juice-c-sharp/issues/45), narrowing the original "self-heal"). If the entry is erased again, log that retrying has stopped and leave it erased. Repeated silent re-insertion is a tug-of-war with another package over shared state — the same shape as the auto-unsubscribe idea rejected under *Exception isolation* below: **silently changing state that someone else established is worse than a loud log.**
+
+The threshold must not be measured in `Time.frameCount` (unreliable in edit mode, where the pump is resident); use `EditorApplication.timeSinceStartup` there. Check only when the application calls an API; never poll in the background.
 
 No public read-only diagnostics snapshot: v1 observability is `BufferedAmount` only (§7). Logs are enough to attribute these problems; opening a diagnostics surface for application-side network HUDs would be its own decision.
 
@@ -521,10 +531,12 @@ Therefore the data segment copies live, open channels into a **reused `List` sna
 
 - Baselines: **64 KB** payload, **4 KB** payload2. Control buffers and message buffers are **separate** — SDP and candidates sit at a few KB while messages may be megabytes; sharing means the small one is permanently sized for the big one.
 - Growth: grow-to-fit.
-- Shrink: with **hysteresis** — only after two consecutive 5-second windows whose peak stayed below the baseline. One window would thrash under bursty traffic, and shrinking itself allocates.
-- Log the first growth beyond baseline (Info, with size); do not log shrinks.
+- **Shrink: never.** Resident buffer size settles at the largest payload seen, and that is bounded — see below.
+- Log the first growth beyond baseline (Info, with size).
 
-"Fixed capacity plus a temporary array when oversized" is rejected even though it is simpler: an application whose normal payload is 200 KB (video slices, map data, save sync) would allocate on **every** message, quietly undoing the zero-allocation guarantee under the name of an overflow path. The guarantee has to hold at the sizes applications actually use, not at the sizes we guessed.
+**Why never shrinking is safe** ([#45](https://github.com/xuhuanhello/juice-c-sharp/issues/45), superseding the hysteresis rule): a single message cannot be arbitrarily large. `PeerConnection::remoteMaxMessageSize()` returns the smaller of the local limit (`DEFAULT_LOCAL_MAX_MESSAGE_SIZE` = **256 KB**) and the peer's SDP-advertised value, so with default configuration the buffers settle at roughly **0.5 MB total** (256 KB message + 256 KB payload + 4 KB payload2). Building a two-window peak tracker to reclaim that is not worth its own specification, tests and failure modes. An application that raises `MaxMessageSize` raises the resident bound with it — which is what it asked for, and should be documented as such rather than silently clawed back.
+
+"Fixed capacity plus a temporary array when oversized" remains rejected even though it is simpler: an application whose normal payload is 200 KB (video slices, map data, save sync) would allocate on **every** message, quietly undoing the zero-allocation guarantee under the name of an overflow path. Note that grow-and-keep does *not* have this problem — it preserves zero-allocation and merely holds memory, which is why it survives while the temporary-array scheme does not.
 
 ### Editor and application lifecycle
 
