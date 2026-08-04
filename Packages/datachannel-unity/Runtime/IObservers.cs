@@ -14,6 +14,6 @@ namespace DataChannelUnity
         void OnOpen();
         void OnClosed();
         void OnError(string message);
-        void OnMessage(byte[] data);
+        void OnMessage(System.ReadOnlySpan<byte> data);
     }
 }

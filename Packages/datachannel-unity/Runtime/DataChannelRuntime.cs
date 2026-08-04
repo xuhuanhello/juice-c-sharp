@@ -18,6 +18,14 @@ namespace DataChannelUnity
         private static byte[] _payloadBuf = new byte[65536];
         private static byte[] _payload2Buf = new byte[4096];
 
+        // 消息缓冲与控制缓冲**分开**（SPEC §6）：SDP/candidate 稳定在几 KB，
+        // 消息可能几 MB，共用一个就是让前者永远按后者的尺寸躺着。
+        private static byte[] _messageBuf = new byte[65536];
+
+        // 复用的通道快照，零分配。见 HandleTable.SnapshotDataChannels 的说明。
+        private static readonly System.Collections.Generic.List<DataChannel> ChannelSnapshot =
+            new System.Collections.Generic.List<DataChannel>();
+
         public static bool IsNativeAvailable
         {
             get
@@ -127,10 +135,26 @@ namespace DataChannelUnity
         /// <summary>
         /// Drain native event queue and raise managed events on the calling thread (must be main thread).
         /// </summary>
+        /// <summary>
+        /// 排空原生事件并在调用线程（必须是主线程）上派发。
+        /// </summary>
+        /// <remarks>
+        /// 两段结构（SPEC §6）：先排空**控制**队列，再逐通道**拉取**消息。
+        /// 两段都排空，**都不设每帧预算** —— 系统本来就会自己收敛：pump 排空则
+        /// 上游 mRecvQueue 不涨、无背压；应用回调慢则帧变长、拉取变慢、队列涨到
+        /// RECV_QUEUE_LIMIT 而阻塞，真背压顶回 SCTP。设预算是人为提前触发背压。
+        ///
+        /// 已接受的软肋：高速对端能让本段随流量线性变长。可见性靠慢帧告警（S7）。
+        /// </remarks>
         public static void Pump()
         {
             if (!_nativeReady) return;
+            DrainControlEvents();
+            DrainMessages();
+        }
 
+        private static void DrainControlEvents()
+        {
             for (int safety = 0; safety < 256; safety++)
             {
                 var rc = NativeMethods.dcu_event_next(out var header,
@@ -140,8 +164,6 @@ namespace DataChannelUnity
                 {
                     // header 里两个长度都是**精确值**，且事件未被消费；单消费者契约
                     // 保证两次调用之间队首不变，所以扩容后**一次重试必然成功**。
-                    // 不写 while —— 第二次仍失败说明契约被破坏，那是要人看的 bug，
-                    // 循环只会把它变成静默活锁。
                     EnsureCapacity(ref _payloadBuf, header.payload_len);
                     EnsureCapacity(ref _payload2Buf, header.payload2_len);
                     rc = NativeMethods.dcu_event_next(out header,
@@ -160,25 +182,59 @@ namespace DataChannelUnity
 
                 string payload = null;
                 string payload2 = null;
-                byte[] binary = null;
-
                 if (header.payload_len > 0)
-                {
-                    if (header.type == NativeMethods.EventType.DcMessage)
-                    {
-                        binary = new byte[header.payload_len];
-                        Buffer.BlockCopy(_payloadBuf, 0, binary, 0, header.payload_len);
-                    }
-                    else
-                    {
-                        payload = Encoding.UTF8.GetString(_payloadBuf, 0, header.payload_len);
-                    }
-                }
-
+                    payload = Encoding.UTF8.GetString(_payloadBuf, 0, header.payload_len);
                 if (header.payload2_len > 0)
                     payload2 = Encoding.UTF8.GetString(_payload2Buf, 0, header.payload2_len);
 
-                Dispatch(header, payload, payload2, binary);
+                Dispatch(header, payload, payload2);
+            }
+        }
+
+        private static void DrainMessages()
+        {
+            // 遍历**快照**而非字典本身：拉到消息会当场派发，而应用在回调里
+            // Dispose() 通道或 CreateDataChannel() 都合法，两者都改动 HandleTable
+            // 的字典 —— Dictionary 迭代中被修改会抛，且那个异常来自我们自己的迭代，
+            // 每订阅者的隔离罩不住它。
+            HandleTable.SnapshotDataChannels(ChannelSnapshot);
+            for (int i = 0; i < ChannelSnapshot.Count; i++)
+            {
+                var dc = ChannelSnapshot[i];
+                if (dc == null || dc.IsDisposed || !dc.IsOpen) continue;
+                DrainChannel(dc, requireOpen: true);
+            }
+            ChannelSnapshot.Clear();
+        }
+
+        /// <summary>拉空一个通道的接收队列。每次拉取前**逐项验活**。</summary>
+        private static void DrainChannel(DataChannel dc, bool requireOpen)
+        {
+            while (true)
+            {
+                // 回调可能刚把它 Dispose 掉，也可能刚把它关掉。
+                if (dc.IsDisposed || (requireOpen && !dc.IsOpen)) return;
+
+                var rc = NativeMethods.dcu_dc_receive(
+                    dc.NativeHandle, _messageBuf, _messageBuf.Length, out var n);
+
+                if (rc == NativeMethods.ErrTooSmall)
+                {
+                    EnsureCapacity(ref _messageBuf, n);
+                    rc = NativeMethods.dcu_dc_receive(
+                        dc.NativeHandle, _messageBuf, _messageBuf.Length, out n);
+                }
+
+                if (rc == NativeMethods.ErrNotAvail) return;
+
+                if (rc != NativeMethods.Success)
+                {
+                    DataChannelLog.Emit(LogLevel.Warning,
+                        "dcu_dc_receive failed: " + MapError(rc) + " (raw=" + rc + ")");
+                    return;
+                }
+
+                dc.RaiseMessage(new ReadOnlySpan<byte>(_messageBuf, 0, n));
             }
         }
 
@@ -188,7 +244,7 @@ namespace DataChannelUnity
                 buf = new byte[Math.Max(need, 1024)];
         }
 
-        private static void Dispatch(NativeMethods.EventHeader h, string p1, string p2, byte[] binary)
+        private static void Dispatch(NativeMethods.EventHeader h, string p1, string p2)
         {
             switch (h.type)
             {
@@ -222,15 +278,18 @@ namespace DataChannelUnity
                     break;
                 case NativeMethods.EventType.DcClosed:
                     if (HandleTable.TryGetDc(h.dc, out var d2))
+                    {
+                        // 先把该通道的接收队列拉空再报 Closed，否则「关闭前收到的
+                        // 消息」会丢或乱序（SPEC §4）。此刻句柄仍可解析 —— 原生对象
+                        // 要到 dcu_dc_destroy 才从表里摘除。
+                        // requireOpen: false —— 通道已经关了，但残留消息仍该投递。
+                        DrainChannel(d2, requireOpen: false);
                         d2.RaiseClosed();
+                    }
                     break;
                 case NativeMethods.EventType.DcError:
                     if (HandleTable.TryGetDc(h.dc, out var d3))
                         d3.RaiseError(p1 ?? "error");
-                    break;
-                case NativeMethods.EventType.DcMessage:
-                    if (HandleTable.TryGetDc(h.dc, out var d4))
-                        d4.RaiseMessage(binary ?? Array.Empty<byte>());
                     break;
             }
         }

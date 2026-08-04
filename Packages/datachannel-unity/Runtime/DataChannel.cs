@@ -15,10 +15,14 @@ namespace DataChannelUnity
         public string Label { get; }
         public bool IsOpen => _open && !_disposed;
 
+        /// <summary>供 pump 在派发过程中逐项验活。</summary>
+        internal bool IsDisposed => _disposed;
+
         public event Action Opened;
         public event Action Closed;
         public event Action<string> ErrorOccurred;
-        public event Action<byte[]> MessageReceived;
+        /// <summary>收到消息。载荷**只在回调期间有效**，见 <see cref="DataChannelMessageHandler"/>。</summary>
+        public event DataChannelMessageHandler MessageReceived;
 
         internal DataChannel(PeerConnection peer, int handle, string label, bool ownsCreation)
         {
@@ -137,7 +141,7 @@ namespace DataChannelUnity
             _observer?.OnError(message);
         }
 
-        internal void RaiseMessage(byte[] data)
+        internal void RaiseMessage(ReadOnlySpan<byte> data)
         {
             MessageReceived?.Invoke(data);
             _observer?.OnMessage(data);

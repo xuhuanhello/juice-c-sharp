@@ -51,7 +51,7 @@ namespace DataChannelUnity.Tests
                     incoming = ch;
                     ch.MessageReceived += bytes =>
                     {
-                        gotB = Encoding.UTF8.GetString(bytes);
+                        gotB = Encoding.UTF8.GetString(bytes.ToArray());
                         ch.Send(Encoding.UTF8.GetBytes("pong"));
                     };
                 };
@@ -62,7 +62,7 @@ namespace DataChannelUnity.Tests
                     aOpened = true;
                     outgoing.Send(Encoding.UTF8.GetBytes("ping"));
                 };
-                outgoing.MessageReceived += bytes => gotA = Encoding.UTF8.GetString(bytes);
+                outgoing.MessageReceived += bytes => gotA = Encoding.UTF8.GetString(bytes.ToArray());
 
                 // 只推进帧。事件要么由已注册的 PlayerLoop pump 送达，要么送不到 ——
                 // 后者正是本测试要抓的回归。

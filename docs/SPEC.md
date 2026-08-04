@@ -211,6 +211,14 @@ No `rtcSetMessageCallback` is installed, so messages stay in upstream's queue (`
 
 The control queue is safe to leave unbounded precisely because data no longer flows through it: its growth rate is a function of the connection count, which the application controls, not of peer traffic.
 
+> **Back-pressure points outward, and that is a cost, not only a feature.** The mechanism above couples *local* slowness to *remote* throughput: an application whose frame rate drops, or whose message callback is expensive, will throttle the peer that is sending to it. Nothing is lost, but the peer's send rate falls, and for latency-sensitive traffic the queued messages are also **stale by the time they are delivered** — classic head-of-line blocking.
+>
+> This is the right default (see the reliability rule below), but it is the wrong behaviour for state synchronisation, where a fresher message strictly supersedes an older one. **That case is served by choosing the channel mode, not by weakening the guarantee** — see §6, *Choosing a channel mode*.
+
+**The rule is not "never lose data" — it is "never lie about the mode the application chose".** An application that opens an unreliable channel expects gaps and writes code that tolerates them. An application that opens a *reliable* channel does not: SCTP has already paid for retransmission and head-of-line blocking on its behalf, so discarding the message afterwards, on our own floor, silently breaks a guarantee it is relying on and may be building deltas, chunked transfers or RPC on top of. A general-purpose P2P library does not get to assume the traffic is periodic state that "the next update will fix".
+
+The same rule read on the control queue is stronger and cheaper: dropping a `DcClosed` leaves the managed state machine permanently desynchronised — the application keeps sending on a dead channel and **no later event corrects it**. Enforcing it costs one decision (don't bound that queue), not a mechanism.
+
 **Polling, not readiness events.** No `DC_AVAILABLE` event exists; the pump walks open channels each frame and skips on `NOT_AVAIL`. The pump therefore holds **no state**. Upstream's `triggerAvailable` only fires on the empty→non-empty edge, so a readiness-event design would stall a channel until its next such edge — a bug class that is near-impossible to reproduce. Channel counts are single digits to a few dozen; a sub-microsecond P/Invoke per channel per frame is the cheaper trade.
 
 **WebGL cannot honour the back-pressure guarantee** — see §8.
@@ -470,7 +478,13 @@ Draining is the *correct operating point* of the back-pressure loop built in §4
 
 The segments are kept separate because their producers differ: control-event rate is a function of the connection count (bounded, application-controlled), message rate is a function of peer traffic (unbounded). Sharing a budget would let traffic push `DcClosed` into a later frame, after which the application keeps sending on a dead channel.
 
-> **Accepted weakness, stated plainly:** a fast peer can stretch the pump segment linearly with its traffic, and nothing stands in the way. The correct fix is a per-connection inbound rate limit with disconnection, at a layer that can react to *that peer* — out of scope here (§1). Because it is accepted, it must at least be **visible**: see below.
+> **Accepted weakness, stated plainly — and it runs in both directions.**
+>
+> *Inward:* a fast peer can stretch the pump segment linearly with its traffic, and nothing stands in the way. The correct fix is a per-connection inbound rate limit with disconnection, at a layer that can react to *that peer* — out of scope here (§1).
+>
+> *Outward:* because draining is what keeps the upstream queue empty, **a slow frame here throttles the peer sending to us** (§4). A hitch in the application propagates across the wire as reduced send rate for the remote side. This is inherent to back-pressure, not a defect, but it must not be discovered in the field: it is the reason the slow-frame warning below exists, and the reason state-sync traffic belongs on an unreliable channel.
+>
+> Because both are accepted, both must at least be **visible**: see below.
 
 #### Observability
 
@@ -582,6 +596,17 @@ DataChannelState State { get; }        // live query, not a cached flag
 | `MaxRetransmits` / `MaxPacketLifeTime` | `Reliable == true` → **both must be 0**, else `ArgumentException`. `Reliable == false` → **at most one** may be set, else `ArgumentException` |
 
 The W3C spec makes the two `Max*` fields mutually exclusive; the extra `Reliable` flag makes our rule stricter and clearer. Upstream would fail anyway (`impl/datachannel.cpp:82-83` throws `"Both maxPacketLifeTime and maxRetransmits are set"`); validating in C# is about giving an error the caller can act on directly instead of a generic `DataChannelError.Invalid`.
+
+#### Choosing a channel mode
+
+The reliability flags are the place where an application decides whether it wants delivery or freshness. Document it, because the default is the safe one, not the fast one:
+
+| Traffic | Mode | Why |
+|---------|------|-----|
+| State synchronisation (positions, transforms, periodic snapshots) | `Reliable = false`, `Ordered = false` | A newer message strictly supersedes an older one. Reliability buys nothing and costs head-of-line blocking; back-pressure from a slow receiver would throttle the sender for data that is already stale (§4) |
+| Commands, events, RPC, deltas, chunked transfers | `Reliable = true` (default) | A gap cannot be recovered by "the next message"; losing one desynchronises or corrupts reassembly |
+
+This is the correct location for the trade-off: the application knows the shape of its traffic, the library does not. **The library's job is to make both modes available and to lie about neither** — which is why a reliable channel never drops on our floor (§4), and why an unreliable one drops without apology.
 
 `Mtu`, `MaxMessageSize`, `PortRangeBegin`, `PortRangeEnd` treat **`0` as "automatic"**. Give that value a named constant and say so in the XML docs rather than leaving it in upstream's header comments.
 

@@ -34,8 +34,8 @@ namespace DataChannelUnity.Internal
             IncomingDataChannel = 5,
             DcOpen = 6,
             DcClosed = 7,
-            DcError = 8,
-            DcMessage = 9
+            DcError = 8
+            // 没有 DcMessage：消息不进事件队列，改由 dcu_dc_receive 逐通道拉取。
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -132,5 +132,12 @@ namespace DataChannelUnity.Internal
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_event_next(out EventHeader header,
             byte[] buf, int cap, byte[] buf2, int cap2);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int dcu_event_queue_depth(out int depth);
+
+        // 语义与上游 rtcReceiveMessage 相同：peek -> 拷贝 -> 成功才丢弃。
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int dcu_dc_receive(int dc, byte[] buf, int cap, out int len);
     }
 }

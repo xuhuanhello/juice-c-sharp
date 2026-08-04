@@ -40,8 +40,8 @@ namespace DataChannelUnity.Tests
                     incoming = ch;
                     ch.MessageReceived += bytes =>
                     {
-                        if (bytes.Length == LargeSize) gotLarge = (byte[])bytes.Clone();
-                        else gotSentinel = System.Text.Encoding.UTF8.GetString(bytes);
+                        if (bytes.Length == LargeSize) gotLarge = bytes.ToArray();
+                        else gotSentinel = System.Text.Encoding.UTF8.GetString(bytes.ToArray());
                     };
                 };
 

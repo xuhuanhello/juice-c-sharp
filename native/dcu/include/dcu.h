@@ -74,8 +74,9 @@ typedef enum dcu_event_type {
     DCU_EVENT_INCOMING_DATA_CHANNEL = 5,
     DCU_EVENT_DC_OPEN = 6,
     DCU_EVENT_DC_CLOSED = 7,
-    DCU_EVENT_DC_ERROR = 8,
-    DCU_EVENT_DC_MESSAGE = 9
+    DCU_EVENT_DC_ERROR = 8
+    /* 没有 DC_MESSAGE：消息不进事件队列，改由 dcu_dc_receive 逐通道拉取。
+     * 见下方「控制推、数据拉」。 */
 } dcu_event_type;
 
 typedef struct dcu_event_header {
@@ -149,6 +150,26 @@ DCU_API int dcu_dc_buffered_amount(int dc, int *out_amount);
  * DCU_EVENT_NONE 并返回 DCU_ERR_NOT_AVAIL。 */
 DCU_API int dcu_event_next(dcu_event_header *out_header, void *buf, int cap, void *buf2,
                            int cap2);
+
+/* 控制队列的只读深度。永不丢控制事件，故队列无界；深度暴露出来是为了让积压可见。 */
+DCU_API int dcu_event_queue_depth(int *out_depth);
+
+/*
+ * 控制推、数据拉（SPEC §4 / #30 决议 2、3）
+ * -----------------------------------------
+ * 消息**不进**上面的事件队列。dcu 刻意不设 rtcSetMessageCallback —— 上游
+ * Channel::flushPendingMessages 是 `while (messageCallback)`，不设回调消息就留在
+ * 它自己的 mRecvQueue（1024 条/通道）里。队列满时 push **阻塞**，背压顶回 SCTP
+ * 接收窗口，对端被迫减速。**这是真背压，不是丢包** —— 在 reliable 通道上丢消息
+ * 等于让 Reliable = true 变成假承诺。
+ *
+ * 语义与上游 rtcReceiveMessage 逐字相同：peek -> 拷贝 -> **成功才丢弃**。
+ * 缓冲不足时填入所需长度、不消费，扩容重试幂等。
+ *
+ * 注意：WebGL 上背压保证**不成立**（datachannel-wasm 没有接收队列，浏览器
+ * onmessage 不可阻塞），见 SPEC §8。
+ */
+DCU_API int dcu_dc_receive(int dc, void *buf, int cap, int *out_len);
 
 #ifdef __cplusplus
 }

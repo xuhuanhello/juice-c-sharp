@@ -70,6 +70,13 @@ public:
         return DCU_OK;
     }
 
+    // 只读深度。控制队列**无界**（#30 决议 4：永不丢控制事件；其增长速率由连接数
+    // 决定，而连接数是应用自己控制的量）。深度暴露出来是为了让积压可见。
+    int size() {
+        std::lock_guard<std::mutex> lock(mu_);
+        return static_cast<int>(q_.size());
+    }
+
     void clear() {
         std::lock_guard<std::mutex> lock(mu_);
         q_.clear();

@@ -156,22 +156,10 @@ void wire_dc_callbacks(int h, const std::shared_ptr<rtc::DataChannel> &dc) {
         push_event(std::move(ev));
     });
 
-    // 推模式，与迁移前一致。改为拉模式（#30）是 SPEC §14 第 2 步，届时见不变量 2。
-    dc->onMessage([h](rtc::message_variant data) {
-        DcuEvent ev;
-        ev.type = DCU_EVENT_DC_MESSAGE;
-        ev.dc = h;
-        if (std::holds_alternative<rtc::binary>(data)) {
-            const auto &b = std::get<rtc::binary>(data);
-            const auto *p = reinterpret_cast<const uint8_t *>(b.data());
-            ev.payload.assign(p, p + b.size());
-        } else {
-            // 文本帧：透明转 UTF-8 字节。variant 自带长度，内嵌 NUL 不再被截断
-            // —— 迁移前走 strlen，这是 #32 D7 记录的真 bug，被本次迁移结构性消掉。
-            ev.payload = bytes_from_string(std::get<rtc::string>(data));
-        }
-        push_event(std::move(ev));
-    });
+    // **刻意不设 onMessage。** 上游 Channel::flushPendingMessages 是
+    // `while (messageCallback)` —— 不设回调，消息就留在它自己的 mRecvQueue 里，
+    // 由 dcu_dc_receive 拉取。这是真背压的前提（见 dcu.h「控制推、数据拉」）。
+    // 加回这个回调会**静默**摧毁背压闭环：消息会立刻被推进无界的控制队列。
 }
 
 void wire_pc_callbacks(int h, const std::shared_ptr<rtc::PeerConnection> &pc) {
@@ -459,6 +447,50 @@ int dcu_dc_buffered_amount(int dc, int *out_amount) {
 
 int dcu_event_next(dcu_event_header *out_header, void *buf, int cap, void *buf2, int cap2) {
     return g_queue.next(out_header, buf, cap, buf2, cap2);
+}
+
+int dcu_event_queue_depth(int *out_depth) {
+    if (!out_depth)
+        return DCU_ERR_INVALID;
+    *out_depth = g_queue.size();
+    return DCU_OK;
+}
+
+int dcu_dc_receive(int dc, void *buf, int cap, int *out_len) {
+    if (!out_len)
+        return DCU_ERR_INVALID;
+    *out_len = 0;
+    if (dc <= 0)
+        return DCU_ERR_INVALID;
+
+    return dcu_wrap([dc, buf, cap, out_len] {
+        auto ch = g_table.get_dc(dc);
+
+        // 不变量 2（见文件头）：peek -> 拷贝 -> **成功才 receive() 丢弃**。
+        // 直接 receive() 再拷贝是 C++ 面上最直觉的写法，但调用方缓冲不足时
+        // 消息就丢了 —— 在 reliable 通道上那是协议违约。
+        auto msg = ch->peek();
+        if (!msg)
+            return DCU_ERR_NOT_AVAIL;
+
+        const bool isBinary = std::holds_alternative<rtc::binary>(*msg);
+        const size_t size = isBinary ? std::get<rtc::binary>(*msg).size()
+                                     : std::get<rtc::string>(*msg).size();
+        *out_len = static_cast<int>(size);
+
+        if (!buf || cap < static_cast<int>(size))
+            return DCU_ERR_TOO_SMALL; // 不消费
+
+        if (size > 0) {
+            const void *src = isBinary
+                                  ? static_cast<const void *>(std::get<rtc::binary>(*msg).data())
+                                  : static_cast<const void *>(std::get<rtc::string>(*msg).data());
+            std::memcpy(buf, src, size);
+        }
+
+        ch->receive(); // 拷贝成功了才丢弃
+        return DCU_OK;
+    });
 }
 
 } // extern "C"
