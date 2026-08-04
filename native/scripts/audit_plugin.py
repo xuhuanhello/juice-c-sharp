@@ -63,6 +63,10 @@ MACOS_ALLOWED_PREFIXES = (
 LINUX_ALLOWED_NAMES = {
     "libc.so.6", "libm.so.6", "libdl.so.2", "librt.so.1",
     "libpthread.so.0", "libstdc++.so.6", "libgcc_s.so.1",
+    # 动态加载器自身。它会出现在 DT_NEEDED 里，但不是「依赖了某个第三方库」的
+    # 那种依赖 —— 没有它任何动态链接的产物都跑不起来。首次 Linux CI 实跑时被
+    # 这条门禁拦下才发现漏了；按架构各有一个名字。
+    "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1",
 }
 
 # Windows：PE 导入表只有 DLL 名。

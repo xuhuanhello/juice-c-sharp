@@ -190,14 +190,21 @@ def main() -> int:
         asset_path = args.plugin_root / rel
         meta_path = args.plugin_root / (rel + ".meta")
 
-        # `.meta` 必须当且仅当产物存在时存在。给不存在的资产写 .meta 会产生孤儿，
-        # Unity 下一次刷新就把它删掉 —— 那样这条门禁每次都红，而红的原因是我们
-        # 自己造的垃圾。这也正是 #53「权威源 = Plugins/ 目录内容」的直接后果：
-        # 平台验过才入库二进制，二进制在才有 .meta，清单不可能撒谎。
-        if not asset_path.exists():
+        # 一个平台算「已入列」的判据：**产物存在，或者 .meta 已入库**。
+        #
+        # 起初我只看产物是否存在，并把「产物不存在却有 .meta」当成孤儿报错。CI 上
+        # 立刻红了，而且报得没错——只是判据错了：二进制目前**被 .gitignore 忽略**
+        # （#35：矩阵补齐前一个二进制都不入库），所以在任何干净 clone 里产物都不
+        # 存在，而 .meta 是入库的。那不是孤儿，那是本仓库当前的正常状态。
+        #
+        # 改成看两者之一即可：**入库的 .meta 本身就是「这个平台已进矩阵」的声明**。
+        # 两者都没有 = 尚未入列，跳过。
+        #
+        # 原本想防的是「给还没有产物的平台生成 .meta，Unity 刷新时当孤儿删掉」——
+        # 那个风险只在本机工作树里成立，而它是自愈的：.meta 被删 → 平台不再入列
+        # → 下次直接跳过，不会红。所以不需要为它单独报错。
+        if not asset_path.exists() and not meta_path.is_file():
             absent.append(rel)
-            if meta_path.is_file():
-                drift.append(f"  产物不存在却有 .meta（孤儿，Unity 刷新会删掉它）: {rel}")
             continue
 
         content = render(read_guid(meta_path, args.allow_new_guid), platform_data)
