@@ -42,8 +42,48 @@ namespace DataChannelUnity
         public event Action Opened;
         public event Action Closed;
         public event Action<string> ErrorOccurred;
-        /// <summary>收到消息。载荷**只在回调期间有效**，见 <see cref="DataChannelMessageHandler"/>。</summary>
-        public event DataChannelMessageHandler MessageReceived;
+
+        private DataChannelMessageHandler _messageReceived;
+        private DataChannelMessageHandler[] _messageHandlers = Array.Empty<DataChannelMessageHandler>();
+
+        /// <summary>
+        /// 收到消息。载荷**只在回调期间有效**，见 <see cref="DataChannelMessageHandler"/>。
+        /// </summary>
+        /// <remarks>
+        /// 这个事件写了自定义的 add/remove，只为**缓存 invocation list**：
+        /// <c>GetInvocationList()</c> 每次调用分配一个 <c>Delegate[]</c>，放在刚做成
+        /// 零分配的消息路径上，等于把「每条消息一个 <c>byte[]</c>」换成
+        /// 「每条消息一个 <c>Delegate[]</c>」—— 白改。快照只在订阅变化时重建。
+        ///
+        /// 顺带解决另一件事：在回调里退订自己是合法且常见的写法，遍历快照天然安全。
+        /// </remarks>
+        public event DataChannelMessageHandler MessageReceived
+        {
+            add
+            {
+                _messageReceived = (DataChannelMessageHandler)Delegate.Combine(_messageReceived, value);
+                RebuildMessageHandlers();
+            }
+            remove
+            {
+                _messageReceived = (DataChannelMessageHandler)Delegate.Remove(_messageReceived, value);
+                RebuildMessageHandlers();
+            }
+        }
+
+        private void RebuildMessageHandlers()
+        {
+            if (_messageReceived == null)
+            {
+                _messageHandlers = Array.Empty<DataChannelMessageHandler>();
+                return;
+            }
+            var list = _messageReceived.GetInvocationList();
+            var snapshot = new DataChannelMessageHandler[list.Length];
+            for (int i = 0; i < list.Length; i++)
+                snapshot[i] = (DataChannelMessageHandler)list[i];
+            _messageHandlers = snapshot;
+        }
 
         internal DataChannel(PeerConnection peer, int handle, string label)
         {
@@ -77,6 +117,17 @@ namespace DataChannelUnity
             }
         }
 
+        /// <summary>
+        /// 空载荷时借它取一个**非空**指针。
+        /// </summary>
+        /// <remarks>
+        /// <c>fixed</c> 作用在空数组 / 空 Span 上得到的是**空指针**，而「传 <c>null</c> +
+        /// 长度 0 是否等价于一条空消息」是我们**没有核实过**的上游行为。绕开一个未验证
+        /// 的假设只要这一行 —— 这正是 #31 立的方法论：要么把巧合变成被检查的不变量，
+        /// 要么干脆绕开它。零长度消息本身是合法的（WebRTC 语义允许，常被当心跳用）。
+        /// </remarks>
+        private static readonly byte[] EmptyPayloadSentinel = new byte[1];
+
         public void Send(byte[] data)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
@@ -88,32 +139,44 @@ namespace DataChannelUnity
             MainThread.Assert("DataChannel.Send");
             ThrowIfDisposed();
             if (data == null) throw new ArgumentNullException(nameof(data));
-            if (offset < 0 || count < 0 || offset + count > data.Length)
-                throw new ArgumentOutOfRangeException(nameof(count));
-            // **刻意不预检 open 状态**（#32 决议 1）：门禁建在缓存上时，一次丢失的
-            // 通知就等于一个永久卡死的通道。未 open 时发送由原生侧失败并如实报错。
-            // （上面这个越界检查在 int.MaxValue 附近会溢出，改写归 S7。）
+            if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset), "偏移不能为负。");
+            if (count < 0) throw new ArgumentOutOfRangeException(nameof(count), "长度不能为负。");
+            // **写成减法而不是加法。** offset 与 count 此刻已知非负，所以
+            // data.Length - offset 不可能溢出；而 offset + count 在 int.MaxValue
+            // 附近会回绕成负数，让这个检查**整个失效**。有了 fixed 之后，
+            // 这是越界读之前的最后一道闸 —— 原先那句加法是真的能被绕过去的。
+            if (data.Length - offset < count)
+                throw new ArgumentOutOfRangeException(nameof(count),
+                    "offset + count 超出数组长度（length=" + data.Length
+                    + ", offset=" + offset + ", count=" + count + "）。");
 
-            byte[] slice = data;
-            if (offset != 0 || count != data.Length)
-            {
-                slice = new byte[count];
-                Buffer.BlockCopy(data, offset, slice, 0, count);
-            }
-
-            DataChannelRuntime.RequireOk(
-                NativeMethods.dcu_dc_send(NativeHandle, slice, count),
-                "dcu_dc_send");
+            SendCore(new ReadOnlySpan<byte>(data, offset, count));
         }
 
         public void Send(ReadOnlySpan<byte> data)
         {
             MainThread.Assert("DataChannel.Send");
             ThrowIfDisposed();
-            var arr = data.ToArray();
-            DataChannelRuntime.RequireOk(
-                NativeMethods.dcu_dc_send(NativeHandle, arr, arr.Length),
-                "dcu_dc_send");
+            SendCore(data);
+        }
+
+        /// <summary>三个重载共用的零拷贝发送。</summary>
+        /// <remarks>
+        /// **刻意不预检 open 状态**（#32 决议 1）：门禁建在缓存上时，一次丢失的
+        /// 通知就等于一个永久卡死的通道。未 open 时发送由原生侧失败并如实报错。
+        /// </remarks>
+        private unsafe void SendCore(ReadOnlySpan<byte> data)
+        {
+            DataChannelRuntime.CheckPumpLiveness("DataChannel.Send");
+
+            fixed (byte* payload = data)
+            fixed (byte* sentinel = EmptyPayloadSentinel)
+            {
+                var p = data.Length == 0 ? sentinel : payload;
+                DataChannelRuntime.RequireOk(
+                    NativeMethods.dcu_dc_send(NativeHandle, (IntPtr)p, data.Length),
+                    "dcu_dc_send");
+            }
         }
 
         public void Dispose()
@@ -201,26 +264,48 @@ namespace DataChannelUnity
 
         internal void RaiseOpen()
         {
-            Opened?.Invoke();
-            _observer?.OnOpen();
+            SafeDispatch.Invoke(Opened, "DataChannel.Opened");
+            var obs = _observer;
+            if (obs != null) SafeDispatch.Observer(obs.OnOpen, "IDataChannelObserver.OnOpen");
         }
 
         internal void RaiseClosed()
         {
-            Closed?.Invoke();
-            _observer?.OnClosed();
+            SafeDispatch.Invoke(Closed, "DataChannel.Closed");
+            var obs = _observer;
+            if (obs != null) SafeDispatch.Observer(obs.OnClosed, "IDataChannelObserver.OnClosed");
         }
 
         internal void RaiseError(string message)
         {
-            ErrorOccurred?.Invoke(message);
-            _observer?.OnError(message);
+            SafeDispatch.Invoke(ErrorOccurred, message, "DataChannel.ErrorOccurred");
+            var obs = _observer;
+            if (obs != null) SafeDispatch.Observer(() => obs.OnError(message), "IDataChannelObserver.OnError");
         }
 
+        /// <summary>
+        /// 消息派发。走**缓存快照**而非 <c>GetInvocationList()</c>，且逐订阅者隔离。
+        /// </summary>
+        /// <remarks>
+        /// 这里没法复用 <see cref="SafeDispatch"/> 的泛型重载：载荷是
+        /// <c>ReadOnlySpan&lt;byte&gt;</c>，C# 9 下 ref struct 不能作泛型实参，
+        /// 也不能被 lambda 捕获。所以这一份 try/catch 是手写的。
+        /// </remarks>
         internal void RaiseMessage(ReadOnlySpan<byte> data)
         {
-            MessageReceived?.Invoke(data);
-            _observer?.OnMessage(data);
+            // 取一次引用即可：订阅变化会**换掉**这个数组而不是改它，
+            // 所以回调里退订自己对本次遍历天然无害。
+            var handlers = _messageHandlers;
+            for (int i = 0; i < handlers.Length; i++)
+            {
+                try { handlers[i](data); }
+                catch (Exception e) { SafeDispatch.Report("DataChannel.MessageReceived", e); }
+            }
+
+            var obs = _observer;
+            if (obs == null) return;
+            try { obs.OnMessage(data); }
+            catch (Exception e) { SafeDispatch.Report("IDataChannelObserver.OnMessage", e); }
         }
     }
 }

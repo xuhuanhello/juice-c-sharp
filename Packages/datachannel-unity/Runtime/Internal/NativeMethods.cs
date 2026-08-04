@@ -118,8 +118,18 @@ namespace DataChannelUnity.Internal
         public static extern int dcu_pc_create_data_channel(
             int pc, byte[] label, int label_len, ref DcInitNative init, out int dc);
 
+        /// <summary>
+        /// 发送。**声明成 <see cref="IntPtr"/> 不是 ABI 变更** —— C 侧
+        /// <c>dcu_dc_send(int, const void*, int)</c> 一字未动，改的只是这里的封送方式。
+        /// </summary>
+        /// <remarks>
+        /// 澄清一个容易反过来记的事实：blittable <c>byte[]</c> 的默认封送本来就是
+        /// **钉住而非复制**，所以 <c>Send(byte[])</c> 全量发送从来不是问题；真正在复制的
+        /// 是 <c>offset != 0</c> 的切片和 <c>ReadOnlySpan.ToArray()</c> —— 后者把 Span
+        /// 重载存在的全部意义抹平了。改 <c>IntPtr</c> + <c>fixed</c> 之后三条路径都零拷贝。
+        /// </remarks>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int dcu_dc_send(int dc, byte[] data, int len);
+        public static extern int dcu_dc_send(int dc, IntPtr data, int len);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_dc_close(int dc);

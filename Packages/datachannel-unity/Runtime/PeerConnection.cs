@@ -55,6 +55,7 @@ namespace DataChannelUnity
         {
             MainThread.Assert("PeerConnection..ctor");
             DataChannelRuntime.EnsureNative();
+            DataChannelRuntime.CheckPumpLiveness("new PeerConnection");
             if (!DataChannelRuntime.IsNativeAvailable)
                 throw new DataChannelException("Native plugin is not available. Build datachannel_unity per docs/SPEC.md.");
 
@@ -86,6 +87,7 @@ namespace DataChannelUnity
         {
             MainThread.Assert("PeerConnection.CreateDataChannel");
             ThrowIfDisposed();
+            DataChannelRuntime.CheckPumpLiveness("PeerConnection.CreateDataChannel");
             if (label == null) throw new ArgumentNullException(nameof(label));
             init = init ?? new DataChannelInit();
             init.Validate();
@@ -261,36 +263,49 @@ namespace DataChannelUnity
         public override string ToString() =>
             "PeerConnection(handle=" + NativeHandle + ", disposed=" + _disposed + ")";
 
+        // 以下五个 Raise 全部走每订阅者隔离（SPEC §6 / #38 决议 5）。控制事件稀疏，
+        // 直接 GetInvocationList 的那次数组分配无关紧要 —— 与消息事件的缓存快照
+        // 是同一语义、不同实现，按频率分档。
         internal void RaiseLocalDescription(string sdp, string type)
         {
-            LocalDescriptionGenerated?.Invoke(sdp, type);
-            _observer?.OnLocalDescription(sdp, type);
+            SafeDispatch.Invoke(LocalDescriptionGenerated, sdp, type, "PeerConnection.LocalDescriptionGenerated");
+            var obs = _observer;
+            if (obs != null)
+                SafeDispatch.Observer(() => obs.OnLocalDescription(sdp, type), "IPeerConnectionObserver.OnLocalDescription");
         }
 
         internal void RaiseLocalCandidate(string candidate, string mid)
         {
-            LocalCandidateGenerated?.Invoke(candidate, mid);
-            _observer?.OnLocalCandidate(candidate, mid);
+            SafeDispatch.Invoke(LocalCandidateGenerated, candidate, mid, "PeerConnection.LocalCandidateGenerated");
+            var obs = _observer;
+            if (obs != null)
+                SafeDispatch.Observer(() => obs.OnLocalCandidate(candidate, mid), "IPeerConnectionObserver.OnLocalCandidate");
         }
 
         internal void RaiseConnectionState(ConnectionState state)
         {
             ConnectionState = state;
-            ConnectionStateChanged?.Invoke(state);
-            _observer?.OnConnectionStateChange(state);
+            SafeDispatch.Invoke(ConnectionStateChanged, state, "PeerConnection.ConnectionStateChanged");
+            var obs = _observer;
+            if (obs != null)
+                SafeDispatch.Observer(() => obs.OnConnectionStateChange(state), "IPeerConnectionObserver.OnConnectionStateChange");
         }
 
         internal void RaiseGatheringState(GatheringState state)
         {
             GatheringState = state;
-            GatheringStateChanged?.Invoke(state);
-            _observer?.OnGatheringStateChange(state);
+            SafeDispatch.Invoke(GatheringStateChanged, state, "PeerConnection.GatheringStateChanged");
+            var obs = _observer;
+            if (obs != null)
+                SafeDispatch.Observer(() => obs.OnGatheringStateChange(state), "IPeerConnectionObserver.OnGatheringStateChange");
         }
 
         internal void RaiseIncomingDataChannel(DataChannel channel)
         {
-            DataChannelReceived?.Invoke(channel);
-            _observer?.OnDataChannel(channel);
+            SafeDispatch.Invoke(DataChannelReceived, channel, "PeerConnection.DataChannelReceived");
+            var obs = _observer;
+            if (obs != null)
+                SafeDispatch.Observer(() => obs.OnDataChannel(channel), "IPeerConnectionObserver.OnDataChannel");
         }
     }
 }

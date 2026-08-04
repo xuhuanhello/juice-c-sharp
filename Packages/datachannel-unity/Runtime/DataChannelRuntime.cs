@@ -12,11 +12,28 @@ namespace DataChannelUnity
     /// </summary>
     public static class DataChannelRuntime
     {
+        // 可观测性阈值。全部是 **internal 常量，不开配置面**（SPEC §6）：给旋钮就要
+        // 定义语义、写进规格、测它，而没有任何证据说这些值是错的。90fps VR 与 30fps
+        // 移动端对慢帧的容忍度确实不同，真有人撞上再议（map #26 的 fog 里记着这条）。
+        private const double SlowFrameMs = 4.0;                 // 60fps 的 16.7ms 里吃掉 4ms 就该说话
+        private const int ControlQueueDepthWarn = 1024;         // 与上游 RECV_QUEUE_LIMIT 同量级
+        private const double PumpStaleSeconds = 5.0;            // 秒级；只在应用调 API 时查，绝不后台轮询
+
         private static bool _nativeReady;
         private static bool _initAttempted;
         private static bool _pumpRegistered;
+
+        // pump 存活：单调计数 + 单调墙钟。计数只用于诊断文本，判定看时间戳。
+        private static long _pumpTicks;
+        private static long _lastPumpTimestamp;
+        private static bool _pumpReregisterAttempted;
+        private static bool _pumpRetryExhausted;
+
         private static byte[] _payloadBuf = new byte[65536];
         private static byte[] _payload2Buf = new byte[4096];
+
+        // 四路缓冲各记一次「首次超基线」。**只涨不缩**（#45 决议 1，推翻 #38 的滞回收缩）。
+        private static bool _grewPayload, _grewPayload2, _grewMessage, _grewLog;
 
         // 消息缓冲与控制缓冲**分开**（SPEC §6）：SDP/candidate 稳定在几 KB，
         // 消息可能几 MB，共用一个就是让前者永远按后者的尺寸躺着。
@@ -56,8 +73,15 @@ namespace DataChannelUnity
             _nativeReady = false;
             _initAttempted = false;
             _pumpRegistered = false;
+            _pumpTicks = 0;
+            _lastPumpTimestamp = 0;
+            _pumpReregisterAttempted = false;
+            _pumpRetryExhausted = false;
+            _grewPayload = _grewPayload2 = _grewMessage = _grewLog = false;
             // 上个域残留的泄漏记录不该报进新域 —— 那些对象的表项已经随静态字段一起没了。
             LeakTracker.Clear();
+            // 同理：别让上个域的节流窗口把新域的第一条告警压掉。
+            Throttle.Clear();
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
@@ -91,6 +115,10 @@ namespace DataChannelUnity
                 if (rc == NativeMethods.Success)
                 {
                     _nativeReady = true;
+                    // 存活判定的基准点。不设的话，EditMode 下第一次 new PeerConnection
+                    // 会因为「pump 从来没跑过」被误报成死泵 —— 编辑模式本来就没有
+                    // PlayerLoop，那不是故障。
+                    _lastPumpTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                     NativeMethods.dcu_set_log_level((int)DataChannelLog.Level);
                     NativeMethods.dcu_abi_version(out var abi);
                     DataChannelLog.Emit(LogLevel.Info, "Native library initialized (abi=" + abi + ").");
@@ -168,14 +196,140 @@ namespace DataChannelUnity
         public static void Pump()
         {
             MainThread.Assert("DataChannelRuntime.Pump");
+
+            // **存活戳记在最前面，且在 _nativeReady 检查之前。** 原生没就绪时 pump
+            // 照样是在跑的，那不是「泵死了」；把戳记放在 return 之后会让存活检测
+            // 去报一个根本不存在的故障。
+            var start = System.Diagnostics.Stopwatch.GetTimestamp();
+            _pumpTicks++;
+            _lastPumpTimestamp = start;
+
             if (!_nativeReady) return;
+
             // 泄漏报告最先排，且**必须在派发之前** —— 它要摘 HandleTable 的表项，
             // 那是一次字典改动，夹在派发中间就是在自己迭代的脚下拆桥。
             LeakTracker.Drain();
             // 日志先排：原生日志往往是后面那些事件的成因，先出来才有上下文。
             DrainNativeLogs();
+            WarnIfControlQueueBacklogged();
             DrainControlEvents();
             DrainMessages();
+
+            var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0
+                            / System.Diagnostics.Stopwatch.Frequency;
+            if (elapsedMs > SlowFrameMs) WarnSlowFrame(elapsedMs);
+        }
+
+        /// <summary>
+        /// pump 段吃掉的帧时间超阈值时告警。**常驻，不条件编译** ——
+        /// 每帧两次 <c>Stopwatch.GetTimestamp()</c> 的开销可以忽略，
+        /// 与 #29 那个真的贵的泄漏栈捕获不是一回事。
+        /// </summary>
+        /// <remarks>
+        /// 这条是 #38 决议 3 接受那个软肋的**代价条款**：高速对端能让本段随流量线性
+        /// 变长，我们没有任何东西挡在前面（挡它的正确位置是连接层的每连接入站速率，
+        /// 那是 out of scope 的另一件事）。软肋既然接受了，就必须能被看见 ——
+        /// 否则临床表现是「不明原因掉帧」，而排查的人第一反应绝不会是网络层。
+        /// </remarks>
+        private static void WarnSlowFrame(double elapsedMs)
+        {
+            if (!Throttle.Note("pump-slow-frame", elapsedMs, out var suppressed, out var peak)) return;
+            DataChannelLog.Emit(LogLevel.Warning,
+                "pump 本帧耗时 " + elapsedMs.ToString("0.##") + " ms，超过 " + SlowFrameMs + " ms 阈值。"
+                + "常见成因：对端流量过大，或你的消息回调本身很慢（回调是同步跑在这一段里的）。"
+                + Throttle.SuppressedSuffix(suppressed, peak, " ms"));
+        }
+
+        /// <summary>
+        /// 控制队列积压告警。**必须在排空之前查** —— 排完必然是 0，那时再查什么也看不见。
+        /// </summary>
+        /// <remarks>
+        /// 控制队列无界、永不丢事件，所以积压到这个量只可能意味着两件事之一：
+        /// pump 没在跑，或者某个回调卡住了。它与 pump 存活检测是同一件事的两个观测面。
+        /// </remarks>
+        private static void WarnIfControlQueueBacklogged()
+        {
+            if (NativeMethods.dcu_event_queue_depth(out var depth) != NativeMethods.Success) return;
+            if (depth <= ControlQueueDepthWarn) return;
+            if (!Throttle.Note("control-queue-depth", depth, out var suppressed, out var peak)) return;
+
+            DataChannelLog.Emit(LogLevel.Warning,
+                "控制事件队列积压 " + depth + " 条，超过 " + ControlQueueDepthWarn + " 阈值。"
+                + "队列无界、永不丢控制事件，所以积压只可能是 pump 没在跑或某个回调卡住了。"
+                + Throttle.SuppressedSuffix(suppressed, peak, " 条"));
+        }
+
+        /// <summary>
+        /// 检查「距上次 <see cref="Pump"/> 过去多久」，超阈值就报并**重试注册一次**。
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// 它防的不是启动时注册失败（那几乎不可能，而且当场就会throw），而是**注册之后被
+        /// 抹掉**：任何第三方包只要从 <c>GetDefaultPlayerLoop()</c> 重建再
+        /// <c>SetPlayerLoop</c>，就会把我们的条目连同别人的一起丢掉，而我们的
+        /// <c>_pumpRegistered</c> 还写着 true。这不是假想 —— 本仓库里 vendored 的 R3
+        /// 就往 PlayerLoop 里插东西。
+        /// </para>
+        /// <para>
+        /// **价值在检测与归因，不在修复**（#45 决议 2）。故障本身极显眼（什么都不通），
+        /// 难的是归因 —— 第一嫌疑人永远是网络或 TURN，绝不会是帧循环。所以错误消息
+        /// 必须点名成因与修法。
+        /// </para>
+        /// <para>
+        /// **重试恰好一次，之后停手。** 无限自愈是在跟另一个包来回抢 PlayerLoop，而且
+        /// 是静默地抢 —— 与 <see cref="SafeDispatch"/> 里否掉「连抛 N 次自动退订」是
+        /// 同一个形状：**静默改变别人建立的状态，比一条吵闹的日志更坏。**
+        /// </para>
+        /// <para>
+        /// 用 <c>Stopwatch</c> 的单调墙钟而不是 <c>Time.frameCount</c>（编辑模式下不可靠，
+        /// 而 pump 在编辑模式是常驻的），也不必为编辑模式分叉出
+        /// <c>EditorApplication.timeSinceStartup</c> —— 同一个时间戳每帧已经为慢帧告警取过。
+        /// </para>
+        /// </remarks>
+        internal static void CheckPumpLiveness(string api)
+        {
+            if (!_nativeReady || _lastPumpTimestamp == 0) return;
+
+            var staleSeconds = (System.Diagnostics.Stopwatch.GetTimestamp() - _lastPumpTimestamp)
+                               / (double)System.Diagnostics.Stopwatch.Frequency;
+            if (staleSeconds < PumpStaleSeconds) return;
+
+            if (_pumpRetryExhausted)
+            {
+                if (Throttle.Note("pump-dead", staleSeconds, out var s, out var p))
+                    DataChannelLog.Emit(LogLevel.Error,
+                        api + "：pump 已经 " + staleSeconds.ToString("0.#") + " 秒没有运行（至今共跑过 "
+                        + _pumpTicks + " 帧），"
+                        + "且**已停止重试注册**（重试过一次仍被抹掉）。本包不会继续跟其它包抢 PlayerLoop。"
+                        + "请自行排查谁在调 SetPlayerLoop，或每帧手动调 DataChannelRuntime.Pump()。"
+                        + Throttle.SuppressedSuffix(s, p, " 秒"));
+                return;
+            }
+
+            if (!_pumpReregisterAttempted)
+            {
+                _pumpReregisterAttempted = true;
+                DataChannelLog.Emit(LogLevel.Error,
+                    api + "：pump 已经 " + staleSeconds.ToString("0.#") + " 秒没有运行（至今共跑过 "
+                    + _pumpTicks + " 帧 —— 为 0 说明它从来没被调用过，非 0 说明是注册后被抹掉的）。"
+                    + "事件不会送达，连接看起来会像是「连不上」。**最可能的成因不是网络**，"
+                    + "而是某个第三方包用 PlayerLoop.GetDefaultPlayerLoop() 重建了循环再 SetPlayerLoop，"
+                    + "把本包的条目一起丢掉了（本仓库里的 R3 就往 PlayerLoop 插东西）。"
+                    + "修法：在那个包完成注册之后再初始化本包，或改为每帧手动调 "
+                    + "DataChannelRuntime.Pump()。现在**重试注册一次**。");
+
+                _pumpRegistered = false;
+                RegisterPump();
+                // 给新注册一个宽限期，否则下一次调用会立刻又判超时 —— 那时它还没跑过一帧。
+                _lastPumpTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                return;
+            }
+
+            _pumpRetryExhausted = true;
+            DataChannelLog.Emit(LogLevel.Error,
+                api + "：重试注册之后 pump 仍然没有运行（已停 " + staleSeconds.ToString("0.#") + " 秒）。"
+                + "**已停止重试** —— 再插回去就是在跟另一个包无限来回抢 PlayerLoop，"
+                + "而那种静默的拉锯比一条明确的错误更难查。请手动调 DataChannelRuntime.Pump()。");
         }
 
         /// <summary>
@@ -193,7 +347,7 @@ namespace DataChannelUnity
 
                 if (rc == NativeMethods.ErrTooSmall)
                 {
-                    EnsureCapacity(ref _logBuf, len);
+                    EnsureCapacity(ref _logBuf, len, "日志", ref _grewLog);
                     rc = NativeMethods.dcu_log_next(
                         out level, _logBuf, _logBuf.Length, out len, out dropped);
                     droppedTotal += dropped;
@@ -230,8 +384,8 @@ namespace DataChannelUnity
                 {
                     // header 里两个长度都是**精确值**，且事件未被消费；单消费者契约
                     // 保证两次调用之间队首不变，所以扩容后**一次重试必然成功**。
-                    EnsureCapacity(ref _payloadBuf, header.payload_len);
-                    EnsureCapacity(ref _payload2Buf, header.payload2_len);
+                    EnsureCapacity(ref _payloadBuf, header.payload_len, "控制事件 payload", ref _grewPayload);
+                    EnsureCapacity(ref _payload2Buf, header.payload2_len, "控制事件 payload2", ref _grewPayload2);
                     rc = NativeMethods.dcu_event_next(out header,
                         _payloadBuf, _payloadBuf.Length, _payload2Buf, _payload2Buf.Length);
                 }
@@ -290,7 +444,7 @@ namespace DataChannelUnity
 
                 if (rc == NativeMethods.ErrTooSmall)
                 {
-                    EnsureCapacity(ref _messageBuf, n);
+                    EnsureCapacity(ref _messageBuf, n, "消息", ref _grewMessage);
                     rc = NativeMethods.dcu_dc_receive(
                         dc.NativeHandle, _messageBuf, _messageBuf.Length, out n);
                 }
@@ -308,10 +462,37 @@ namespace DataChannelUnity
             }
         }
 
-        private static void EnsureCapacity(ref byte[] buf, int need)
+        /// <summary>
+        /// 按需增长，**永不收缩**（#45 决议 1，推翻 #38 决议 7 的滞回收缩）。
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// 决定性事实是**单条消息尺寸有天花板**：
+        /// <c>PeerConnection::remoteMaxMessageSize()</c> 取本地上限
+        /// （<c>DEFAULT_LOCAL_MAX_MESSAGE_SIZE</c> = 256KB）与对端 SDP 声明值的较小者。
+        /// 默认配置下四路缓冲合计常驻约 0.5MB —— 为省这点建一套双窗口峰值跟踪，
+        /// 换来的是它自己的规格、测试与失败模式，不划算。应用把
+        /// <c>MaxMessageSize</c> 调大，常驻上界随之变大，那是它自己要求的。
+        /// </para>
+        /// <para>
+        /// 顺带说明为什么「固定容量 + 超尺寸走临时数组」仍然被否：它会**静默拆掉零分配
+        /// 承诺** —— 正常载荷就是 200KB 的应用（视频切片、地图数据、存档同步都在这个
+        /// 量级）会变成每条消息一次堆分配。只涨不缩没有这个问题，它只是持有内存。
+        /// </para>
+        /// </remarks>
+        private static void EnsureCapacity(ref byte[] buf, int need, string which, ref bool alreadyGrew)
         {
-            if (buf == null || buf.Length < need)
-                buf = new byte[Math.Max(need, 1024)];
+            if (buf != null && buf.Length >= need) return;
+
+            var from = buf?.Length ?? 0;
+            buf = new byte[Math.Max(need, 1024)];
+
+            // 只记**首次**超基线，且只记 Info：这是正常的自适应，不是故障。
+            if (alreadyGrew) return;
+            alreadyGrew = true;
+            DataChannelLog.Emit(LogLevel.Info,
+                which + " 缓冲首次超过基线：" + from + " -> " + buf.Length + " 字节。"
+                + "缓冲只涨不缩，此后常驻这个尺寸（上界由协商出的 MaxMessageSize 决定）。");
         }
 
         private static void Dispatch(NativeMethods.EventHeader h, string p1, string p2)

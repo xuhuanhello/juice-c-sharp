@@ -70,7 +70,7 @@ namespace DataChannelUnity
         {
             if (level > _level || level == LogLevel.None) return;
             message = RedactIceCredentials(message);
-            MessageLogged?.Invoke(level, message);
+            RaiseLogged(level, message);
 
             switch (level)
             {
@@ -84,6 +84,27 @@ namespace DataChannelUnity
                 default:
                     Debug.Log("[DataChannelUnity] " + message);
                     break;
+            }
+        }
+
+        /// <summary>
+        /// 派发 <see cref="MessageLogged"/>，**每订阅者隔离，且异常只能吞掉**。
+        /// </summary>
+        /// <remarks>
+        /// 隔离的理由与其它事件相同（一个抛出的订阅者不该让后面的收不到）。
+        /// 但这里多一条：捕获到的异常**不能再去记日志** —— 那会立刻回到本方法，
+        /// 无限递归。所以这是全包唯一一处「吞掉异常」是正确做法的地方，
+        /// 不是 <c>catch {}</c> 偷懒。
+        /// </remarks>
+        private static void RaiseLogged(LogLevel level, string message)
+        {
+            var handlers = MessageLogged;
+            if (handlers == null) return;
+            var list = handlers.GetInvocationList();
+            for (int i = 0; i < list.Length; i++)
+            {
+                try { ((Action<LogLevel, string>)list[i])(level, message); }
+                catch { /* 只能吞：记它就会递归回到这里 */ }
             }
         }
 
@@ -116,7 +137,7 @@ namespace DataChannelUnity
         {
             if (level > _level || level == LogLevel.None) return;
             var text = RedactIceCredentials(context + ": " + exception);
-            MessageLogged?.Invoke(level, text);
+            RaiseLogged(level, text);
             Debug.LogException(exception);
         }
     }

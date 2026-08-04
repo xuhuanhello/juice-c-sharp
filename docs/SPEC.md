@@ -510,7 +510,7 @@ The liveness check is not about registration failing at startup (nearly impossib
 
 **Re-registration is attempted exactly once** ([#45](https://github.com/xuhuanhello/juice-c-sharp/issues/45), narrowing the original "self-heal"). If the entry is erased again, log that retrying has stopped and leave it erased. Repeated silent re-insertion is a tug-of-war with another package over shared state — the same shape as the auto-unsubscribe idea rejected under *Exception isolation* below: **silently changing state that someone else established is worse than a loud log.**
 
-The threshold must not be measured in `Time.frameCount` (unreliable in edit mode, where the pump is resident); use `EditorApplication.timeSinceStartup` there. Check only when the application calls an API; never poll in the background.
+The threshold must not be measured in `Time.frameCount` — unreliable in edit mode, where the pump is resident. Use a **monotonic wall clock**: `Stopwatch.GetTimestamp()`, which the slow-frame warning already samples twice per frame, so it costs nothing extra and needs no `#if UNITY_EDITOR` fork for `EditorApplication.timeSinceStartup`. Check only when the application calls an API; never poll in the background. `Pump()` also stamps the monotonic counter, which is what separates *"never registered"* (0) from *"registered, then erased"* (non-zero) in the error message.
 
 No public read-only diagnostics snapshot: v1 observability is `BufferedAmount` only (§7). Logs are enough to attribute these problems; opening a diagnostics surface for application-side network HUDs would be its own decision.
 
