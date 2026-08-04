@@ -18,6 +18,19 @@
 cmake_minimum_required(VERSION 3.16)
 project(datachannel_unity LANGUAGES C CXX)
 
+# macOS 产物是**单一 universal bundle**，不是每架构一份 thin。
+# 这推翻了 #10 的「明确不做（v1）：macOS universal lipo」—— 那一行没有记任何理由，
+# 与当年 Meson 被推翻时同类（决定存在、论证不存在）。改的理由见 #55：
+#   - 一条命令出两个架构，不需要额外的 job 或 toolchain file（实测）
+#   - LFS 成本基本相同（universal 5.0 MB vs 两份 thin 合计 4.8 MB）
+#   - `.meta` 从两份必须靠 CPU 字段区分，变成一份 CPU: AnyCPU —— 而「两份同名
+#     bundle」正是 #49 查出的 CheckFileCollisions 冲突与 reimport 刷 error 的根源，
+#     走 universal 之后这个问题从根上不存在
+# 代价：采用者的 App 多带另一半（约 2.4 MB）；audit 必须逐架构检查（已实现）。
+if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+  set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS universal" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -160,11 +173,8 @@ set_target_properties(datachannel_unity PROPERTIES LINK_DEPENDS "${DCU_EXPORT_FI
 # 而不是像旧的 shell shim 那样按 host 猜。
 if(DCU_STAGE_PLUGIN)
   if(APPLE)
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
-      set(DCU_PLUGIN_REL "macOS/arm64")
-    else()
-      set(DCU_PLUGIN_REL "macOS/x64")
-    endif()
+    # 单一 universal 产物，没有架构子目录（见文件开头的理由）
+    set(DCU_PLUGIN_REL "macOS")
   elseif(WIN32)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
       set(DCU_PLUGIN_REL "Windows/ARM64")

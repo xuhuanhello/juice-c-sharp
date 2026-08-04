@@ -59,8 +59,9 @@ def normalize(text: str) -> str:
 # 条目顺序与 settings 键序都按 ASCII 排序 —— Unity 写出来就是这个顺序
 # （大写字母排在小写前，所以 iPhone 落在 Standalone 之后）。
 #
-# 范围是 map #46 定的六个平台。Windows ARM64 已出图（2022.3 的 Standalone
-# Windows 没有 ARM64 槽位，编辑器源码显式返回空路径）；WebGL 也出图。
+# 范围是 map #46 定的**五个**平台（原为六个，macOS 两个架构合并为一份 universal）。
+# Windows ARM64 已出图（2022.3 的 Standalone Windows 没有 ARM64 槽位，编辑器
+# 源码显式返回空路径）；WebGL 也出图。
 PLATFORMS: dict[str, dict] = {
     "Windows/x86_64/datachannel_unity.dll": {
         "Any": {"enabled": 0, "settings": {}},
@@ -68,17 +69,15 @@ PLATFORMS: dict[str, dict] = {
             "CPU": "x86_64", "DefaultValueInitialized": "true", "OS": "Windows"}},
         "Standalone": {"target": "Win64", "enabled": 1, "settings": {"CPU": "x86_64"}},
     },
-    "macOS/x64/datachannel_unity.bundle": {
+    # macOS 是**单一 universal bundle**，没有架构子目录（见 native/CMakeLists.txt
+    # 开头的理由）。因此 CPU 是 AnyCPU —— 而「两份同名 bundle 必须靠 CPU 字段
+    # 区分」正是 #49 查出的 CheckFileCollisions 冲突与 reimport 刷 error 的根源，
+    # 这里从根上不存在。
+    "macOS/datachannel_unity.bundle": {
         "Any": {"enabled": 0, "settings": {}},
         "Editor": {"enabled": 1, "settings": {
-            "CPU": "x86_64", "DefaultValueInitialized": "true", "OS": "OSX"}},
-        "Standalone": {"target": "OSXUniversal", "enabled": 1, "settings": {"CPU": "x86_64"}},
-    },
-    "macOS/arm64/datachannel_unity.bundle": {
-        "Any": {"enabled": 0, "settings": {}},
-        "Editor": {"enabled": 1, "settings": {
-            "CPU": "ARM64", "DefaultValueInitialized": "true", "OS": "OSX"}},
-        "Standalone": {"target": "OSXUniversal", "enabled": 1, "settings": {"CPU": "ARM64"}},
+            "CPU": "AnyCPU", "DefaultValueInitialized": "true", "OS": "OSX"}},
+        "Standalone": {"target": "OSXUniversal", "enabled": 1, "settings": {"CPU": "AnyCPU"}},
     },
     # `.so` 对 Android 也是候选，Unity 导入时会写一条默认关闭的 Android 条目。
     # 手写时省略它行为一致，但目标是与 Unity 产出逐字节一致，所以必须在。

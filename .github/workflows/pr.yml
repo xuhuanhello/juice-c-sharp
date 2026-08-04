@@ -42,7 +42,7 @@ jobs:
         run: ./native/scripts/fetch-deps.sh
 
       - name: Build plugin (CMake)
-        run: ./native/scripts/build-macos-arm64.sh
+        run: ./native/scripts/build-macos.sh
 
       # audit 已在构建的 POST_BUILD 阶段跑过一次（CMake 的第二条 POST_BUILD 命令，
       # 见 native/CMakeLists.txt），这里再显式跑一次，是为了在 CI 日志里成为
@@ -50,7 +50,7 @@ jobs:
       - name: Audit plugin (symbols + no forbidden crypto dylibs)
         run: |
           python3 ./native/scripts/audit_plugin.py \
-            --binary Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle \
+            --binary Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle \
             --platform darwin \
             --expected native/exports/expected-symbols.txt
 
@@ -58,7 +58,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: datachannel_unity-macos-arm64
-          path: Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
+          path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle
 
   static-checks:
     name: Script syntax

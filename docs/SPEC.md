@@ -822,8 +822,8 @@ cmake -S native -B native/build/macos-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build native/build/macos-arm64
 # cross-compiling: add -DCMAKE_TOOLCHAIN_FILE=native/cross/<file>.cmake
 # thin wrapper (same path):
-./native/scripts/build-macos-arm64.sh
-python3 ./native/scripts/audit_plugin.py --binary Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle --platform darwin --expected native/exports/expected-symbols.txt
+./native/scripts/build-macos.sh
+python3 ./native/scripts/audit_plugin.py --binary Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle --platform darwin --expected native/exports/expected-symbols.txt
 ```
 
 | Rule | Detail |
@@ -871,7 +871,7 @@ Risk order: WebGL > iOS > Win arm64 > Android > macOS > Win x64.
 
 | Role | Builds | Checks |
 |------|--------|--------|
-| **Local (default)** | **mac only** (`native/scripts/build-macos-arm64.sh`, optional x64) | Developer may run `audit_plugin.py` |
+| **Local (default)** | **mac only** (`native/scripts/build-macos.sh` —— 单一 universal 产物) | Developer may run `audit_plugin.py` |
 | **CI** | **Full matrix** | Link audit (no system crypto dylibs), export allowlist (`dcu_*` only), script-executable-bit assertion, shell/Python syntax. **No Unity, therefore no C# tests** — §11 |
 
 ### Rules the workflows must keep

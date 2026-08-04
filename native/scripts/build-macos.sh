@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# 本机 macOS arm64 构建（与 CI 同一条路径：CMake）。
-# 用法: ./native/scripts/build-macos-arm64.sh
+# 本机 macOS 构建（与 CI 同一条路径：CMake）。产物是**单一 universal bundle**
+# （arm64 + x86_64），不是每架构一份 —— 见 native/CMakeLists.txt 开头的理由。
+# 用法: ./native/scripts/build-macos.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD="${DCU_BUILD_DIR:-$ROOT/build/macos-arm64}"
+BUILD="${DCU_BUILD_DIR:-$ROOT/build/macos}"
 
 # 上游依赖缺失时自动拉取
 if [[ ! -f "$ROOT/subprojects/mbedtls/CMakeLists.txt" \
@@ -15,11 +16,11 @@ fi
 cmake -S "$ROOT" -B "$BUILD" \
   -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_ARCHITECTURES=arm64
+  -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
 
 cmake --build "$BUILD" --parallel "$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
-BUNDLE="$ROOT/../Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle"
+BUNDLE="$ROOT/../Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle"
 echo "==> audit"
 python3 "$ROOT/scripts/audit_plugin.py" \
   --binary "$BUNDLE" --platform darwin \

@@ -24,7 +24,7 @@ def main() -> int:
     ap.add_argument("--binary", required=True, help="Path to built shared library")
     ap.add_argument("--host-system", required=True, choices=["darwin", "windows", "linux"])
     ap.add_argument("--plugin-root", required=True)
-    ap.add_argument("--rel", required=True, help="e.g. macOS/arm64")
+    ap.add_argument("--rel", required=True, help="e.g. macOS 或 Windows/x86_64")
     args = ap.parse_args()
 
     binary = pathlib.Path(args.binary)

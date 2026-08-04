@@ -107,8 +107,16 @@ def resolve_tool(explicit: str | None, fallback: str, why: str) -> str:
 
 # ---------- 导出符号 ----------
 
-def exports_macos(binary: Path, nm: str) -> set[str]:
-    out = run([nm, "-gU", str(binary)])
+def macho_archs(binary: Path) -> list[str]:
+    """产物里的架构。thin 返回一个，universal 返回多个。"""
+    return run(["lipo", "-archs", str(binary)]).split()
+
+
+def exports_macos(binary: Path, nm: str, arch: str) -> set[str]:
+    # 必须显式指定 -arch。在 fat 二进制上 `nm -gU` 只报宿主架构 —— 实测一个
+    # universal 产物只出 20 行（arm64 那半），x86_64 那半的导出集根本没被看过。
+    # 那是个盲区，不是简洁。
+    out = run([nm, "-arch", arch, "-gU", str(binary)])
     names = set()
     for line in out.splitlines():
         parts = line.split()
@@ -149,20 +157,25 @@ def exports_windows(binary: Path, dumpbin: str) -> set[str]:
 
 # ---------- 依赖 ----------
 
-def deps_macos(binary: Path, otool: str) -> list[str]:
-    # `otool -L` 的输出里，表头之后的**第一条是产物自己的 install name**
-    # （LC_ID_DYLIB），不是依赖。把它当依赖检查会产生假阳性 —— 本仓库的产物恰好
-    # 因为 install name 是 @loader_path/... 而落在允许列表内，掩盖了这个错误。
-    # 用 `otool -D` 单独取出 install name 并剔除。
+def deps_macos(binary: Path, otool: str, arch: str) -> list[str]:
+    # 两个必须显式处理的形态问题：
+    #
+    # 1. `otool -L` 的输出里，表头之后的**第一条是产物自己的 install name**
+    #    （LC_ID_DYLIB），不是依赖。把它当依赖检查会产生假阳性 —— 本仓库的产物
+    #    恰好因为 install name 是 @loader_path/... 而落在允许列表内，掩盖了它。
+    #    用 `otool -D` 单独取出并剔除。
+    # 2. 在 fat 二进制上，`otool -L` 会为**每个架构**打印一段，段首形如
+    #    `path (architecture x86_64):`。不按架构取就会把那行标题当成依赖。
+    #    所以这里逐架构调用，`-arch` 之后输出只剩一段。
     install_name = ""
-    id_out = run([otool, "-D", str(binary)]).splitlines()
+    id_out = run([otool, "-arch", arch, "-D", str(binary)]).splitlines()
     if len(id_out) >= 2:
         install_name = id_out[1].strip()
 
     deps = []
-    for line in run([otool, "-L", str(binary)]).splitlines()[1:]:
+    for line in run([otool, "-arch", arch, "-L", str(binary)]).splitlines()[1:]:
         stripped = line.strip()
-        if not stripped:
+        if not stripped or stripped.endswith(":"):
             continue
         dep = stripped.split(" (compatibility")[0].strip()
         if dep == install_name:
@@ -285,7 +298,28 @@ def main() -> int:
     if args.platform == "darwin":
         nm = resolve_tool(args.nm, "nm", "读取导出符号")
         otool = resolve_tool(None, "otool", "读取动态依赖")
-        actual, deps = exports_macos(binary, nm), deps_macos(binary, otool)
+        # universal 产物的**每个架构都要单独过一遍**，两条断言都是。只查宿主架构
+        # 等于让另外半个二进制没有门禁 —— 而它照样会随包发给采用者。
+        archs = macho_archs(binary)
+        print(f"==> 架构: {' '.join(archs)}")
+        actual, deps = None, []
+        for arch in archs:
+            arch_exports = exports_macos(binary, nm, arch)
+            arch_deps = deps_macos(binary, otool, arch)
+            print(f"==> 依赖 (darwin/{arch})")
+            for d in arch_deps:
+                print(f"    {d}")
+            check_deps("darwin", arch_deps)
+            count = check_exports(arch_exports, args.expected)
+            print(f"    {arch}: {count} 个 dcu_* 导出与清单一致")
+            if actual is not None and arch_exports != actual:
+                raise AuditError(
+                    "universal 产物的各架构导出集不一致 —— 说明某一半没按预期链接：\n"
+                    f"    只在 {archs[0]}: {sorted(actual - arch_exports)}\n"
+                    f"    只在 {arch}: {sorted(arch_exports - actual)}")
+            actual, deps = arch_exports, arch_deps
+        print(f"OK: {len(archs)} 个架构各自的导出与依赖均通过")
+        return 0
     elif args.platform == "linux":
         nm = resolve_tool(args.nm, "nm", "读取导出符号")
         readelf = resolve_tool(args.readelf, "readelf", "读取 DT_NEEDED")

@@ -21,14 +21,14 @@
 >
 > ```csharp
 > var bundle = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(),
->     "Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle/Contents/MacOS/datachannel_unity");
+>     "Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle/Contents/MacOS/datachannel_unity");
 > var editorStarted = System.DateTime.Now.AddSeconds(-UnityEditor.EditorApplication.timeSinceStartup);
 > return new { stale = editorStarted <= System.IO.File.GetLastWriteTime(bundle) };
 > ```
 >
 > `stale = true` ⇒ stop and restart the Editor. Do not interpret any step below.
 
-**Native product path:** `Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle` (built via **CMake** — see `docs/SPEC.md` §9).
+**Native product path:** `Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle` (built via **CMake** — see `docs/SPEC.md` §9).
 
 > **No literal expected numbers in this file.** Export counts, test counts and the ABI version live where they get checked — `native/exports/expected-symbols.txt` and `dcu.h` — not in prose that nobody runs. See §11 of the SPEC for why.
 
@@ -40,7 +40,7 @@ Run from repo root before Editor work:
 
 ```bash
 ./native/scripts/audit-macos-plugin.sh \
-  Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
+  Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle
 ```
 
 **Expect:** **exit code 0** — the exported symbols diff clean against `native/exports/expected-symbols.txt`, and no forbidden crypto dylibs.  
@@ -235,7 +235,7 @@ Recorded in [#42](https://github.com/xuhuanhello/juice-c-sharp/issues/42) as the
 | Symptom | Action |
 |---------|--------|
 | Behaviour looks unchanged after a rebuild | The Editor is still running the **old** binary — restart it. See the prerequisite box at the top; this fails *silently* and looks like a pass |
-| `DllNotFoundException` / native unavailable | Rebuild: `./native/scripts/build-macos-arm64.sh` (CMake entry, SPEC §9); confirm `.bundle` only under `Plugins/macOS/arm64/` |
+| `DllNotFoundException` / native unavailable | Rebuild: `./native/scripts/build-macos.sh` (CMake entry, SPEC §9); confirm `.bundle` only under `Plugins/macOS/` |
 | `permission denied` running a script | The script lost its executable bit in git — `git update-index --chmod=+x native/scripts/<name>.sh`. **Do not `chmod` and move on**; that hides the same regression next time |
 | Audit fails on crypto dylibs | Product path must use subprojects MbedTLS static (never brew OpenSSL) |
 | Audit symbol diff non-empty | Deliberate ABI change → update `native/exports/expected-symbols.txt` **with** the `DCU_ABI_VERSION` bump. Otherwise upstream leaked a symbol — check visibility flags and the allowlist |
