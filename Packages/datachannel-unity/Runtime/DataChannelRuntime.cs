@@ -33,6 +33,7 @@ namespace DataChannelUnity
         {
             get
             {
+                MainThread.Assert("DataChannelRuntime.IsNativeAvailable");
                 EnsureNative();
                 return _nativeReady;
             }
@@ -42,6 +43,7 @@ namespace DataChannelUnity
         {
             get
             {
+                MainThread.Assert("DataChannelRuntime.AbiVersion");
                 EnsureNative();
                 if (!_nativeReady) return 0;
                 return NativeMethods.dcu_abi_version(out var v) == NativeMethods.Success ? v : 0;
@@ -54,6 +56,8 @@ namespace DataChannelUnity
             _nativeReady = false;
             _initAttempted = false;
             _pumpRegistered = false;
+            // 上个域残留的泄漏记录不该报进新域 —— 那些对象的表项已经随静态字段一起没了。
+            LeakTracker.Clear();
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
@@ -163,7 +167,11 @@ namespace DataChannelUnity
         /// </remarks>
         public static void Pump()
         {
+            MainThread.Assert("DataChannelRuntime.Pump");
             if (!_nativeReady) return;
+            // 泄漏报告最先排，且**必须在派发之前** —— 它要摘 HandleTable 的表项，
+            // 那是一次字典改动，夹在派发中间就是在自己迭代的脚下拆桥。
+            LeakTracker.Drain();
             // 日志先排：原生日志往往是后面那些事件的成因，先出来才有上下文。
             DrainNativeLogs();
             DrainControlEvents();
@@ -329,9 +337,16 @@ namespace DataChannelUnity
                 case NativeMethods.EventType.IncomingDataChannel:
                     if (HandleTable.TryGetPc(h.pc, out var pc5))
                     {
-                        var dc = new DataChannel(pc5, h.dc, p1 ?? string.Empty, ownsCreation: false);
-                        HandleTable.Register(dc);
-                        pc5.RaiseIncomingDataChannel(dc);
+                        // 入向通道**照单全收**，由 PC 拥有（#29 决议 3）。
+                        var dc = pc5.AdoptIncomingDataChannel(h.dc, p1 ?? string.Empty);
+                        if (dc != null) pc5.RaiseIncomingDataChannel(dc);
+                    }
+                    else
+                    {
+                        // 事件排队期间父 PC 已被释放（或已被 GC）。上游
+                        // rtcDeletePeerConnection 不清子通道的表项，所以这个句柄
+                        // 现在谁也够不着 —— 不就地销毁它就是一个纯原生泄漏。
+                        try { NativeMethods.dcu_dc_destroy(h.dc); } catch { /* ignore */ }
                     }
                     break;
                 case NativeMethods.EventType.DcOpen:

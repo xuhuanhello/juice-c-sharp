@@ -448,9 +448,12 @@ PeerConnection ──owns──▶ DataChannel        (strong reference, list of
 | **The PeerConnection owns its DataChannels** | `PeerConnection.Dispose()` cascades, **children first, then the parent** — destroying the PC first would leave `dcu_dc_destroy` firing at zombie handles. Upstream's `rtcDeletePeerConnection` only closes the PC and erases *it* (`capi.cpp:437-444`), so without the cascade libdatachannel's own `dataChannelMap` leaks too |
 | **Disposing a child directly is fine** | The parent must drop it from its child list so it is not destroyed twice |
 | **The lookup table holds weak references** | Liveness comes from the ownership edge, not from the table. DataChannel events do not carry their `pc` handle, so a parent-first lookup would need an ABI change plus a native dc→pc map — not worth it |
-| **Incoming DataChannels are always accepted** | Created and owned by the PC even with no subscriber. Rejecting "unwanted" channels is timing-sensitive: an application that subscribes one frame later (or after an `await`) would have its channel silently closed — far harder to diagnose than a leak. Exceeding a child-count threshold warns; it never refuses |
+| **Incoming DataChannels are always accepted** | Created and owned by the PC even with no subscriber. Rejecting "unwanted" channels is timing-sensitive: an application that subscribes one frame later (or after an `await`) would have its channel silently closed — far harder to diagnose than a leak. Exceeding a child-count threshold (**1024**, an internal constant, the same order as the control-queue depth) warns once; it never refuses. The real ceiling is elsewhere — SCTP stream ids are `uint16` |
+| **An incoming channel whose parent is already gone is destroyed on the spot** | The `IncomingDataChannel` event can be dequeued after the application disposed its `PeerConnection` (or dropped it and let it be collected). There is no owner left to cascade from, and upstream's `rtcDeletePeerConnection` does not erase child entries, so the pump calls `dcu_dc_destroy` on the orphan itself. Dropping the event without this would be a native leak nothing in the process can reach |
 | **Leak diagnostics are mandatory** | On by default in Editor / Development builds, off in Release. `Enabled` includes the **creation-time** stack trace |
 | **Cascade-disposed children behave like directly-disposed ones** | …except the exception message names the cause. They do **not** raise `Closed`: doing so would run user callbacks while the parent is half-torn-down, and `Closed` should mean "the channel was closed", not "you just released it" |
+
+The leak report is a gated contract (§11) because the intuition here was measurably wrong: with the table holding **strong** references, the object was rooted, so the finalizer could *never* run — the "forgetting `Dispose` is caught by the finalizer" fallback had never once worked. The weak table and the leak report are two halves of one mechanism; testing only one of them tests nothing.
 
 **Finalizers do exactly one thing: enqueue.** A finalizer records the handle and leak info on a lock-free queue; the main-thread pump logs it and removes the table entry. Finalizers must **not** call any `dcu_*` function, must **not** take the handle-table lock, and must **not** call `Debug.LogError` — 2022.3 makes no thread-safety promise for it off the main thread, and P/Invoking `rtcDelete*` from the finalizer thread blocks until callbacks quiesce, which during a domain unload means the Editor hangs on every entry into play mode.
 
@@ -962,8 +965,9 @@ Selection principle: **only decisions that measurement or research overturned an
 | Re-entrancy during dispatch (Dispose/Create a channel inside a callback) does not escape the pump | Native / EditMode |
 | One throwing subscriber does not stop delivery to the others | Native / EditMode |
 | Zero-length messages are legal; `Send` offset bounds hold near `int.MaxValue` | Native / EditMode |
-| Buffer shrinks back to baseline after two quiet windows | Native / EditMode |
-| Pump self-heals after a third party overwrites `SetPlayerLoop` | Native / PlayMode |
+| `PeerConnection.Dispose` cascades to its channels — including **incoming** ones — and a directly-disposed child is not destroyed a second time | Native / EditMode |
+| An undisposed object that is collected **is reported**, with its creation stack | Native / EditMode |
+| Pump re-registers **once** after a third party overwrites `SetPlayerLoop`, and stops retrying if erased again | Native / PlayMode |
 | Upstream state/exception mapping; out-of-range raw values map to `Unknown` (never throw) | Native / EditMode |
 | Log bridge survives repeated `Level` changes (regression for the silent-detach trap, §7) | Native / EditMode |
 | Domain-reload lifecycle | Native — **manual step permitted** (see below) |

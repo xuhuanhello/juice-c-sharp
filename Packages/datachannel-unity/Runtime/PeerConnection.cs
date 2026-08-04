@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using DataChannelUnity.Internal;
 
@@ -16,8 +17,28 @@ namespace DataChannelUnity
         /// </remarks>
         public const int MaxDataChannelLabelBytes = 65535;
 
+        /// <summary>
+        /// 子通道数量的**告警**阈值 —— 只 warning，**永不拒收**（#29 决议 3）。
+        /// </summary>
+        /// <remarks>
+        /// 取 1024，与控制队列深度告警同一量级（也是上游 <c>RECV_QUEUE_LIMIT</c> 的量级）。
+        /// 它不是硬上限：SCTP 的 stream id 是 uint16，真正的天花板在 65535。
+        /// 「无人订阅就拒收」被否掉的理由是**时序敏感** —— 应用晚一帧订阅
+        /// （等 UniTask、await 之后）就会被我们悄悄关掉通道，比泄漏难查得多。
+        /// </remarks>
+        internal const int ChildWarnThreshold = 1024;
+
         private readonly object _gate = new object();
+        private readonly string _creationSite;
+
+        // PC **强持有**它的子通道（SPEC §6 的所有权图）。查找表只持弱引用，
+        // 子通道的存活完全由这条边保证。
+        private readonly List<DataChannel> _children = new List<DataChannel>();
+        // 级联时先拷再遍历：子 Dispose 会回调 ForgetChild 改动 _children。
+        private readonly List<DataChannel> _cascadeBuffer = new List<DataChannel>();
+
         private bool _disposed;
+        private bool _warnedChildCount;
         private IPeerConnectionObserver _observer;
 
         internal int NativeHandle { get; }
@@ -32,6 +53,7 @@ namespace DataChannelUnity
 
         public PeerConnection(PeerConnectionConfig config = null)
         {
+            MainThread.Assert("PeerConnection..ctor");
             DataChannelRuntime.EnsureNative();
             if (!DataChannelRuntime.IsNativeAvailable)
                 throw new DataChannelException("Native plugin is not available. Build datachannel_unity per docs/SPEC.md.");
@@ -45,6 +67,7 @@ namespace DataChannelUnity
                 NativeHandle = handle;
             }
 
+            _creationSite = LeakTracker.CaptureSite();
             HandleTable.Register(this);
         }
 
@@ -52,11 +75,16 @@ namespace DataChannelUnity
         public IPeerConnectionObserver Observer
         {
             get => _observer;
-            set => _observer = value;
+            set
+            {
+                MainThread.Assert("PeerConnection.Observer");
+                _observer = value;
+            }
         }
 
         public DataChannel CreateDataChannel(string label, DataChannelInit init = null)
         {
+            MainThread.Assert("PeerConnection.CreateDataChannel");
             ThrowIfDisposed();
             if (label == null) throw new ArgumentNullException(nameof(label));
             init = init ?? new DataChannelInit();
@@ -83,13 +111,64 @@ namespace DataChannelUnity
                 NativeMethods.dcu_pc_create_data_channel(
                     NativeHandle, labelBytes, labelBytes.Length, ref ninit, out var dcHandle),
                 "dcu_pc_create_data_channel");
-            var dc = new DataChannel(this, dcHandle, label, ownsCreation: true);
+            var dc = new DataChannel(this, dcHandle, label);
             HandleTable.Register(dc);
+            AdoptChild(dc);
             return dc;
+        }
+
+        /// <summary>
+        /// 接住一条入向通道。**照单全收**，无人订阅也创建并由本 PC 持有（#29 决议 3）。
+        /// </summary>
+        /// <remarks>
+        /// PC 已被释放时返回 <c>null</c>，并就地把原生句柄销毁 —— 上游
+        /// <c>rtcDeletePeerConnection</c> 不清子通道的表项，不销毁就是一个谁也够不着
+        /// 的原生泄漏（它会出现在 <c>dcu_shutdown</c> 的未销毁计数里）。
+        /// </remarks>
+        internal DataChannel AdoptIncomingDataChannel(int handle, string label)
+        {
+            if (_disposed)
+            {
+                try { NativeMethods.dcu_dc_destroy(handle); } catch { /* ignore */ }
+                return null;
+            }
+
+            var dc = new DataChannel(this, handle, label);
+            HandleTable.Register(dc);
+            AdoptChild(dc);
+            return dc;
+        }
+
+        private void AdoptChild(DataChannel dc)
+        {
+            int count;
+            lock (_gate)
+            {
+                _children.Add(dc);
+                count = _children.Count;
+            }
+
+            if (count > ChildWarnThreshold && !_warnedChildCount)
+            {
+                _warnedChildCount = true;
+                DataChannelLog.Emit(LogLevel.Warning,
+                    "PeerConnection(handle=" + NativeHandle + ") 的子通道数已超过 "
+                    + ChildWarnThreshold + "（当前 " + count + "）。通道**不会**被拒收 —— "
+                    + "这只是提示：通常意味着有通道没被 Dispose，或对端在刷通道。");
+            }
+        }
+
+        /// <summary>
+        /// 子通道自行 <c>Dispose</c> 时把自己从子列表摘掉，避免父 Dispose 二次销毁。
+        /// </summary>
+        internal void ForgetChild(DataChannel dc)
+        {
+            lock (_gate) _children.Remove(dc);
         }
 
         public void SetRemoteDescription(string sdp, string type)
         {
+            MainThread.Assert("PeerConnection.SetRemoteDescription");
             ThrowIfDisposed();
             if (sdp == null) throw new ArgumentNullException(nameof(sdp));
             if (type == null) throw new ArgumentNullException(nameof(type));
@@ -103,6 +182,7 @@ namespace DataChannelUnity
 
         public void AddRemoteCandidate(string candidate, string mid = null)
         {
+            MainThread.Assert("PeerConnection.AddRemoteCandidate");
             ThrowIfDisposed();
             if (candidate == null) throw new ArgumentNullException(nameof(candidate));
             var cB = Encoding.UTF8.GetBytes(candidate);
@@ -113,13 +193,32 @@ namespace DataChannelUnity
                 "dcu_pc_add_remote_candidate");
         }
 
+        /// <summary>
+        /// 释放本连接**及其全部子通道**，顺序是**先子后父**。
+        /// </summary>
+        /// <remarks>
+        /// 顺序不能反：<c>dcu_dc_destroy</c> 打在一个已销毁的 PC 的子句柄上就是打在僵尸上。
+        /// 级联本身也不能省 —— 上游 <c>rtcDeletePeerConnection</c> 只 close + 摘掉 PC 自己
+        /// （<c>capi.cpp:437-444</c>），不清子通道的表项，不级联漏的就不只是我们这张表，
+        /// 连 libdatachannel 自己的 <c>dataChannelMap</c> 一起漏。
+        /// </remarks>
         public void Dispose()
         {
+            MainThread.Assert("PeerConnection.Dispose");
             lock (_gate)
             {
                 if (_disposed) return;
                 _disposed = true;
+
+                // 先拷再清空：子的 Dispose 路径会回调 ForgetChild 改动 _children。
+                _cascadeBuffer.Clear();
+                _cascadeBuffer.AddRange(_children);
+                _children.Clear();
             }
+
+            for (int i = 0; i < _cascadeBuffer.Count; i++)
+                _cascadeBuffer[i].DisposeFromParent();
+            _cascadeBuffer.Clear();
 
             try { NativeMethods.dcu_pc_close(NativeHandle); } catch { /* ignore */ }
             try { NativeMethods.dcu_pc_destroy(NativeHandle); } catch { /* ignore */ }
@@ -127,23 +226,40 @@ namespace DataChannelUnity
             GC.SuppressFinalize(this);
         }
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        /// <summary>
+        /// **只做一次无锁入队**（SPEC §6 / #29 决议 8）。见 <see cref="LeakTracker"/>。
+        /// 注意这里连子通道都不碰 —— 父被回收时子也早已不可达，它们各自的终结器会各自入队。
+        /// </summary>
         ~PeerConnection()
         {
-            try
+            // 构造函数抛出（坏 ICE URL、原生不可用）时对象仍会被终结，但那时
+            // NativeHandle 还是默认的 0 —— 什么都没分配，报出来就是纯噪音。
+            // 上游 lastId 从 1 起，0 永远不是合法句柄。
+            if (NativeHandle == 0) return;
+
+            LeakTracker.ReportFromFinalizer(new LeakRecord
             {
-                if (!_disposed)
-                {
-                    NativeMethods.dcu_pc_destroy(NativeHandle);
-                    HandleTable.UnregisterPc(NativeHandle);
-                }
-            }
-            catch { /* finalizer path */ }
+                IsPeerConnection = true,
+                Handle = NativeHandle,
+                Label = null,
+                CreationSite = _creationSite
+            });
         }
+#endif
 
         private void ThrowIfDisposed()
         {
             if (_disposed) throw new ObjectDisposedException(nameof(PeerConnection));
         }
+
+        /// <summary>
+        /// 诊断用文本。<c>NativeHandle</c> 收 internal 之后，**这是句柄的唯一公开出口**
+        /// （SPEC §6「What is public」）—— 把句柄本身公开会招人存下来、传来传去、
+        /// 在 Dispose 之后接着用，而每一个正当操作都已经有托管方法了。
+        /// </summary>
+        public override string ToString() =>
+            "PeerConnection(handle=" + NativeHandle + ", disposed=" + _disposed + ")";
 
         internal void RaiseLocalDescription(string sdp, string type)
         {

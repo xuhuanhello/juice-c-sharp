@@ -95,6 +95,8 @@ If `instance_selection_required`, set active instance to this project and retry.
 
 Do **not** assert `summary.total` and do not enumerate case names here — the checklist is not a copy of the test directory, and both go stale on the next test added.
 
+**`summary.failed` alone is not enough — you must read `resultState`.** The suite-level teardown (step 9) lives in an NUnit `[SetUpFixture]`, which is *not* a test case: measured with a deliberate probe, a failing `[OneTimeTearDown]` reports `summary.failed = 0` **and** `resultState = Failed(Child)`. Anyone checking only the failure count reads a red run as green.
+
 **A skipped/ignored native test is a failure, not a pass** (SPEC §11, *absence must be failure*). If the native tier reports zero tests run, the plugin did not load — treat it as red.
 
 ---
@@ -188,11 +190,15 @@ The test framework does not survive a domain reload, so this cannot be an ordina
 
 ## 9. Suite-level teardown
 
-After the tiers above, in the same Editor session:
+**Nothing to run by hand — this is now part of both native tiers.** Each of them carries a `NativeSuiteTeardown` `[SetUpFixture]` whose `[OneTimeTearDown]` drains the pump, then asserts.
 
-**Expect:** `dcu_shutdown()` reports **0** undestroyed objects, and `dcu_event_queue_depth()` is **0**.
+**Expect:** `dcu_event_queue_depth()` is **0**, and `dcu_shutdown()` returns **0**.
 
-These are machine-checkable and independent of the log bridge, which is exactly why they replace "grep the Console for an English success line".
+These are machine-checkable and independent of the log bridge, which is exactly why they replace "grep the Console for an English success line". Read the result off `resultState`, not `summary.failed` — see the note in step 3.
+
+> **Half of this is not covered yet, stated rather than implied.** `dcu_shutdown()` currently returns only a status code, so the assertion catches a failing shutdown (e.g. `rtc::Cleanup` timing out) but *not* how many objects were left undestroyed. Making it return that count is [#37](https://github.com/xuhuanhello/juice-c-sharp/issues/37) decision 7 and lands with step 5 of §14.
+
+The fixture calls `dcu_init()` again after the assertion, so the Editor is not left holding a library the managed side still believes is initialised. That restore happens **after** the assertion and hides nothing.
 
 ---
 

@@ -70,11 +70,12 @@ namespace DataChannelUnity.Tests
                 while (Time.realtimeSinceStartup < deadline && (gotA == null || gotB == null))
                     yield return null;
 
-                // 断言前先释放通道：#29 的级联释放尚未实现，PeerConnection.Dispose
-                // 不会带走子通道，而断言失败会跳过后续语句。
-                outgoing?.Dispose();
-                incoming?.Dispose();
+                // 通道**不用**在这里释放：S6 之后 PeerConnection.Dispose 级联带走
+                // 它的子通道（#29 决议 1），而 using 保证 a/b 一定会被释放 ——
+                // 即使下面的断言失败提前跳出。
 
+                Assert.IsNotNull(incoming,
+                    "对端从未收到 DataChannelReceived —— 入向通道事件没经 PlayerLoop 派发。");
                 Assert.IsTrue(aOpened,
                     "出向通道从未收到 Open 事件 —— pump 没在跑，或事件没被派发。");
                 Assert.AreEqual("ping", gotB,

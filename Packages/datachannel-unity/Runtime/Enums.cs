@@ -48,6 +48,28 @@ namespace DataChannelUnity
         RelayOnly = 1
     }
 
+    /// <summary>
+    /// 泄漏诊断档位。**两档，不是三档**。
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Enabled"/> 即含创建栈：中间那档「报泄漏但不带栈」被砍掉了
+    /// （#45 决议 3）—— 「在哪儿创建的」几乎就是泄漏诊断的全部信息量，
+    /// 而多一档就要多定义一套语义、多写一段规格、多测一遍。
+    ///
+    /// 注意这是**运行时**开关，与终结器本身的**条件编译**是叠加的两层：
+    /// Release 构建里终结器根本不存在（有终结器是类型级开销，每个实例都要进
+    /// 终结队列、多活一代 GC，运行时开关关不掉），所以在 Release 下把它设成
+    /// <see cref="Enabled"/> 也不会有任何报告。
+    /// </remarks>
+    public enum LeakDetectionMode
+    {
+        /// <summary>不报告泄漏，也不抓创建栈。</summary>
+        Disabled = 0,
+
+        /// <summary>报告泄漏，并附**创建时**的调用栈。</summary>
+        Enabled = 1
+    }
+
     public enum LogLevel
     {
         None = 0,

@@ -15,11 +15,32 @@ namespace DataChannelUnity.Internal
 
         public NativeMethods.PcConfigNative Config;
 
+        /// <summary>
+        /// 构造期间的分配用 try/catch 包住（#29 决议 7）。
+        /// </summary>
+        /// <remarks>
+        /// 构造函数抛出时，调用方拿不到对象，因此**永远不会**去 Dispose 它 ——
+        /// 而此时已经 <c>AllocHGlobal</c> 出去的那几块就彻底没人管了。
+        /// 本类刻意没有终结器兜底（那会把非托管释放搬到 GC 线程），所以自己收拾。
+        /// </remarks>
         public NativeConfigBuilder(PeerConnectionConfig config)
         {
             if (config == null)
                 throw new ArgumentNullException(nameof(config));
 
+            try
+            {
+                Build(config);
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+        }
+
+        private void Build(PeerConnectionConfig config)
+        {
             var servers = config.IceServers ?? new List<IceServer>();
             var serverStructs = new NativeMethods.IceServerNative[Math.Max(servers.Count, 0)];
 

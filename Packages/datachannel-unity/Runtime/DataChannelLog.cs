@@ -15,6 +15,32 @@ namespace DataChannelUnity
         private static LogLevel _level = LogLevel.Warning;
 #endif
 
+        /// <summary>
+        /// 泄漏诊断档位。Editor / Development 构建默认 <see cref="LeakDetectionMode.Enabled"/>，
+        /// Release 默认 <see cref="LeakDetectionMode.Disabled"/>。
+        /// </summary>
+        /// <remarks>
+        /// 它与终结器的条件编译是**叠加的两层**而非二选一：Release 里终结器整个不存在，
+        /// 因此在 Release 下把它设成 <see cref="LeakDetectionMode.Enabled"/> 不会有任何效果。
+        /// 详见 <see cref="LeakDetectionMode"/> 与 docs/SPEC.md §6。
+        /// </remarks>
+        public static LeakDetectionMode LeakDetection
+        {
+            get => _leakDetection;
+            set
+            {
+                MainThread.Assert("DataChannelLog.LeakDetection");
+                _leakDetection = value;
+            }
+        }
+
+        private static LeakDetectionMode _leakDetection =
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            LeakDetectionMode.Enabled;
+#else
+            LeakDetectionMode.Disabled;
+#endif
+
         // 每条日志新建一个未 Compiled 的 Regex 是原来的写法；改为静态 Compiled。
         private static readonly System.Text.RegularExpressions.Regex CredentialPattern =
             new System.Text.RegularExpressions.Regex(
@@ -31,6 +57,7 @@ namespace DataChannelUnity
             get => _level;
             set
             {
+                MainThread.Assert("DataChannelLog.Level");
                 _level = value;
                 // **单向依赖**：本类只管托管状态，不知道 native 存在。
                 // 把级别同步下去是 DataChannelRuntime 的事 —— 环就是这么剪断的，
