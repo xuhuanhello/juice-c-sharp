@@ -43,8 +43,10 @@ jobs:
 
       - name: Audit plugin (symbols + no forbidden crypto dylibs)
         run: |
-          ./native/scripts/audit-macos-plugin.sh \
-            Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
+          python3 ./native/scripts/audit_plugin.py \
+            --binary Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle \
+            --platform darwin \
+            --expected native/exports/expected-symbols.txt
 
       - uses: actions/upload-artifact@v4
         with:

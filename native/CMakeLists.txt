@@ -187,4 +187,24 @@ if(DCU_STAGE_PLUGIN)
     COMMENT "Staging plugin → ${DCU_PLUGIN_REL}"
     VERBATIM
   )
+
+  # 离线门禁：暂存之后无条件跑，三个平台一视同仁。
+  # 与暂存拆成两条命令，是因为门禁需要 CMake 才知道的工具路径；从 stage_plugin.py
+  # 透传只会多一层。SPEC §9 写的就是「staging + audit 都是 POST_BUILD 自定义命令，
+  # 中间没有 shell shim」。
+  #
+  # MSVC 分支的 CMake 不提供 NM，dumpbin 更是完全没建模（CMakeFindBinUtils 只给
+  # LINKER/MT/AR）——所以传 CMAKE_LINKER 进去，让脚本从 link.exe 同目录找 dumpbin.exe。
+  add_custom_command(TARGET datachannel_unity POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}"
+            "${NATIVE_ROOT}/scripts/audit_plugin.py"
+            --binary   "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/$<IF:$<BOOL:${APPLE}>,datachannel_unity.bundle,$<IF:$<BOOL:${WIN32}>,datachannel_unity.dll,libdatachannel_unity.so>>"
+            --platform "$<IF:$<BOOL:${APPLE}>,darwin,$<IF:$<BOOL:${WIN32}>,windows,linux>>"
+            --expected "${DCU_EXPECTED_SYMBOLS}"
+            --nm       "${CMAKE_NM}"
+            --readelf  "${CMAKE_READELF}"
+            --linker   "${CMAKE_LINKER}"
+    COMMENT "Auditing plugin (exports + dependencies)"
+    VERBATIM
+  )
 endif()

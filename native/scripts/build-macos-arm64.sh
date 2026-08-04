@@ -21,6 +21,8 @@ cmake --build "$BUILD" --parallel "$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 BUNDLE="$ROOT/../Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle"
 echo "==> audit"
-"$ROOT/scripts/audit-macos-plugin.sh" "$BUNDLE"
+python3 "$ROOT/scripts/audit_plugin.py" \
+  --binary "$BUNDLE" --platform darwin \
+  --expected "$ROOT/exports/expected-symbols.txt"
 
 echo "Done → $BUNDLE"
