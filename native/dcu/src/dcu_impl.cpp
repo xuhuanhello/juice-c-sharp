@@ -20,6 +20,7 @@
 
 #include "dcu.h"
 #include "dcu_handles.hpp"
+#include "dcu_log_queue.hpp"
 #include "dcu_queue.hpp"
 
 #include <atomic>
@@ -38,6 +39,7 @@ namespace {
 
 std::atomic<bool> g_inited{false};
 DcuEventQueue g_queue;
+DcuLogQueue g_log_queue;
 DcuHandleTable g_table;
 std::atomic<int> g_open_race_delay_ms{0}; // 仅契约测试用，见 dcu.h
 
@@ -53,14 +55,29 @@ std::atomic<int> g_open_race_delay_ms{0}; // 仅契约测试用，见 dcu.h
 // 目前没有可用的日志出口，故异常文本被丢弃。由 SPEC §14 第 4 步的日志桥（#33）补回。
 // ---------------------------------------------------------------------------
 
+// 唯一的日志出口。上游在**持锁**状态下调它，进程内所有线程的每条日志都串行经过
+// 这里 —— 只入队，绝不阻塞、绝不进托管。
+void log_trampoline(rtc::LogLevel level, std::string message) {
+    g_log_queue.push(static_cast<int>(level), std::move(message));
+}
+
+void log_error(const char *what) {
+    g_log_queue.push(static_cast<int>(rtc::LogLevel::Error), std::string(what ? what : "?"));
+}
+
 template <typename F> int dcu_wrap(F &&f) {
     try {
         return f();
-    } catch (const std::invalid_argument &) {
+    } catch (const std::invalid_argument &e) {
+        // 迁移时这里把 e.what() 丢掉了（上游 wrap 会打进 plog，我们当时没有日志出口）。
+        // 桥就位，补回来 —— 错误码告诉你是哪一类，文本告诉你是哪一个。
+        log_error(e.what());
         return DCU_ERR_INVALID;
-    } catch (const std::exception &) {
+    } catch (const std::exception &e) {
+        log_error(e.what());
         return DCU_ERR_FAILURE;
     } catch (...) {
+        log_error("unclassifiable non-std exception");
         // 无法归类的失败。**绝不压平成 FAILURE** —— 压平丢掉的恰是最有诊断价值的
         // 那一位：INVALID（你传的参数不对，可自助修复）被伪装成 FAILURE（运行时
         // 问题，只能提 issue）。见 #31 决议 5。
@@ -253,7 +270,7 @@ int dcu_init(void) {
     if (g_inited.exchange(true))
         return DCU_OK;
     return dcu_wrap([] {
-        rtc::InitLogger(rtc::LogLevel::Warning);
+        rtc::InitLogger(rtc::LogLevel::Warning, log_trampoline);
         rtc::Preload();
         return DCU_OK;
     });
@@ -267,6 +284,7 @@ int dcu_shutdown(void) {
     return dcu_wrap([] {
         g_table.clear();
         g_queue.clear();
+        g_log_queue.clear();
         if (rtc::Cleanup().wait_for(std::chrono::seconds(10)) == std::future_status::timeout)
             throw std::runtime_error("Cleanup timeout (possible deadlock or undestructible object)");
         return DCU_OK;
@@ -276,9 +294,9 @@ int dcu_shutdown(void) {
 
 int dcu_set_log_level(int level) {
     return dcu_wrap([level] {
-        // 注意：上游 InitLogger 不幂等，回调传空即静默拆桥回落 stdout。目前我们本来
-        // 就没装桥，故与迁移前一致；静态 trampoline 归 #33（SPEC §7），随 S5 落地。
-        rtc::InitLogger(map_log_level(level));
+        // **始终**把同一个 trampoline 传下去。传 nullptr 会静默拆桥并回落 stdout，
+        // 那个参数因此不暴露给调用方（见 dcu.h）。
+        rtc::InitLogger(map_log_level(level), log_trampoline);
         return DCU_OK;
     });
 }
@@ -510,6 +528,10 @@ int dcu_dc_buffered_amount(int dc, int *out_amount) {
 
 int dcu_event_next(dcu_event_header *out_header, void *buf, int cap, void *buf2, int cap2) {
     return g_queue.next(out_header, buf, cap, buf2, cap2);
+}
+
+int dcu_log_next(int *out_level, void *buf, int cap, int *out_len, int *out_dropped) {
+    return g_log_queue.next(out_level, buf, cap, out_len, out_dropped);
 }
 
 int dcu_event_queue_depth(int *out_depth) {

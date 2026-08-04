@@ -9,8 +9,18 @@ namespace DataChannelUnity
         /// <summary>库产生的日志行。脱敏后投递。</summary>
         public static event Action<LogLevel, string> MessageLogged;
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private static LogLevel _level = LogLevel.Info;
+#else
         private static LogLevel _level = LogLevel.Warning;
-        private static bool _initialized;
+#endif
+
+        // 每条日志新建一个未 Compiled 的 Regex 是原来的写法；改为静态 Compiled。
+        private static readonly System.Text.RegularExpressions.Regex CredentialPattern =
+            new System.Text.RegularExpressions.Regex(
+                @"((?:stun|stuns|turn|turns):(?://)?)([^@/\s]+@)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                | System.Text.RegularExpressions.RegexOptions.Compiled);
 
         /// <summary>
         /// 日志级别。这是**唯一**的公开入口 —— 原先并存的 <c>SetLogLevel()</c> 方法已删除
@@ -22,30 +32,11 @@ namespace DataChannelUnity
             set
             {
                 _level = value;
-                try
-                {
-                    if (DataChannelRuntime.IsNativeAvailable)
-                        NativeMethods.dcu_set_log_level((int)value);
-                }
-                catch (DllNotFoundException)
-                {
-                    // 原生插件尚未就位。
-                }
-                catch (EntryPointNotFoundException)
-                {
-                }
+                // **单向依赖**：本类只管托管状态，不知道 native 存在。
+                // 把级别同步下去是 DataChannelRuntime 的事 —— 环就是这么剪断的，
+                // 而不是靠两边各自的标志位「先置位才终止」那种隐含不变量。
+                DataChannelRuntime.OnLogLevelChanged(value);
             }
-        }
-
-        internal static void EnsureDefaults()
-        {
-            if (_initialized) return;
-            _initialized = true;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            Level = LogLevel.Info;
-#else
-            Level = LogLevel.Warning;
-#endif
         }
 
         internal static void Emit(LogLevel level, string message)
@@ -73,22 +64,33 @@ namespace DataChannelUnity
         /// 对 URI 里的 userinfo（<c>user:pass@host</c>）脱敏。
         /// </summary>
         /// <remarks>
-        /// #34 决议 2 定了它收 internal。**S0 暂不收**：它唯一的测试目前直接调它，
-        /// 而替代方案（经公开日志入口打一条含凭证的日志再断言输出）要等日志桥
-        /// 落地才成立 —— 在那之前没有任何原生失败会流到 DataChannelLog。
-        /// 现在收 internal 只能二选一：开 InternalsVisibleTo（#39 已否），
-        /// 或删掉测试静默失去覆盖。两者都比晚收一步差。随 S5 一并收。
+        /// internal：脱敏是库自己的职责，留在公开面会让人误以为那是调用方的活。
+        /// 它的测试走**公开日志路径**，不开 <c>InternalsVisibleTo</c> —— 那样顺带
+        /// 覆盖了「脱敏有没有被真正接进日志路径」，而直接调本方法测不到这一点。
         /// </remarks>
-        public static string RedactIceCredentials(string message)
+        internal static string RedactIceCredentials(string message)
         {
             if (string.IsNullOrEmpty(message)) return message;
             // turn:user:pass@host → turn:***@host
             // Match both "turn:user:pass@host" and "turns://user:pass@host"
-            return System.Text.RegularExpressions.Regex.Replace(
-                message,
-                @"((?:stun|stuns|turn|turns):(?://)?)([^@/\s]+@)",
-                m => m.Groups[1].Value + "credentials=redacted@",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return CredentialPattern.Replace(
+                message, m => m.Groups[1].Value + "credentials=redacted@");
+        }
+
+        /// <summary>
+        /// 记录一个异常，**保留完整栈**。
+        /// </summary>
+        /// <remarks>
+        /// 订阅者异常是最需要完整栈的一类日志 —— 错误发生在应用代码里，
+        /// 只给一行 <c>e.Message</c> 等于让人自己猜。走 <c>Debug.LogException</c>
+        /// 以便 Console 里可点击跳转。
+        /// </remarks>
+        internal static void Emit(LogLevel level, string context, Exception exception)
+        {
+            if (level > _level || level == LogLevel.None) return;
+            var text = RedactIceCredentials(context + ": " + exception);
+            MessageLogged?.Invoke(level, text);
+            Debug.LogException(exception);
         }
     }
 }

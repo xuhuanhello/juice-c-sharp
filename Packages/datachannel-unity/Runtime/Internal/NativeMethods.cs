@@ -146,6 +146,12 @@ namespace DataChannelUnity.Internal
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_event_queue_depth(out int depth);
 
+        // 取一条桥接过来的原生日志。dropped 是「自上次读取以来丢弃的条数」，
+        // 队列为空时也会填。
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int dcu_log_next(out int level, byte[] buf, int cap,
+            out int len, out int dropped);
+
         // 语义与上游 rtcReceiveMessage 相同：peek -> 拷贝 -> 成功才丢弃。
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int dcu_dc_receive(int dc, byte[] buf, int cap, out int len);

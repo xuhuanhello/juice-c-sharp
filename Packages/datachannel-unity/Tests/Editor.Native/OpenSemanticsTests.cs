@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading;
 using System.Runtime.InteropServices;
 using NUnit.Framework;
+using UnityEngine.TestTools;
 
 namespace DataChannelUnity.Tests
 {
@@ -33,6 +34,8 @@ namespace DataChannelUnity.Tests
         public void ClearInjection()
         {
             dcu_test_set_open_race_delay_ms(0);
+            // 谁触发，谁负责排空（见 ErrorCodeFidelityTests 的说明）。
+            for (int i = 0; i < 20; i++) { DataChannelRuntime.Pump(); Thread.Sleep(2); }
         }
 
         private static void Wire(PeerConnection a, PeerConnection b, Action<DataChannel> onIncoming)

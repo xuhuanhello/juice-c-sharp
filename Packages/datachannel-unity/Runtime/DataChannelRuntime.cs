@@ -22,6 +22,9 @@ namespace DataChannelUnity
         // 消息可能几 MB，共用一个就是让前者永远按后者的尺寸躺着。
         private static byte[] _messageBuf = new byte[65536];
 
+        // 日志行短，基线小。
+        private static byte[] _logBuf = new byte[4096];
+
         // 复用的通道快照，零分配。见 HandleTable.SnapshotDataChannels 的说明。
         private static readonly System.Collections.Generic.List<DataChannel> ChannelSnapshot =
             new System.Collections.Generic.List<DataChannel>();
@@ -56,16 +59,28 @@ namespace DataChannelUnity
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         private static void Bootstrap()
         {
-            DataChannelLog.EnsureDefaults();
             EnsureNative();
             RegisterPump();
+        }
+
+        /// <summary>
+        /// 级别变更的单向入口。**刻意不调 <see cref="EnsureNative"/>** —— 那正是原先
+        /// 那条互相递归（EnsureNative → EnsureDefaults → SetLogLevel →
+        /// IsNativeAvailable → EnsureNative）赖以终止的隐含不变量所在。剪断环，
+        /// 而不是给环加护栏。
+        /// </summary>
+        internal static void OnLogLevelChanged(LogLevel level)
+        {
+            if (!_nativeReady) return;
+            try { NativeMethods.dcu_set_log_level((int)level); }
+            catch (DllNotFoundException) { }
+            catch (EntryPointNotFoundException) { }
         }
 
         internal static void EnsureNative()
         {
             if (_initAttempted) return;
             _initAttempted = true;
-            DataChannelLog.EnsureDefaults();
             try
             {
                 var rc = NativeMethods.dcu_init();
@@ -149,8 +164,51 @@ namespace DataChannelUnity
         public static void Pump()
         {
             if (!_nativeReady) return;
+            // 日志先排：原生日志往往是后面那些事件的成因，先出来才有上下文。
+            DrainNativeLogs();
             DrainControlEvents();
             DrainMessages();
+        }
+
+        /// <summary>
+        /// 排空原生日志队列。该队列**有界、丢最旧**（与永不丢的控制队列语义相反），
+        /// 丢弃数以一条 warning 暴露。
+        /// </summary>
+        private static void DrainNativeLogs()
+        {
+            var droppedTotal = 0;
+            while (true)
+            {
+                var rc = NativeMethods.dcu_log_next(
+                    out var level, _logBuf, _logBuf.Length, out var len, out var dropped);
+                droppedTotal += dropped;
+
+                if (rc == NativeMethods.ErrTooSmall)
+                {
+                    EnsureCapacity(ref _logBuf, len);
+                    rc = NativeMethods.dcu_log_next(
+                        out level, _logBuf, _logBuf.Length, out len, out dropped);
+                    droppedTotal += dropped;
+                }
+
+                if (rc == NativeMethods.ErrNotAvail) break;
+                if (rc != NativeMethods.Success)
+                {
+                    DataChannelLog.Emit(LogLevel.Warning,
+                        "dcu_log_next failed: " + MapError(rc) + " (raw=" + rc + ")");
+                    break;
+                }
+
+                DataChannelLog.Emit((LogLevel)level, Encoding.UTF8.GetString(_logBuf, 0, len));
+            }
+
+            if (droppedTotal > 0)
+            {
+                // 在 Verbose 压测下这是**预期行为**，不是缺陷 —— 日志可丢，
+                // 控制事件不可丢，两条队列的策略是刻意相反的。
+                DataChannelLog.Emit(LogLevel.Warning,
+                    "dropped " + droppedTotal + " native log line(s): log queue is bounded by design");
+            }
         }
 
         private static void DrainControlEvents()

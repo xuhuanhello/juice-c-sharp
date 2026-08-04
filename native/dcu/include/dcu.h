@@ -134,7 +134,17 @@ typedef struct dcu_dc_init {
 DCU_API int dcu_abi_version(int *out_version);
 DCU_API int dcu_init(void);
 DCU_API int dcu_shutdown(void);
+/* 设置级别。**永远不会拆掉日志桥** —— 内部始终把同一个静态 trampoline 传给上游。
+ *
+ * 上游 InitLogger 在 appender 已存在时会 `appender->callback = std::move(callback)`，
+ * 传 nullptr 即把回调置空并静默回落 std::cout（global.cpp:59,65-80）—— 桥没了、
+ * 凭证不再脱敏、零告警。那个参数因此**根本不暴露给调用方**：降噪一律靠级别，
+ * 含 LogLevel.None。 */
 DCU_API int dcu_set_log_level(int level);
+
+/* 取一条桥接过来的日志行。契约与 dcu_event_next 相同（TOO_SMALL 填长度且不消费）。
+ * out_dropped 带出「自上次读取以来因队列满而丢弃的条数」并清零，队列为空时也填。 */
+DCU_API int dcu_log_next(int *out_level, void *buf, int cap, int *out_len, int *out_dropped);
 
 /* --- PeerConnection ------------------------------------------------------ */
 

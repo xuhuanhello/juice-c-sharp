@@ -1,4 +1,5 @@
 using NUnit.Framework;
+using UnityEngine.TestTools;
 
 namespace DataChannelUnity.Tests
 {
@@ -32,6 +33,28 @@ namespace DataChannelUnity.Tests
                 "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
         }
 
+        [TearDown]
+        public void DrainAndRestore()
+        {
+            // 实测：测试体里设的 ignoreFailingMessages 在进入 TearDown 前会被框架重置，
+            // 所以这里要**再设一次** —— 排空动作本身就会把预期的 Error 日志放出来。
+            LogAssert.ignoreFailingMessages = true;
+            DrainPendingNativeLogs();
+        }
+
+        // 原生日志是**异步**的：触发原生错误的测试若不在结束前排空队列，那条日志会被
+        // 下一个碰巧会 pump 的测试排出来，炸在一个无辜的测试上。本套件实际撞到过：
+        // ErrorCodeFidelityTests 触发的 "ftp" 错误炸在了 EventQueueAtomicityTests 上。
+        // 所以：**谁触发，谁负责排空。**
+        private static void DrainPendingNativeLogs()
+        {
+            for (int i = 0; i < 30; i++)
+            {
+                DataChannelRuntime.Pump();
+                System.Threading.Thread.Sleep(2);
+            }
+        }
+
         [Test]
         public void AbiVersion_IsTwo_ViaOutParameter()
         {
@@ -43,6 +66,8 @@ namespace DataChannelUnity.Tests
         [Test]
         public void MalformedIceUrl_MapsToInvalid_NotFlattenedToFailure()
         {
+            // 本用例**刻意**触发原生错误；那些 Error 日志是预期产物，不是失败。
+            LogAssert.ignoreFailingMessages = true;
             var cfg = new PeerConnectionConfig();
             cfg.IceServers.Add(new IceServer(BadUrl));
 
@@ -58,6 +83,8 @@ namespace DataChannelUnity.Tests
         [Test]
         public void GarbageRemoteDescription_MapsToInvalid()
         {
+            // 本用例**刻意**触发原生错误；那些 Error 日志是预期产物，不是失败。
+            LogAssert.ignoreFailingMessages = true;
             using (var pc = new PeerConnection(new PeerConnectionConfig()))
             {
                 var ex = Assert.Throws<DataChannelException>(
@@ -69,6 +96,8 @@ namespace DataChannelUnity.Tests
         [Test]
         public void ExceptionMessage_SelfFixableShape_MentionsRawCode()
         {
+            // 本用例**刻意**触发原生错误；那些 Error 日志是预期产物，不是失败。
+            LogAssert.ignoreFailingMessages = true;
             var cfg = new PeerConnectionConfig();
             cfg.IceServers.Add(new IceServer(BadUrl));
 
