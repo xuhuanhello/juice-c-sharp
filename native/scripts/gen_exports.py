@@ -149,9 +149,13 @@ def render_version_script(names: list[str]) -> str:
 
 
 def render_def(names: list[str]) -> str:
+    # 刻意**不写 LIBRARY 行**。CMake 的 Windows 产物带 lib 前缀
+    # （libdatachannel_unity.dll，暂存时才改名成 SPEC §8 要求的 datachannel_unity.dll），
+    # 而 LIBRARY 指令里的名字与实际输出名不一致会让链接器报 LNK4070 并忽略它。
+    # 该指令本来就是可选的，去掉即无警告。（首次 Windows CI 实跑看到的。）
     return (
         comment_block(";")
-        + "LIBRARY datachannel_unity\nEXPORTS\n"
+        + "EXPORTS\n"
         + "".join(f"    {n}\n" for n in names)
     )
 

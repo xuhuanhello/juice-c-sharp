@@ -83,12 +83,22 @@ LINUX_ALLOWED_NAMES = {
 }
 
 # Windows：PE 导入表只有 DLL 名。
+# bcrypt/crypt32 是 **Windows 自带的系统 crypto API**，不是我们捆绑的 crypto 库
+# ——libjuice/libdatachannel 用它们取随机数与证书。它们不违反「crypto 必须静态
+# 链接」：那条规则针对的是 OpenSSL/MbedTLS 那种被打包进产品的库。
 WINDOWS_ALLOWED_NAMES = {
     "kernel32.dll", "advapi32.dll", "ws2_32.dll", "iphlpapi.dll",
     "bcrypt.dll", "crypt32.dll", "user32.dll", "ole32.dll",
-    "msvcrt.dll", "ucrtbase.dll", "vcruntime140.dll", "msvcp140.dll",
-    "api-ms-win-crt-runtime-l1-1-0.dll",
+    "msvcrt.dll", "ucrtbase.dll", "msvcp140.dll",
+    # 首次 Windows CI 实跑才看到的：CRT 拆成了这几个
+    "vcruntime140.dll", "vcruntime140_1.dll",
 }
+
+# UCRT 的 API set。它们是系统的一部分，且会随 CRT 版本增删（本次实测就出现了
+# convert/filesystem/heap/math/runtime/stdio/string/time/utility 九个）。逐个
+# 列举必然过期，用前缀规则 —— 与 macOS 用路径前缀同理：仍是允许列表，任何不以
+# 此开头的 DLL 依然必须在上面的显式集合里。
+WINDOWS_ALLOWED_PREFIXES = ("api-ms-win-",)
 
 
 class AuditError(Exception):
@@ -243,8 +253,11 @@ def check_deps(platform: str, deps: list[str]) -> None:
         unexpected = [d for d in deps if d not in LINUX_ALLOWED_NAMES]
         allowed_desc = "、".join(sorted(LINUX_ALLOWED_NAMES))
     else:
-        unexpected = [d for d in deps if d.lower() not in WINDOWS_ALLOWED_NAMES]
-        allowed_desc = "、".join(sorted(WINDOWS_ALLOWED_NAMES))
+        unexpected = [d for d in deps
+                      if d.lower() not in WINDOWS_ALLOWED_NAMES
+                      and not any(d.lower().startswith(p) for p in WINDOWS_ALLOWED_PREFIXES)]
+        allowed_desc = ("、".join(sorted(WINDOWS_ALLOWED_NAMES))
+                        + "，以及前缀 " + "、".join(WINDOWS_ALLOWED_PREFIXES))
 
     if unexpected:
         raise AuditError(
