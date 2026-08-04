@@ -94,8 +94,8 @@ namespace DataChannelUnity.Internal
         internal static string SuppressedSuffix(int suppressed, double peak, string unit)
         {
             if (suppressed <= 0) return string.Empty;
-            return "（上一个 " + WindowSeconds + " 秒窗口内另有 " + suppressed
-                   + " 次同类，峰值 " + peak.ToString("0.##") + unit + "）";
+            return " (in the previous " + WindowSeconds + "s window there were " + suppressed
+                   + " more of the same kind, peak " + peak.ToString("0.##") + unit + "）";
         }
 
         /// <summary>域重载 / 进入播放模式时清空，避免拿上个域的窗口压住新域的第一条。</summary>

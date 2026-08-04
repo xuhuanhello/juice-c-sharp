@@ -29,7 +29,7 @@ cd native
 meson setup build/macos-arm64 --buildtype=release
 meson compile -C build/macos-arm64
 # same thing via thin wrapper:
-./scripts/build-macos-arm64.sh
+./scripts/build-macos.sh
 ```
 
 - **Meson is the product entry** (local = CI). Crypto + libdatachannel are built from **`subprojects/`**, not linked from brew.

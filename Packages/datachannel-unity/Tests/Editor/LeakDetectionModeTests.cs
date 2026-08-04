@@ -21,8 +21,8 @@ namespace DataChannelUnity.Tests
             CollectionAssert.AreEquivalent(
                 new[] { LeakDetectionMode.Disabled, LeakDetectionMode.Enabled },
                 Enum.GetValues(typeof(LeakDetectionMode)),
-                "LeakDetectionMode 必须恰好两档。若你正想加回 EnabledWithStackTrace，"
-                + "先读 issue #45 决议 3：Enabled 本来就含创建栈。");
+                "LeakDetectionMode must have exactly two tiers. If you are about to add EnabledWithStackTrace back, "
+                + "read issue #45 resolution 3 first: Enabled already carries the creation stack.");
         }
 
         [Test]
@@ -31,8 +31,8 @@ namespace DataChannelUnity.Tests
             // 编辑器 / Development 构建默认开，Release 默认关。终结器本身还有一层
             // 条件编译，两层是叠加而不是二选一 —— 见 SPEC §6。
             Assert.AreEqual(LeakDetectionMode.Enabled, DataChannelLog.LeakDetection,
-                "Editor 下泄漏诊断必须默认开启：忘记 Dispose 是这份清单上触发概率最高的一项，"
-                + "而唯一的替代兜底只能告诉你「漏了 N 个」，说不出是谁、从哪儿来。");
+                "Leak diagnostics must default to on in the Editor: forgetting Dispose is the most likely failure on this list, "
+                + "and the only alternative fallback can just tell you that N objects leaked, not which ones or where from.");
         }
 
         [Test]

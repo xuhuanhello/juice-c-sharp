@@ -39,7 +39,7 @@ namespace DataChannelUnity.Tests
         public void Setup()
         {
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
             _captured.Clear();
             DataChannelLog.MessageLogged += Capture;
         }
@@ -72,7 +72,7 @@ namespace DataChannelUnity.Tests
         {
             const string key = "handle=";
             var start = description.IndexOf(key, StringComparison.Ordinal);
-            Assert.Greater(start, -1, "ToString() 里没有 handle= —— 句柄的唯一公开出口被改坏了。");
+            Assert.Greater(start, -1, "ToString() has no handle=: the only public exit for the handle was broken.");
             start += key.Length;
             var end = start;
             while (end < description.Length && char.IsDigit(description[end])) end++;
@@ -85,7 +85,7 @@ namespace DataChannelUnity.Tests
             // 泄漏报告是 Error 级 —— 本用例的**预期产物**，不是失败。
             LogAssert.ignoreFailingMessages = true;
             Assert.AreEqual(LeakDetectionMode.Enabled, DataChannelLog.LeakDetection,
-                "本用例的前提是泄漏诊断开着。");
+                "This test presumes leak diagnostics are enabled.");
 
             var handle = ParseHandle(CreateAndAbandonPeerConnection());
 
@@ -101,20 +101,20 @@ namespace DataChannelUnity.Tests
                     GC.WaitForPendingFinalizers();
                     GC.Collect();
                     DataChannelRuntime.Pump();
-                    reported = _captured.Exists(m => m.Contains("被 GC 回收时仍未 Dispose"));
+                    reported = _captured.Exists(m => m.Contains("was garbage-collected without Dispose()"));
                     if (!reported) Thread.Sleep(20);
                 }
 
                 Assert.IsTrue(reported,
-                    "未 Dispose 的 PeerConnection 被回收后没有任何泄漏报告。"
-                    + "查找表若退回强引用，终结器就永远不会跑 —— 那正是这条门禁存在的原因。");
+                    "No leak was reported after an undisposed PeerConnection was collected. "
+                    + "If the lookup table regresses to strong references the finalizer never runs, which is exactly why this gate exists.");
 
-                var report = _captured.Find(m => m.Contains("被 GC 回收时仍未 Dispose"));
+                var report = _captured.Find(m => m.Contains("was garbage-collected without Dispose()"));
                 StringAssert.Contains("handle=" + handle, report,
-                    "泄漏报告必须点名是哪个对象。");
-                StringAssert.Contains("创建于", report,
-                    "Enabled 档必须带**创建时**的调用栈 —— 「在哪儿创建的」几乎就是"
-                    + "泄漏诊断的全部信息量，两档合并（#45 决议 3）正是基于这一点。");
+                    "The leak report must name which object leaked.");
+                StringAssert.Contains("Created at", report,
+                    "The Enabled tier must carry the CREATION stack: where it was created is nearly all the information "
+                    + "leak diagnostics can give, which is exactly why the two tiers were merged (#45, resolution 3).");
             }
             finally
             {

@@ -13,7 +13,7 @@ namespace DataChannelUnity.Tests
         {
             // 缺席必须是失败，不是跳过（SPEC §11）。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
             return new PeerConnection(new PeerConnectionConfig());
         }
 

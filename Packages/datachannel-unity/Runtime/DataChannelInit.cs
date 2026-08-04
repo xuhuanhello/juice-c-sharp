@@ -41,14 +41,14 @@ namespace DataChannelUnity
             {
                 if (MaxRetransmits != 0 || MaxPacketLifeTime != 0)
                     throw new ArgumentException(
-                        "DataChannelInit: Reliable = true 时 MaxRetransmits 与 MaxPacketLifeTime 都必须为 0。"
-                        + "要用不可靠投递，先设 Reliable = false，再设其中一个。",
+                        "DataChannelInit: when Reliable = true, both MaxRetransmits and MaxPacketLifeTime must be 0. "
+                        + "For unreliable delivery, set Reliable = false first, then set one of them.",
                         nameof(Reliable));
             }
             else if (MaxRetransmits != 0 && MaxPacketLifeTime != 0)
             {
                 throw new ArgumentException(
-                    "DataChannelInit: MaxRetransmits 与 MaxPacketLifeTime 互斥，至多设一个（另一个留 0）。",
+                    "DataChannelInit: MaxRetransmits and MaxPacketLifeTime are mutually exclusive; set at most one (leave the other at 0).",
                     nameof(MaxRetransmits));
             }
         }

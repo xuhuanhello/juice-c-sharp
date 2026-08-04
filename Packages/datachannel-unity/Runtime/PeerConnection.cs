@@ -98,8 +98,8 @@ namespace DataChannelUnity
             // 关流。两层都校验，这里是第一层（能给出可读的错误）。
             if (labelBytes.Length > MaxDataChannelLabelBytes)
                 throw new ArgumentException(
-                    "DataChannel label 超过 " + MaxDataChannelLabelBytes
-                    + " 字节（UTF-8），实际 " + labelBytes.Length + "。这是上游 SCTP 线格式的实测上界。",
+                    "DataChannel label exceeds " + MaxDataChannelLabelBytes
+                    + " bytes (UTF-8); actual " + labelBytes.Length + ". This is the measured upper bound of the upstream SCTP wire format.",
                     nameof(label));
             var ninit = new NativeMethods.DcInitNative
             {
@@ -154,9 +154,9 @@ namespace DataChannelUnity
             {
                 _warnedChildCount = true;
                 DataChannelLog.Emit(LogLevel.Warning,
-                    "PeerConnection(handle=" + NativeHandle + ") 的子通道数已超过 "
-                    + ChildWarnThreshold + "（当前 " + count + "）。通道**不会**被拒收 —— "
-                    + "这只是提示：通常意味着有通道没被 Dispose，或对端在刷通道。");
+                    "PeerConnection(handle=" + NativeHandle + ") has more child channels than the advisory limit of "
+                    + ChildWarnThreshold + " (currently " + count + "). Channels are NOT rejected: "
+                    + "this is advisory only, and usually means channels are not being disposed, or the remote peer is churning them.");
             }
         }
 

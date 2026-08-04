@@ -29,8 +29,8 @@ namespace DataChannelUnity.Tests
             // 缺席必须是失败，不是跳过（SPEC §11）：没有插件时不 Assert.Ignore，
             // 否则「压根没跑」和「跑过了，绿」在报告里长得一模一样。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor："
-                + "Unity 的原生插件进程级加载、永不卸载（docs/verification-mcp.md）。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor: "
+                + "Unity loads native plugins process-wide and never unloads them (docs/verification-mcp.md).");
 
             string gotA = null, gotB = null;
             var aOpened = false;
@@ -75,13 +75,13 @@ namespace DataChannelUnity.Tests
                 // 即使下面的断言失败提前跳出。
 
                 Assert.IsNotNull(incoming,
-                    "对端从未收到 DataChannelReceived —— 入向通道事件没经 PlayerLoop 派发。");
+                    "The remote peer never received DataChannelReceived: inbound channel events were not dispatched through the PlayerLoop.");
                 Assert.IsTrue(aOpened,
-                    "出向通道从未收到 Open 事件 —— pump 没在跑，或事件没被派发。");
+                    "The outbound channel never received an Open event: the pump is not running, or events were not dispatched.");
                 Assert.AreEqual("ping", gotB,
-                    "对端没收到消息：入向通道的消息派发未经 PlayerLoop 到达。");
+                    "The remote peer received no message: inbound channel message dispatch did not arrive through the PlayerLoop.");
                 Assert.AreEqual("pong", gotA,
-                    "本端没收到回包：出向通道的消息派发未经 PlayerLoop 到达。");
+                    "This side received no echo: outbound channel message dispatch did not arrive through the PlayerLoop.");
             }
         }
     }

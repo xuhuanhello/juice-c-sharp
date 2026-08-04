@@ -50,7 +50,7 @@ namespace DataChannelUnity.Tests
         {
             // 缺席必须是失败：插件没加载时不静默跳过收尾断言。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载，套件收尾断言无法执行。这是失败而非跳过。");
+                "Native plugin not loaded, so suite teardown assertions cannot run. This is a failure, not a skip.");
 
             LogAssert.ignoreFailingMessages = true;
 
@@ -61,23 +61,23 @@ namespace DataChannelUnity.Tests
                 Thread.Sleep(2);
             }
 
-            Assert.AreEqual(0, dcu_event_queue_depth(out var depth), "dcu_event_queue_depth 调用本身失败。");
+            Assert.AreEqual(0, dcu_event_queue_depth(out var depth), "The dcu_event_queue_depth call itself failed.");
             Assert.AreEqual(0, depth,
-                "控制事件队列没排空。队列是无界的、永不丢事件，所以积压只可能来自"
-                + "「pump 没跑」或「某个回调卡住了」—— 两者都是缺陷。");
+                "The control-event queue was not drained. It is unbounded and never drops events, so a backlog can only come from "
+                + "a pump that never ran or a callback that stalled; both are defects.");
 
             var rc = dcu_shutdown(out var undestroyed);
 
             Assert.AreEqual(0, rc,
-                "dcu_shutdown 调用本身失败（上游 Cleanup 超时会落到这里）。");
+                "The dcu_shutdown call itself failed (an upstream Cleanup timeout lands here).");
 
             // S6 时这条判据只覆盖了一半 —— 当时 dcu_shutdown 只返回状态码，
             // 「漏了几个对象」那一位没人看着。S8 让它经 out 参数带出未销毁计数，
             // 这里才补齐。计数由 dcu 层的句柄表自己给出，不依赖上游、也不依赖日志桥
             // （上游 rtcCleanup 返回 void 且把自己最有价值的两条诊断吞进 plog）。
             Assert.AreEqual(0, undestroyed,
-                "套件跑完时仍有 " + undestroyed + " 个原生对象没被销毁。"
-                + "有 PeerConnection / DataChannel 没被 Dispose —— 找那个忘了 using 的测试。");
+                "At the end of the suite, " + undestroyed + " native object(s) were still undestroyed. "
+                + "Some PeerConnection / DataChannel was never disposed: find the test that forgot its using block.");
 
             // 收尾之后把原生库恢复到托管侧以为的状态：DataChannelRuntime 的
             // _initAttempted / _nativeReady 仍是 true，不重新 init 的话，同一个域里

@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""生成 UPM 插件的 PluginImporter `.meta`（决议 #52）。
+
+**产生与校验是同一个机制**：本脚本生成 `.meta`，CI 重跑它并 diff，不一致就红。
+不需要 Unity，所以能进 CI —— 而 CI 里没有 Unity（#43，不可逆转）。
+
+为什么纯文本校验够用：#49 实测发现，纯文本能查的那一类，恰好就是 Unity 完全
+**不查**、写错必然**静默失效**的那一类：
+
+- 平台键名拼错 == 没写这条。无报错、无重写，错字原样留在磁盘上。
+- Windows `.dll` 开 `Any Platform`，在 macOS 上是纯静默：构建期最终路径为空串
+  不拷贝，Editor 期只得到 `DllNotFoundException`，Console 零条日志 —— 与
+  「文件压根不存在」不可区分。
+
+平台开关的取值不是从文档抄的，是 2022.3.62f3 让 Editor 通过 PluginImporter API
+配置后**自己写到磁盘上的字节**（#49 §3）。黄金样本入库在 native/exports/
+plugin-meta-golden/，本脚本的输出必须与之匹配 —— 否则生成器写错时，生成物与
+仓库永远一致、门禁永远绿，机制会退化成「不可能失败的检查」。
+
+GUID 的硬约束：一旦入库就不能变（变了等于换了一个资产）。所以本脚本**从现有
+`.meta` 读回 GUID 并保留**，不重新生成整个文件。新平台第一次落地时用
+`--allow-new-guid` 铸一个，之后永远保留。默认模式下缺 `.meta` 即硬失败 ——
+否则 CI 每次跑都会铸出不同的 GUID，diff 永远红。
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+import uuid
+from pathlib import Path
+
+def _force_utf8_output() -> None:
+    """Windows 上非 TTY 的 stdout 默认是 cp1252，本脚本的中文输出会直接
+    UnicodeEncodeError（首次 Windows CI 实跑时炸在这里）。在脚本自身修而不是
+    靠 workflow 设 PYTHONIOENCODING —— 那样无论谁怎么调用它都成立。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
+_force_utf8_output()
+
+
+GUID_RE = re.compile(r"^guid:\s*([0-9a-f]{32})\s*$", re.MULTILINE)
+
+# 与黄金样本比对时要归一化掉的两行，各有明确理由：
+#
+# guid —— 黄金样本里是探针资产的 GUID，本来就该不同。
+#
+# isOverridable —— Unity 给新导入的插件写 `0`，本包**有意写 `1`**：
+#   DefaultPluginImporterExtension.CheckFileCollisions 在采用者于自己的 Assets/
+#   放了同名插件时，会跳过「可覆盖」的那一份而不是报冲突。这对一个要发布的 UPM
+#   包是正确的。PluginImporter 只有 GetIsOverridable() 没有 setter，所以这一位
+#   **只能靠手写 .meta 得到**，真 Editor 永远产不出它 —— 归一化是唯一的选择，
+#   而不是把它当成偏差。（Unity 会忠实读回：实测 GetIsOverridable()=True。）
+NORMALIZE = (
+    (GUID_RE, "guid: <normalized>"),
+    (re.compile(r"^  isOverridable:\s*[01]\s*$", re.MULTILINE), "  isOverridable: <normalized>"),
+)
+
+
+def normalize(text: str) -> str:
+    for pattern, replacement in NORMALIZE:
+        text = pattern.sub(replacement, text)
+    return text
+
+# 每个平台一条：产物相对 Plugins/ 的路径 → platformData 条目。
+#
+# 条目顺序与 settings 键序都按 ASCII 排序 —— Unity 写出来就是这个顺序
+# （大写字母排在小写前，所以 iPhone 落在 Standalone 之后）。
+#
+# 范围是 map #46 定的**五个**平台（原为六个，macOS 两个架构合并为一份 universal）。
+# Windows ARM64 已出图（2022.3 的 Standalone Windows 没有 ARM64 槽位，编辑器
+# 源码显式返回空路径）；WebGL 也出图。
+PLATFORMS: dict[str, dict] = {
+    "Windows/x86_64/datachannel_unity.dll": {
+        "Any": {"enabled": 0, "settings": {}},
+        "Editor": {"enabled": 1, "settings": {
+            "CPU": "x86_64", "DefaultValueInitialized": "true", "OS": "Windows"}},
+        "Standalone": {"target": "Win64", "enabled": 1, "settings": {"CPU": "x86_64"}},
+    },
+    # macOS 是**单一 universal bundle**，没有架构子目录（见 native/CMakeLists.txt
+    # 开头的理由）。因此 CPU 是 AnyCPU —— 而「两份同名 bundle 必须靠 CPU 字段
+    # 区分」正是 #49 查出的 CheckFileCollisions 冲突与 reimport 刷 error 的根源，
+    # 这里从根上不存在。
+    "macOS/datachannel_unity.bundle": {
+        "Any": {"enabled": 0, "settings": {}},
+        "Editor": {"enabled": 1, "settings": {
+            "CPU": "AnyCPU", "DefaultValueInitialized": "true", "OS": "OSX"}},
+        "Standalone": {"target": "OSXUniversal", "enabled": 1, "settings": {"CPU": "AnyCPU"}},
+    },
+    # `.so` 对 Android 也是候选，Unity 导入时会写一条默认关闭的 Android 条目。
+    # 手写时省略它行为一致，但目标是与 Unity 产出逐字节一致，所以必须在。
+    "Linux/x86_64/libdatachannel_unity.so": {
+        "Android": {"enabled": 0, "settings": {"Is16KbAligned": "false"}},
+        "Any": {"enabled": 0, "settings": {}},
+        "Editor": {"enabled": 1, "settings": {
+            "CPU": "x86_64", "DefaultValueInitialized": "true", "OS": "Linux"}},
+        "Standalone": {"target": "Linux64", "enabled": 1, "settings": {"CPU": "x86_64"}},
+    },
+    "Android/arm64-v8a/libdatachannel_unity.so": {
+        "Android": {"enabled": 1, "settings": {"CPU": "ARM64", "Is16KbAligned": "false"}},
+        "Any": {"enabled": 0, "settings": {}},
+        "Editor": {"enabled": 0, "settings": {"DefaultValueInitialized": "true"}},
+    },
+    # iPhone 段是 `settings: {}` —— 真 Editor 对一个只设了 SetCompatibleWithPlatform
+    # 的静态 .a 就写这个。（#49 文档 §3.7 列的那四个键 AddToEmbeddedBinaries /
+    # CPU / CompileFlags / FrameworkDependencies 是探针显式设过之后才写出来的；
+    # 缺省即 false/AnyCPU/空，语义相同。以现场实测为准。）
+    # 将来若 .a 需要链接系统框架，就是往 FrameworkDependencies 填。
+    "iOS/libdatachannel_unity.a": {
+        "Any": {"enabled": 0, "settings": {}},
+        "Editor": {"enabled": 0, "settings": {"DefaultValueInitialized": "true"}},
+        "iPhone": {"target": "iOS", "enabled": 1, "settings": {}},
+    },
+}
+
+
+class MetaError(Exception):
+    pass
+
+
+def render(guid: str, platform_data: dict) -> str:
+    """按 Unity 的字节形状渲染。注意多处**尾随空格**，Unity 写出来就是那样。"""
+    lines = [
+        "fileFormatVersion: 2",
+        f"guid: {guid}",
+        "PluginImporter:",
+        "  externalObjects: {}",
+        "  serializedVersion: 2",
+        "  iconMap: {}",
+        "  executionOrder: {}",
+        "  defineConstraints: []",
+        "  isPreloaded: 0",
+        # isOverridable: 1 是有意的，且只能靠手写 .meta 得到（PluginImporter 只有
+        # GetIsOverridable 没有 setter）。它让采用者在自己的 Assets/ 放同名插件时
+        # 覆盖本包这份，而不是构建报冲突。
+        "  isOverridable: 1",
+        "  isExplicitlyReferenced: 0",
+        "  validateReferences: 1",
+        "  platformData:",
+    ]
+
+    for group in sorted(platform_data):
+        entry = platform_data[group]
+        target = entry.get("target", "" if group == "Any" else group)
+        lines += [
+            "  - first:",
+            f"      {group}: {target}".rstrip() + (" " if not target else ""),
+            "    second:",
+            f"      enabled: {entry['enabled']}",
+        ]
+        settings = entry["settings"]
+        if not settings:
+            lines.append("      settings: {}")
+        else:
+            lines.append("      settings:")
+            for key in sorted(settings):
+                value = settings[key]
+                lines.append(f"        {key}: {value}".rstrip() + ("" if value else " "))
+
+    lines += ["  userData: ", "  assetBundleName: ", "  assetBundleVariant: "]
+    return "\n".join(lines) + "\n"
+
+
+def read_guid(meta_path: Path, allow_new: bool) -> str:
+    if meta_path.is_file():
+        match = GUID_RE.search(meta_path.read_text(encoding="utf-8"))
+        if not match:
+            raise MetaError(
+                f"No valid guid line found in {meta_path}.\n"
+                "  A GUID must never change once committed (changing it means a different asset), so this\n"
+                "  will not mint a new one for you. Find out why this .meta is broken first.")
+        return match.group(1)
+
+    if not allow_new:
+        raise MetaError(
+            f"{meta_path} does not exist.\n"
+            "  Use --allow-new-guid to mint a GUID the first time a platform lands; it is kept forever after.\n"
+            "  The default mode deliberately does not mint: otherwise every CI run produces a different GUID,\n"
+            "  the diff is permanently red, and this gate degrades into noise that someone turns off.")
+    return uuid.uuid4().hex
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--plugin-root", required=True, type=Path,
+                    help="Packages/datachannel-unity/Plugins")
+    ap.add_argument("--golden", type=Path, default=None,
+                    help="golden-sample directory (bytes written by a real Editor); when given, it is checked too")
+    ap.add_argument("--check", action="store_true",
+                    help="check only, never write; exit non-zero on any difference (for CI)")
+    ap.add_argument("--allow-new-guid", action="store_true",
+                    help="allow minting a new GUID for a .meta that does not exist yet (first landing of a platform)")
+    args = ap.parse_args()
+
+    drift: list[str] = []
+    absent: list[str] = []
+    for rel, platform_data in PLATFORMS.items():
+        asset_path = args.plugin_root / rel
+        meta_path = args.plugin_root / (rel + ".meta")
+
+        # 一个平台算「已入列」的判据：**产物存在，或者 .meta 已入库**。
+        #
+        # 起初我只看产物是否存在，并把「产物不存在却有 .meta」当成孤儿报错。CI 上
+        # 立刻红了，而且报得没错——只是判据错了：二进制目前**被 .gitignore 忽略**
+        # （#35：矩阵补齐前一个二进制都不入库），所以在任何干净 clone 里产物都不
+        # 存在，而 .meta 是入库的。那不是孤儿，那是本仓库当前的正常状态。
+        #
+        # 改成看两者之一即可：**入库的 .meta 本身就是「这个平台已进矩阵」的声明**。
+        # 两者都没有 = 尚未入列，跳过。
+        #
+        # 原本想防的是「给还没有产物的平台生成 .meta，Unity 刷新时当孤儿删掉」——
+        # 那个风险只在本机工作树里成立，而它是自愈的：.meta 被删 → 平台不再入列
+        # → 下次直接跳过，不会红。所以不需要为它单独报错。
+        if not asset_path.exists() and not meta_path.is_file():
+            absent.append(rel)
+            continue
+
+        content = render(read_guid(meta_path, args.allow_new_guid), platform_data)
+
+        if args.golden:
+            golden = args.golden / (rel.replace("/", "__") + ".meta")
+            if not golden.is_file():
+                raise MetaError(
+                    f"Missing golden sample {golden}\n"
+                    "  It is what actually holds this gate up: without it, a buggy generator produces output that\n"
+                    "  always matches the repo and the gate is always green. Missing means hard failure, not a\n"
+                    "  silent downgrade to 'compare against the repo only'.")
+            expected = golden.read_text(encoding="utf-8")
+            if normalize(expected) != normalize(content):
+                drift.append(f"  generated output differs from the golden sample: {rel}\n"
+                             f"    golden sample: {golden}")
+                continue
+
+        current = meta_path.read_text(encoding="utf-8") if meta_path.is_file() else None
+        if current == content:
+            continue
+
+        if args.check:
+            drift.append(f"  the .meta in the repo differs from the generated output: {rel}")
+        else:
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
+            meta_path.write_text(content, encoding="utf-8")
+            print(f"  wrote {meta_path}")
+
+    if drift:
+        raise MetaError(
+            ".meta check failed:\n" + "\n".join(drift) + "\n\n"
+            "  Fix: run `python3 native/scripts/gen_plugin_meta.py --plugin-root <...>`\n"
+            "  to regenerate, and commit the diff along with it. If the difference comes from an INTENTIONAL\n"
+            "  change to the platform switches, update the golden samples first -- and golden samples can only\n"
+            "  be produced by a real Editor, never hand-written.")
+
+    done = len(PLATFORMS) - len(absent)
+    print(f"OK: .meta matches the generated output for {done}/{len(PLATFORMS)} platform(s)"
+          + (", and matches the golden samples" if args.golden else ""))
+    if absent:
+        # 明说跳过了什么。一个「6 个里过了 1 个」的绿勾若不写清楚，读起来
+        # 会像「6 个都过了」—— 那正是把覆盖面的缺口变成沉默。
+        print("Skipped platforms, not yet landed (artifact absent; expected under batched landing, see #53):")
+        for rel in absent:
+            print(f"    {rel}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except MetaError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)

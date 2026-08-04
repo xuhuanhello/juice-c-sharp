@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Stage Meson/CMake-built datachannel_unity into UPM Plugins layout."""
+"""把 CMake 构建出的 datachannel_unity 暂存进 UPM Plugins 布局。
+
+只负责暂存。**离线门禁在 audit_plugin.py**，由 CMake 的第二条 POST_BUILD 命令
+在本脚本之后调用 —— 拆开是因为 audit 需要 CMake 才知道的工具路径
+（CMAKE_NM / CMAKE_READELF / CMAKE_LINKER），从这里透传只会多一层。
+
+旧版本在 darwin 分支里 `if audit.is_file()` 才跑门禁，且 Windows/Linux 分支
+根本不跑（#48 发现）—— 前者让「门禁文件没了」和「门禁通过了」长得一样，后者
+让两个平台完全没有门禁。现在门禁由 CMake 无条件调用，三个平台一视同仁。
+"""
 from __future__ import annotations
 
 import argparse
@@ -10,12 +19,25 @@ import subprocess
 import sys
 
 
+def _force_utf8_output() -> None:
+    """Windows 上非 TTY 的 stdout 默认是 cp1252，本脚本的中文输出会直接
+    UnicodeEncodeError（首次 Windows CI 实跑时炸在这里）。在脚本自身修而不是
+    靠 workflow 设 PYTHONIOENCODING —— 那样无论谁怎么调用它都成立。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
+_force_utf8_output()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", required=True, help="Path to built shared library")
     ap.add_argument("--host-system", required=True, choices=["darwin", "windows", "linux"])
     ap.add_argument("--plugin-root", required=True)
-    ap.add_argument("--rel", required=True, help="e.g. macOS/arm64")
+    ap.add_argument("--rel", required=True, help="e.g. macOS or Windows/x86_64")
     args = ap.parse_args()
 
     binary = pathlib.Path(args.binary)
@@ -43,9 +65,11 @@ def main() -> int:
         mac.mkdir(parents=True)
         dest = mac / "datachannel_unity"
         shutil.copy2(binary, dest)
+        # check=True：install name 设失败会让插件按绝对路径去找自己，在采用者机器上
+        # 加载失败。旧代码用 check=False 把这个失败吞掉了 —— 那是「缺席变成沉默」。
         subprocess.run(
             ["install_name_tool", "-id", "@loader_path/datachannel_unity", str(dest)],
-            check=False,
+            check=True,
         )
         plist = bundle / "Contents" / "Info.plist"
         plist.write_text(
@@ -60,9 +84,6 @@ def main() -> int:
             encoding="utf-8",
         )
         print(f"Installed {bundle}")
-        audit = pathlib.Path(__file__).resolve().parent / "audit-macos-plugin.sh"
-        if audit.is_file():
-            subprocess.run(["bash", str(audit), str(bundle)], check=True)
     else:
         # Windows/Linux: copy with expected name
         if args.host_system == "windows":

@@ -7,7 +7,8 @@
 # DCU_ABI_VERSION bump 落在**同一个 commit**里 —— 这样评审时忘记 bump 一眼可见。
 # 这是本文件唯一的维护成本，也正是它存在的理由。
 #
-# 由 native/scripts/audit-macos-plugin.sh 逐行 diff 实际导出，不符即非零退出。
+# 由 native/scripts/audit_plugin.py 逐行 diff 实际导出，不符即非零退出；
+# 各平台的链接期白名单也由本文件经 native/scripts/gen_exports.py 生成。
 # 允许 # 注释与空行；其余每行一个符号名（不带平台前缀下划线），顺序无关。
 #
 # 当前 DCU_ABI_VERSION = 2，20 个导出（含 1 个测试钩子）。目标形态已达成。

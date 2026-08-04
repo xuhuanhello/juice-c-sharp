@@ -44,7 +44,7 @@ namespace DataChannelUnity.Tests
         {
             // 缺席必须是失败：插件没加载时不静默跳过收尾断言。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载，套件收尾断言无法执行。这是失败而非跳过。");
+                "Native plugin not loaded, so suite teardown assertions cannot run. This is a failure, not a skip.");
 
             LogAssert.ignoreFailingMessages = true;
 
@@ -54,17 +54,17 @@ namespace DataChannelUnity.Tests
                 Thread.Sleep(2);
             }
 
-            Assert.AreEqual(0, dcu_event_queue_depth(out var depth), "dcu_event_queue_depth 调用本身失败。");
+            Assert.AreEqual(0, dcu_event_queue_depth(out var depth), "The dcu_event_queue_depth call itself failed.");
             Assert.AreEqual(0, depth,
-                "控制事件队列没排空。队列无界、永不丢事件，积压只可能来自"
-                + "「pump 没跑」或「某个回调卡住了」。");
+                "The control-event queue was not drained. It is unbounded and never drops events, so a backlog can only come from "
+                + "a pump that never ran or a callback that stalled.");
 
             var rc = dcu_shutdown(out var undestroyed);
 
-            Assert.AreEqual(0, rc, "dcu_shutdown 调用本身失败。");
+            Assert.AreEqual(0, rc, "The dcu_shutdown call itself failed.");
             // 与 Editor.Native 档同一条：S8 之后这里才真的看住了「漏了几个」。
             Assert.AreEqual(0, undestroyed,
-                "套件跑完时仍有 " + undestroyed + " 个原生对象没被销毁。");
+                "At the end of the suite, " + undestroyed + " native object(s) were still undestroyed. ");
 
             // 断言之后恢复原生库状态，见 Editor.Native 档同名方法的说明。
             dcu_init();

@@ -1,5 +1,15 @@
-# PR 门禁（map #20）：macOS arm64 原生构建 + audit，以及（可选的）EditMode 测试。
-# 完整多平台矩阵在 plugins-matrix.yml（发版 / 定时）。
+# PR 门禁（map #46 / 决议 #51）。
+#
+# 跑**三种工具链形状的代表**，不是所有平台：
+#   macOS（Mach-O / clang / nm+otool）、Windows x64（PE / MSVC / dumpbin）、
+#   Linux x64（ELF / gcc / readelf）。
+# 判据是**新信息量**而不是平台数：三种目标格式、三条 audit 路径全覆盖。
+# Android 与 Linux 同为 ELF，iOS 与 macOS 同为 Mach-O —— 它们在 PR 上提供的
+# 新信息接近零，留给 plugins-matrix.yml。
+#
+# 这推翻了 SPEC §10 的「PR 至少一个 mac 构建 + audit」（原为只跑 mac）：改
+# CMakeLists 或 dcu.h 完全可能 mac 绿而 Windows/Linux 红，而完整矩阵每周一才跑，
+# 最坏情况坏七天且已攒一堆提交。
 name: PR
 
 on:
@@ -13,53 +23,108 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  native-macos-arm64:
-    name: macOS arm64 plugin + audit
-    runs-on: macos-latest
+  native:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal
+            os: macos-26
+            platform: darwin
+            artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle
+          - name: Windows x64
+            # 钉 windows-2022 而不是 windows-latest：后者现已指向 Windows Server
+            # 2025 + **VS 2026**（别名 windows-2025-vs2026），"Visual Studio 17 2022"
+            # 这个生成器名字匹配不上，实测报 "could not find any instance of
+            # Visual Studio"。而 MSVC 工具集版本决定插件链接的 CRT，本就不该跟着
+            # 镜像漂 —— 与 Xcode 钉 26.6 同一个思路（#51）。
+            os: windows-2022
+            platform: windows
+            artifact_path: Packages/datachannel-unity/Plugins/Windows/x86_64/datachannel_unity.dll
+          - name: Linux x64
+            # 现存最老的 ubuntu 标签（ubuntu-20.04 已下架）。它决定本包的 glibc
+            # 下限 = 2.35，比 Unity 2022.3 声明的 Ubuntu 20.04（2.31）高一档 ——
+            # 这是**显式声明**的支持下限，理由见 #51。
+            os: ubuntu-22.04
+            platform: linux
+            artifact_path: Packages/datachannel-unity/Plugins/Linux/x86_64/libdatachannel_unity.so
+    defaults:
+      run:
+        # Windows runner 的默认 shell 是 pwsh。不写这行，下面的 bash 语法会直接
+        # 语法错 —— 而「脚本可执行位」那种断言在语法错下是**恒假**，同样违反
+        # 「让缺席变成失败，而不是沉默」。见 #48。
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
-      # 不装 meson：构建入口是 CMake（#27 移除了 Meson —— 它不编译任何源文件，
-      # 却带来「改源码不重建」与「--cross-file 零作用」两个缺陷）。
-      - name: Install build tools
+      # 钉死 Xcode 版本。托管 mac runner 拿不到「锁工具链」的等价好处（Xcode 装不进
+      # Linux 容器），唯一的对策就是显式选版本 —— 用默认的话，GitHub 换镜像时我们的
+      # 产物会悄悄变（最低部署目标、链接器行为）。26.6 与本机开发环境同版本。
+      - name: Pin Xcode
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          xcodebuild -version
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
         run: brew install cmake ninja
 
-      # 刻意不做 `chmod +x`。脚本的可执行位已正确记录在 git 中
-      # （本仓库 core.fileMode=false，曾导致模式丢失，见 #35）。
-      # 兜底 chmod 会持续掩盖同类回归 —— 这一步就是让它暴露。
-      - name: Assert scripts are executable (no chmod fallback)
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      # 刻意不做 `chmod +x`。但**也不查文件系统的 -x** —— 在 Windows 的 Git Bash 下
+      # 那个位是从 shebang 伪造出来的（msys2 无 ACL 时的行为，见 #48），断言会
+      # **恒真**，#35 那种模式回归照样绿。查 git 索引里的 mode 才是查到了真东西，
+      # 而且全平台行为一致。
+      - name: Assert scripts are executable in git (not on disk)
         run: |
           fail=0
-          for s in native/scripts/*.sh native/scripts/*.py; do
-            if [[ ! -x "$s" ]]; then
-              echo "::error file=$s::缺少可执行位。请用 'git update-index --chmod=+x $s' 修正，不要在 CI 里 chmod。"
+          while read -r mode _ _ file; do
+            if [[ "$mode" != "100755" ]]; then
+              echo "::error file=$file::git index mode is $mode, expected 100755. Fix with 'git update-index --chmod=+x $file'; do not chmod in CI."
               fail=1
             fi
-          done
+          done < <(git ls-files -s native/scripts/)
           exit $fail
 
       - name: Fetch pinned upstream deps
         run: ./native/scripts/fetch-deps.sh
 
+      # 产品入口就是 CMake 本身（SPEC §9）。POST_BUILD 会自动暂存并跑 audit。
+      # Windows 用 CMake 自带的 Visual Studio 生成器：CMake 自己就能定位 MSVC，
+      # 不需要预先 vcvars，也就不需要引入第三方 action 去设置它。
+      # 其余平台用 Ninja。
       - name: Build plugin (CMake)
-        run: ./native/scripts/build-macos-arm64.sh
-
-      # audit 已在构建的 POST_BUILD 阶段跑过一次（stage_plugin.py 内部，check=True），
-      # 这里再显式跑一次，是为了在 CI 日志里成为独立可定位的一步。
-      - name: Audit plugin (symbols + no forbidden crypto dylibs)
         run: |
-          ./native/scripts/audit-macos-plugin.sh \
-            Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cmake -S native -B native/build/ci -G "Visual Studio 17 2022" -A x64
+            cmake --build native/build/ci --config Release
+          else
+            cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+            cmake --build native/build/ci
+          fi
 
-      - name: Upload bundle artifact
-        uses: actions/upload-artifact@v4
+      # audit 已在 POST_BUILD 跑过一次；这里再显式跑一次，是为了在 CI 日志里
+      # 成为独立可定位的一步。
+      - name: Audit plugin (exports + dependencies)
+        run: |
+          python3 native/scripts/audit_plugin.py \
+            --binary "${{ matrix.artifact_path }}" \
+            --platform ${{ matrix.platform }} \
+            --expected native/exports/expected-symbols.txt
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: datachannel_unity-macos-arm64
-          path: Packages/datachannel-unity/Plugins/macOS/arm64/datachannel_unity.bundle
+          name: datachannel_unity-${{ matrix.platform }}
+          path: ${{ matrix.artifact_path }}
 
   static-checks:
-    name: Script syntax
-    runs-on: ubuntu-latest
+    name: Script syntax and generated files
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -70,6 +135,17 @@ jobs:
       - name: Python syntax
         run: |
           python3 -m py_compile native/scripts/*.py
+
+      # .meta 的产生与校验是同一个机制（#52）：重跑生成器并 diff，不一致就红。
+      # 不需要 Unity，所以能待在这个 job 里 —— 而 CI 里没有 Unity（#43）。
+      # 它同时核对黄金样本（真 Editor 实写的字节），否则生成器自己写错时
+      # 生成物与仓库永远一致、门禁永远绿。
+      - name: Plugin .meta matches generator and golden samples
+        run: |
+          python3 native/scripts/gen_plugin_meta.py \
+            --plugin-root Packages/datachannel-unity/Plugins \
+            --golden native/exports/plugin-meta-golden \
+            --check
 
 # ────────────────────────────────────────────────────────────────────────────
 # 这里**故意没有** Unity 测试 job（决策 #43，推翻 #39 决议 1 的门禁归属）。

@@ -21,7 +21,7 @@ namespace DataChannelUnity.Tests
         public void LargePayload_RetriesOnce_AndConsumesEventExactlyOnce()
         {
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
 
             byte[] gotLarge = null;
             string gotSentinel = null;
@@ -70,16 +70,16 @@ namespace DataChannelUnity.Tests
                 incoming?.Dispose();
 
                 Assert.IsNotNull(gotLarge,
-                    "超基线载荷没送达。TOO_SMALL 分支若消费了事件，它就永远丢了。");
-                Assert.AreEqual(LargeSize, gotLarge.Length, "载荷长度不符 —— 重试没拿到完整数据。");
+                    "The over-baseline payload never arrived. If the TOO_SMALL branch consumes the event, it is lost forever.");
+                Assert.AreEqual(LargeSize, gotLarge.Length, "Payload length mismatch: the retry did not fetch the complete data.");
                 for (int i = 0; i < LargeSize; i++)
                 {
                     if (gotLarge[i] != (byte)(i % 251))
-                        Assert.Fail($"载荷内容在偏移 {i} 处不符：期望 {(byte)(i % 251)}，实际 {gotLarge[i]}。");
+                        Assert.Fail($"Payload content differs at offset {i}: expected {(byte)(i % 251)}, actual {gotLarge[i]}.");
                 }
 
                 Assert.AreEqual("tail", gotSentinel,
-                    "哨兵消息没送达 —— 重试路径可能把队首弹了两次。");
+                    "The sentinel message never arrived: the retry path may have popped the head twice.");
             }
         }
     }

@@ -170,6 +170,16 @@ Packages/packages-lock.json linguist-generated
 # Exceptions for .asset files such as lightning pre-baking
 LightingData.asset     binary
 
+# ---- datachannel-unity 构建脚本：强制 LF ----
+# GitHub runner 镜像装的 Git 带**系统级** core.autocrlf=true，且 actions/checkout
+# 不覆盖它 —— 于是 Windows runner 上 checkout 出来的脚本是 CRLF，会让
+# `set -o pipefail` 报 invalid option name、`cut` 把 versions.lock 读成 "v0.24.5\r"。
+# 在仓库级治，不在 workflow 里改 core.autocrlf：仓库规则对**本机 Windows 开发者**
+# 同样生效，job 级设置只保 CI。（CMake 对 CRLF 免疫，.cmake 不需要这条。）
+native/scripts/*.sh      text eol=lf
+native/scripts/*.py      text eol=lf
+native/versions.lock     text eol=lf
+
 # ---- datachannel-unity 原生插件 ----
 # macOS 的产物是 .bundle 里**无扩展名**的 Mach-O，上面按扩展名匹配的规则
 # （*.a / *.so / *.dll）一条都套不上，必须按路径匹配。
@@ -179,3 +189,6 @@ Packages/datachannel-unity/Plugins/**/*.bundle/**  filter=lfs diff=lfs merge=lfs
 Packages/datachannel-unity/Plugins/**/*.dylib      filter=lfs diff=lfs merge=lfs -text
 # *.jslib 是 JS 文本，不进 LFS
 Packages/datachannel-unity/Plugins/**/*.jslib      text eol=lf
+# .bundle 里的 Info.plist 是文本，上面那条按路径匹配的规则会把它一起吸进 LFS。
+# 进 LFS 不算错，但没意义且 diff 不可读 —— 单独放行。
+Packages/datachannel-unity/Plugins/**/*.bundle/**/*.plist  text eol=lf -filter -diff -merge
