@@ -510,7 +510,17 @@ The liveness check is not about registration failing at startup (nearly impossib
 
 **Re-registration is attempted exactly once** ([#45](https://github.com/xuhuanhello/juice-c-sharp/issues/45), narrowing the original "self-heal"). If the entry is erased again, log that retrying has stopped and leave it erased. Repeated silent re-insertion is a tug-of-war with another package over shared state — the same shape as the auto-unsubscribe idea rejected under *Exception isolation* below: **silently changing state that someone else established is worse than a loud log.**
 
-The threshold must not be measured in `Time.frameCount` — unreliable in edit mode, where the pump is resident. Use a **monotonic wall clock**: `Stopwatch.GetTimestamp()`, which the slow-frame warning already samples twice per frame, so it costs nothing extra and needs no `#if UNITY_EDITOR` fork for `EditorApplication.timeSinceStartup`. Check only when the application calls an API; never poll in the background. `Pump()` also stamps the monotonic counter, which is what separates *"never registered"* (0) from *"registered, then erased"* (non-zero) in the error message.
+The threshold must not be measured in `Time.frameCount` — unreliable in edit mode, where the pump is resident. Use a **monotonic wall clock**: `Stopwatch.GetTimestamp()`, which the slow-frame warning already samples twice per frame, so it costs nothing extra and needs no `#if UNITY_EDITOR` fork for `EditorApplication.timeSinceStartup`. The two were **measured to be equivalent** across a play/stop cycle — neither is reset by entering or leaving play mode, and the elapsed interval agrees to within the printed precision (28.16 s vs 28.1 s over one cycle). Check only when the application calls an API; never poll in the background.
+
+**Edit mode takes a separate branch, and it is a warning, not an error.** Until the resident edit-mode pump exists (the lifecycle work in §14 step 5), the pump genuinely does not run in edit mode — so reporting it is *correct*, but treating it as "a third party erased us" is not, for three measured reasons:
+
+1. The wording sends the reader after a third-party package that does not exist.
+2. Re-registration is **useless** there — edit mode does not run `PlayerLoop`'s `Update` at all.
+3. That useless retry **spends the one-shot retry budget**, so when a third party really does erase the entry in play mode, the protection is already gone.
+
+All three were observed: one `new PeerConnection` in edit mode reported *"pump has not run for 934.8 s"* and set the retry flag. Note that checking `_pumpRegistered` alone does **not** guard against this — leaving play mode does not trigger a domain reload (§6, measured again here: the pump tick counter went 4147 → 8358 without resetting and the flag stayed `true`), so a flag set in play mode survives into edit mode. Once the resident edit-mode pump lands, the timestamp keeps advancing and this branch stops firing on its own; **no temporary branch is left for someone to remember to remove.**
+
+`Pump()` also stamps a monotonic counter, reported for diagnosis. Do **not** read "counter is non-zero" as "it was registered, then erased" — a manual `Pump()` call bumps it too.
 
 No public read-only diagnostics snapshot: v1 observability is `BufferedAmount` only (§7). Logs are enough to attribute these problems; opening a diagnostics surface for application-side network HUDs would be its own decision.
 

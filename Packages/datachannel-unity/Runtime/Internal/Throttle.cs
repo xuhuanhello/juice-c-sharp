@@ -53,6 +53,7 @@ namespace DataChannelUnity.Internal
                 suppressed = w.Suppressed;
                 peak = Math.Max(w.Peak, sample);
                 Windows[category] = new Window { StartTicks = now, Suppressed = 0, Peak = sample };
+                DropExpired(now);
                 return true;
             }
 
@@ -63,6 +64,31 @@ namespace DataChannelUnity.Internal
             peak = w.Peak;
             return false;
         }
+
+        /// <summary>
+        /// 扫掉早已过期的窗口。只在开新窗口时做（那本来就是低频路径）。
+        /// </summary>
+        /// <remarks>
+        /// 键集实际上是有界的 —— 固定的几个告警类别，加上「事件名 | 异常类型名」
+        /// 的组合，两边都由代码里的有限集合决定。所以不清理**也不会**变成无限增长。
+        /// 清理是为了另一件事：一个再也不会发生的类别没有理由永久占着位置，
+        /// 而这个字典是 <c>static</c> 的，活得和域一样久。
+        ///
+        /// 阈值取两个窗口而不是一个：刚好过期的那个条目还带着「上一期被压掉多少条」
+        /// 这个要报出去的信息，扫早了就把它连同信息一起丢了。
+        /// </remarks>
+        private static void DropExpired(long now)
+        {
+            if (Windows.Count <= 32) return;   // 常态远低于此，不值得每次都遍历
+
+            Expired.Clear();
+            foreach (var kv in Windows)
+                if (now - kv.Value.StartTicks >= WindowTicks * 2) Expired.Add(kv.Key);
+            for (int i = 0; i < Expired.Count; i++) Windows.Remove(Expired[i]);
+            Expired.Clear();
+        }
+
+        private static readonly List<string> Expired = new List<string>();
 
         /// <summary>把「上一期还有多少条被压掉」拼成人话；没有被压掉的返回空串。</summary>
         internal static string SuppressedSuffix(int suppressed, double peak, string unit)

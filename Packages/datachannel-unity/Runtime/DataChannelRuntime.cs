@@ -139,15 +139,24 @@ namespace DataChannelUnity
             }
         }
 
+        /// <summary>
+        /// 把 pump 装进 <c>PlayerLoop</c>。**注册失败抛异常，不是记 warning**（SPEC §6）。
+        /// </summary>
+        /// <remarks>
+        /// 理由就一句：**一个自以为在 pump、实际没有的包，是所有状态里最糟的那个。**
+        /// 事件永远不送达，而唯一的线索是一行早就被刷走的 warning ——
+        /// 与本仓库反复批判的「让缺席变成沉默」是同一个病。
+        /// </remarks>
         internal static void RegisterPump()
         {
             if (_pumpRegistered) return;
             var loop = PlayerLoop.GetCurrentPlayerLoop();
             if (!InsertPump(ref loop))
-            {
-                DataChannelLog.Emit(LogLevel.Warning, "Failed to insert PlayerLoop pump; call DataChannelRuntime.Pump() manually.");
-                return;
-            }
+                throw new InvalidOperationException(
+                    "无法把 pump 装进 PlayerLoop：没有找到 Update 段。"
+                    + "本包刻意在这里抛出而不是记一条 warning —— 自以为在 pump、实际没有，"
+                    + "表现是所有事件都不送达，而线索只有一行会被刷走的日志。"
+                    + "若这是有意的（自定义循环），请自行每帧调 DataChannelRuntime.Pump()。");
             PlayerLoop.SetPlayerLoop(loop);
             _pumpRegistered = true;
         }
@@ -294,6 +303,34 @@ namespace DataChannelUnity
                                / (double)System.Diagnostics.Stopwatch.Frequency;
             if (staleSeconds < PumpStaleSeconds) return;
 
+            // 编辑模式单独一条路径。**pump 在编辑模式确实没在跑，报出来没有错** ——
+            // SPEC §6 要求编辑模式下 pump 常驻，而那条（连同五个生命周期场景）属于
+            // S8 / #37，还没落地。错的是把它当成「被第三方抹掉」来处理：
+            //
+            //   1. 措辞会指向一个不存在的第三方，把人引到错误的方向；
+            //   2. 重试注册在这里**根本无效** —— 编辑模式不跑 PlayerLoop 的 Update；
+            //   3. 那次无效的重试会把「只重试一次」的额度用掉，等真到播放模式里
+            //      被第三方抹掉时，保护机制已经没了。
+            //
+            // 实测过这三条都会发生：编辑模式下调一次 new PeerConnection 就报出
+            // 「pump 已经 934.8 秒没有运行」，并把 _pumpReregisterAttempted 置了位。
+            // 退出播放模式**不触发域重载**（#37 实测，本次复现：pumpTicks 4147 -> 8358
+            // 未归零、_pumpRegistered 残留 true），所以播放模式装上的那个标志会一路
+            // 留到编辑模式，光看 _pumpRegistered 挡不住。
+            //
+            // S8 落地后编辑模式有了常驻 pump，时间戳一直在更新，这条自然不再触发 ——
+            // 不需要谁记得回来删掉一个临时分支。
+            if (!Application.isPlaying)
+            {
+                if (Throttle.Note("pump-edit-mode", staleSeconds, out var es, out var ep))
+                    DataChannelLog.Emit(LogLevel.Warning,
+                        api + "：编辑模式下 pump 已经 " + staleSeconds.ToString("0.#") + " 秒没有运行。"
+                        + "这是**已知限制**而不是故障 —— 编辑模式的常驻 pump 尚未实现（SPEC §6 / #37）。"
+                        + "在编辑模式里要收事件，请自行每帧调 DataChannelRuntime.Pump()。"
+                        + Throttle.SuppressedSuffix(es, ep, " 秒"));
+                return;
+            }
+
             if (_pumpRetryExhausted)
             {
                 if (Throttle.Note("pump-dead", staleSeconds, out var s, out var p))
@@ -310,8 +347,8 @@ namespace DataChannelUnity
             {
                 _pumpReregisterAttempted = true;
                 DataChannelLog.Emit(LogLevel.Error,
-                    api + "：pump 已经 " + staleSeconds.ToString("0.#") + " 秒没有运行（至今共跑过 "
-                    + _pumpTicks + " 帧 —— 为 0 说明它从来没被调用过，非 0 说明是注册后被抹掉的）。"
+                    api + "：pump 已经 " + staleSeconds.ToString("0.#") + " 秒没有运行"
+                    + "（本次会话共跑过 " + _pumpTicks + " 帧）。"
                     + "事件不会送达，连接看起来会像是「连不上」。**最可能的成因不是网络**，"
                     + "而是某个第三方包用 PlayerLoop.GetDefaultPlayerLoop() 重建了循环再 SetPlayerLoop，"
                     + "把本包的条目一起丢掉了（本仓库里的 R3 就往 PlayerLoop 插东西）。"
@@ -319,7 +356,11 @@ namespace DataChannelUnity
                     + "DataChannelRuntime.Pump()。现在**重试注册一次**。");
 
                 _pumpRegistered = false;
-                RegisterPump();
+                // 这里**不能**让 RegisterPump 的异常穿出去：调用方只是在
+                // new PeerConnection / Send，不该因为「重试注册没成功」拿到一个异常。
+                // 注册路径本身该抛（见 RegisterPump），但这条是诊断路径，已经在报错了。
+                try { RegisterPump(); }
+                catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "重试注册 pump 失败", e); }
                 // 给新注册一个宽限期，否则下一次调用会立刻又判超时 —— 那时它还没跑过一帧。
                 _lastPumpTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                 return;
