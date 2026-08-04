@@ -171,17 +171,17 @@ def read_guid(meta_path: Path, allow_new: bool) -> str:
         match = GUID_RE.search(meta_path.read_text(encoding="utf-8"))
         if not match:
             raise MetaError(
-                f"{meta_path} 里没有找到合法的 guid 行。\n"
-                "  GUID 一旦入库就不能变（变了等于换了一个资产），所以这里不会\n"
-                "  替你铸一个新的 —— 请先弄清这份 .meta 为什么坏了。")
+                f"No valid guid line found in {meta_path}.\n"
+                "  A GUID must never change once committed (changing it means a different asset), so this\n"
+                "  will not mint a new one for you. Find out why this .meta is broken first.")
         return match.group(1)
 
     if not allow_new:
         raise MetaError(
-            f"{meta_path} 不存在。\n"
-            "  新平台第一次落地时用 --allow-new-guid 铸一个 GUID，之后永远保留。\n"
-            "  默认模式刻意不铸：否则 CI 每次跑都会得到不同的 GUID，diff 永远红，\n"
-            "  这条门禁会立刻退化成噪音而被人关掉。")
+            f"{meta_path} does not exist.\n"
+            "  Use --allow-new-guid to mint a GUID the first time a platform lands; it is kept forever after.\n"
+            "  The default mode deliberately does not mint: otherwise every CI run produces a different GUID,\n"
+            "  the diff is permanently red, and this gate degrades into noise that someone turns off.")
     return uuid.uuid4().hex
 
 
@@ -190,11 +190,11 @@ def main() -> int:
     ap.add_argument("--plugin-root", required=True, type=Path,
                     help="Packages/datachannel-unity/Plugins")
     ap.add_argument("--golden", type=Path, default=None,
-                    help="黄金样本目录（Editor 实写的字节）。给了就一并核对")
+                    help="golden-sample directory (bytes written by a real Editor); when given, it is checked too")
     ap.add_argument("--check", action="store_true",
-                    help="只核对不写盘；有差异则非零退出（CI 用）")
+                    help="check only, never write; exit non-zero on any difference (for CI)")
     ap.add_argument("--allow-new-guid", action="store_true",
-                    help="允许为尚不存在的 .meta 铸新 GUID（新平台第一次落地时用）")
+                    help="allow minting a new GUID for a .meta that does not exist yet (first landing of a platform)")
     args = ap.parse_args()
 
     drift: list[str] = []
@@ -226,13 +226,14 @@ def main() -> int:
             golden = args.golden / (rel.replace("/", "__") + ".meta")
             if not golden.is_file():
                 raise MetaError(
-                    f"缺少黄金样本 {golden}\n"
-                    "  它是本门禁真正的支点：没有它，生成器写错时生成物与仓库永远\n"
-                    "  一致、门禁永远绿。缺失即硬失败，不降级为「只比对仓库」。")
+                    f"Missing golden sample {golden}\n"
+                    "  It is what actually holds this gate up: without it, a buggy generator produces output that\n"
+                    "  always matches the repo and the gate is always green. Missing means hard failure, not a\n"
+                    "  silent downgrade to 'compare against the repo only'.")
             expected = golden.read_text(encoding="utf-8")
             if normalize(expected) != normalize(content):
-                drift.append(f"  生成结果与黄金样本不符: {rel}\n"
-                             f"    黄金样本: {golden}")
+                drift.append(f"  generated output differs from the golden sample: {rel}\n"
+                             f"    golden sample: {golden}")
                 continue
 
         current = meta_path.read_text(encoding="utf-8") if meta_path.is_file() else None
@@ -240,26 +241,27 @@ def main() -> int:
             continue
 
         if args.check:
-            drift.append(f"  仓库里的 .meta 与生成结果不符: {rel}")
+            drift.append(f"  the .meta in the repo differs from the generated output: {rel}")
         else:
             meta_path.parent.mkdir(parents=True, exist_ok=True)
             meta_path.write_text(content, encoding="utf-8")
-            print(f"  写入 {meta_path}")
+            print(f"  wrote {meta_path}")
 
     if drift:
         raise MetaError(
-            ".meta 校验失败：\n" + "\n".join(drift) + "\n\n"
-            "  修法：跑 `python3 native/scripts/gen_plugin_meta.py --plugin-root <…>`\n"
-            "  重新生成，并把 diff 一起提交。若差异来自平台开关的**有意变更**，\n"
-            "  必须先更新黄金样本 —— 而黄金样本只能由真 Editor 产出，不能手写。")
+            ".meta check failed:\n" + "\n".join(drift) + "\n\n"
+            "  Fix: run `python3 native/scripts/gen_plugin_meta.py --plugin-root <...>`\n"
+            "  to regenerate, and commit the diff along with it. If the difference comes from an INTENTIONAL\n"
+            "  change to the platform switches, update the golden samples first -- and golden samples can only\n"
+            "  be produced by a real Editor, never hand-written.")
 
     done = len(PLATFORMS) - len(absent)
-    print(f"OK: {done}/{len(PLATFORMS)} 个平台的 .meta 与生成结果一致"
-          + ("，且与黄金样本一致" if args.golden else ""))
+    print(f"OK: .meta matches the generated output for {done}/{len(PLATFORMS)} platform(s)"
+          + (", and matches the golden samples" if args.golden else ""))
     if absent:
         # 明说跳过了什么。一个「6 个里过了 1 个」的绿勾若不写清楚，读起来
         # 会像「6 个都过了」—— 那正是把覆盖面的缺口变成沉默。
-        print("尚未入库、因此跳过的平台（产物不存在，属预期 —— 分批入库，见 #53）：")
+        print("Skipped platforms, not yet landed (artifact absent; expected under batched landing, see #53):")
         for rel in absent:
             print(f"    {rel}")
     return 0

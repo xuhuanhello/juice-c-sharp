@@ -76,8 +76,8 @@ namespace DataChannelUnity.Internal
                 return;
 
             DataChannelLog.Emit(LogLevel.Error,
-                what + " 的订阅者抛出异常。**其它订阅者照常收到了这条** —— 隔离是每订阅者的。"
-                + "本包不会因此自动退订：静默改掉你建立的订阅关系比日志更坏。"
+                what + " threw. Other subscribers still received this event: isolation is per-subscriber. "
+                + "This package will not auto-unsubscribe: silently changing the subscriptions you set up is worse than a log line."
                 + Throttle.SuppressedSuffix(suppressed, peak, ""),
                 e);
         }

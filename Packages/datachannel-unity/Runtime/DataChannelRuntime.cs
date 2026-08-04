@@ -190,10 +190,10 @@ namespace DataChannelUnity
             var loop = PlayerLoop.GetCurrentPlayerLoop();
             if (!InsertPump(ref loop))
                 throw new InvalidOperationException(
-                    "无法把 pump 装进 PlayerLoop：没有找到 Update 段。"
-                    + "本包刻意在这里抛出而不是记一条 warning —— 自以为在 pump、实际没有，"
-                    + "表现是所有事件都不送达，而线索只有一行会被刷走的日志。"
-                    + "若这是有意的（自定义循环），请自行每帧调 DataChannelRuntime.Pump()。");
+                    "Cannot install the pump into the PlayerLoop: no Update segment was found. "
+                    + "This package deliberately throws here instead of logging a warning: believing the pump runs when it does not "
+                    + "presents as every event failing to arrive, with a single scrolled-away log line as the only clue. "
+                    + "If this is intentional (a custom loop), call DataChannelRuntime.Pump() yourself every frame.");
             PlayerLoop.SetPlayerLoop(loop);
             _pumpRegistered = true;
         }
@@ -238,7 +238,7 @@ namespace DataChannelUnity
             for (int i = 0; i < PeerSnapshot.Count; i++)
             {
                 try { PeerSnapshot[i].Dispose(); }
-                catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "DisposeAllLive: 释放 PeerConnection 失败", e); }
+                catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "DisposeAllLive: failed to dispose a PeerConnection", e); }
             }
             PeerSnapshot.Clear();
 
@@ -248,7 +248,7 @@ namespace DataChannelUnity
                 var dc = ChannelSnapshot[i];
                 if (dc == null || dc.IsDisposed) continue;
                 try { dc.Dispose(); }
-                catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "DisposeAllLive: 释放 DataChannel 失败", e); }
+                catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "DisposeAllLive: failed to dispose a DataChannel", e); }
             }
             ChannelSnapshot.Clear();
         }
@@ -269,18 +269,18 @@ namespace DataChannelUnity
                 var rc = NativeMethods.dcu_shutdown(out var undestroyed);
                 if (rc != NativeMethods.Success)
                     DataChannelLog.Emit(LogLevel.Error,
-                        "dcu_shutdown 失败：" + MapError(rc) + "（raw=" + rc + "）。"
-                        + "上游 Cleanup 超时会落到这里 —— 通常意味着有对象析构时卡住了。");
+                        "dcu_shutdown failed: " + MapError(rc) + "（raw=" + rc + "）。"
+                        + "An upstream Cleanup timeout lands here, and usually means an object stalled during destruction.");
                 else if (undestroyed > 0)
                     DataChannelLog.Emit(LogLevel.Error,
-                        "dcu_shutdown 时仍有 " + undestroyed + " 个原生对象未被销毁。"
-                        + "它们是被强行丢弃的，不是正常释放的 —— 说明有 PeerConnection / DataChannel "
-                        + "没被 Dispose，且托管侧已经失联。Editor / Development 构建下"
-                        + "泄漏诊断会点名到创建栈（DataChannelLog.LeakDetection）。");
+                        "At dcu_shutdown, " + undestroyed + " native object(s) were still undestroyed. "
+                        + "They were force-dropped rather than released normally, which means some PeerConnection / DataChannel "
+                        + "was never disposed and the managed side had already lost track of it. In Editor / Development builds, "
+                        + "leak diagnostics name the creation stack (DataChannelLog.LeakDetection).");
             }
             catch (DllNotFoundException) { }
             catch (EntryPointNotFoundException) { }
-            catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "dcu_shutdown 抛出异常", e); }
+            catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "dcu_shutdown threw", e); }
 
             // 允许之后重新 init：域重载后 EnsureNative 得能再走一遍。
             _nativeReady = false;
@@ -370,8 +370,8 @@ namespace DataChannelUnity
         {
             if (!Throttle.Note("pump-slow-frame", elapsedMs, out var suppressed, out var peak)) return;
             DataChannelLog.Emit(LogLevel.Warning,
-                "pump 本帧耗时 " + elapsedMs.ToString("0.##") + " ms，超过 " + SlowFrameMs + " ms 阈值。"
-                + "常见成因：对端流量过大，或你的消息回调本身很慢（回调是同步跑在这一段里的）。"
+                "The pump took " + elapsedMs.ToString("0.##") + " ms this frame, over the " + SlowFrameMs + " ms threshold. "
+                + "Common causes: too much remote traffic, or a slow message callback of your own (callbacks run synchronously inside this segment)."
                 + Throttle.SuppressedSuffix(suppressed, peak, " ms"));
         }
 
@@ -389,9 +389,9 @@ namespace DataChannelUnity
             if (!Throttle.Note("control-queue-depth", depth, out var suppressed, out var peak)) return;
 
             DataChannelLog.Emit(LogLevel.Warning,
-                "控制事件队列积压 " + depth + " 条，超过 " + ControlQueueDepthWarn + " 阈值。"
-                + "队列无界、永不丢控制事件，所以积压只可能是 pump 没在跑或某个回调卡住了。"
-                + Throttle.SuppressedSuffix(suppressed, peak, " 条"));
+                "The control-event queue has " + depth + " entries backed up, over the " + ControlQueueDepthWarn + " threshold. "
+                + "The queue is unbounded and never drops control events, so a backlog can only mean the pump is not running or a callback is stuck."
+                + Throttle.SuppressedSuffix(suppressed, peak, " entries"));
         }
 
         /// <summary>
@@ -450,10 +450,10 @@ namespace DataChannelUnity
             {
                 if (Throttle.Note("pump-edit-mode", staleSeconds, out var es, out var ep))
                     DataChannelLog.Emit(LogLevel.Warning,
-                        api + "：编辑模式下 pump 已经 " + staleSeconds.ToString("0.#") + " 秒没有运行。"
-                        + "这是**已知限制**而不是故障 —— 编辑模式的常驻 pump 尚未实现（SPEC §6 / #37）。"
-                        + "在编辑模式里要收事件，请自行每帧调 DataChannelRuntime.Pump()。"
-                        + Throttle.SuppressedSuffix(es, ep, " 秒"));
+                        api + ": in Edit Mode the pump has not run for " + staleSeconds.ToString("0.#") + " s. "
+                        + "This is a known limitation, not a fault: a resident Edit Mode pump is not implemented yet (SPEC section 6 / #37). "
+                        + "To receive events in Edit Mode, call DataChannelRuntime.Pump() yourself every frame."
+                        + Throttle.SuppressedSuffix(es, ep, " s"));
                 return;
             }
 
@@ -461,11 +461,11 @@ namespace DataChannelUnity
             {
                 if (Throttle.Note("pump-dead", staleSeconds, out var s, out var p))
                     DataChannelLog.Emit(LogLevel.Error,
-                        api + "：pump 已经 " + staleSeconds.ToString("0.#") + " 秒没有运行（至今共跑过 "
-                        + _pumpTicks + " 帧），"
-                        + "且**已停止重试注册**（重试过一次仍被抹掉）。本包不会继续跟其它包抢 PlayerLoop。"
-                        + "请自行排查谁在调 SetPlayerLoop，或每帧手动调 DataChannelRuntime.Pump()。"
-                        + Throttle.SuppressedSuffix(s, p, " 秒"));
+                        api + ": the pump has not run for " + staleSeconds.ToString("0.#") + " s (it has run for "
+                        + _pumpTicks + " frames in total), "
+                        + "and registration retries have STOPPED (one retry was already wiped out again). This package will not keep fighting another package over the PlayerLoop. "
+                        + "Find out who is calling SetPlayerLoop, or call DataChannelRuntime.Pump() manually every frame."
+                        + Throttle.SuppressedSuffix(s, p, " s"));
                 return;
             }
 
@@ -473,20 +473,20 @@ namespace DataChannelUnity
             {
                 _pumpReregisterAttempted = true;
                 DataChannelLog.Emit(LogLevel.Error,
-                    api + "：pump 已经 " + staleSeconds.ToString("0.#") + " 秒没有运行"
-                    + "（本次会话共跑过 " + _pumpTicks + " 帧）。"
-                    + "事件不会送达，连接看起来会像是「连不上」。**最可能的成因不是网络**，"
-                    + "而是某个第三方包用 PlayerLoop.GetDefaultPlayerLoop() 重建了循环再 SetPlayerLoop，"
-                    + "把本包的条目一起丢掉了（本仓库里的 R3 就往 PlayerLoop 插东西）。"
-                    + "修法：在那个包完成注册之后再初始化本包，或改为每帧手动调 "
-                    + "DataChannelRuntime.Pump()。现在**重试注册一次**。");
+                    api + ": the pump has not run for " + staleSeconds.ToString("0.#") + " s"
+                    + " (it ran for " + _pumpTicks + " frames this session). "
+                    + "Events will not be delivered and the connection will look like it cannot connect. The most likely cause is NOT the network: "
+                    + "some third-party package rebuilt the loop with PlayerLoop.GetDefaultPlayerLoop() and then called SetPlayerLoop, "
+                    + "dropping this package's entry along the way (R3 in this repo inserts into the PlayerLoop). "
+                    + "Fix: initialise this package after that one finishes registering, or call "
+                    + "DataChannelRuntime.Pump() manually every frame. Retrying registration ONCE now.");
 
                 _pumpRegistered = false;
                 // 这里**不能**让 RegisterPump 的异常穿出去：调用方只是在
                 // new PeerConnection / Send，不该因为「重试注册没成功」拿到一个异常。
                 // 注册路径本身该抛（见 RegisterPump），但这条是诊断路径，已经在报错了。
                 try { RegisterPump(); }
-                catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "重试注册 pump 失败", e); }
+                catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "Retrying pump registration failed", e); }
                 // 给新注册一个宽限期，否则下一次调用会立刻又判超时 —— 那时它还没跑过一帧。
                 _lastPumpTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                 return;
@@ -494,9 +494,9 @@ namespace DataChannelUnity
 
             _pumpRetryExhausted = true;
             DataChannelLog.Emit(LogLevel.Error,
-                api + "：重试注册之后 pump 仍然没有运行（已停 " + staleSeconds.ToString("0.#") + " 秒）。"
-                + "**已停止重试** —— 再插回去就是在跟另一个包无限来回抢 PlayerLoop，"
-                + "而那种静默的拉锯比一条明确的错误更难查。请手动调 DataChannelRuntime.Pump()。");
+                api + ": the pump still has not run after a registration retry (stalled for " + staleSeconds.ToString("0.#") + " s). "
+                + "Retries have STOPPED: re-inserting again would mean an endless tug-of-war with another package over the PlayerLoop, "
+                + "and that silent back-and-forth is harder to diagnose than one explicit error. Call DataChannelRuntime.Pump() manually.");
         }
 
         /// <summary>
@@ -514,7 +514,7 @@ namespace DataChannelUnity
 
                 if (rc == NativeMethods.ErrTooSmall)
                 {
-                    EnsureCapacity(ref _logBuf, len, "日志", ref _grewLog);
+                    EnsureCapacity(ref _logBuf, len, "log", ref _grewLog);
                     rc = NativeMethods.dcu_log_next(
                         out level, _logBuf, _logBuf.Length, out len, out dropped);
                     droppedTotal += dropped;
@@ -551,8 +551,8 @@ namespace DataChannelUnity
                 {
                     // header 里两个长度都是**精确值**，且事件未被消费；单消费者契约
                     // 保证两次调用之间队首不变，所以扩容后**一次重试必然成功**。
-                    EnsureCapacity(ref _payloadBuf, header.payload_len, "控制事件 payload", ref _grewPayload);
-                    EnsureCapacity(ref _payload2Buf, header.payload2_len, "控制事件 payload2", ref _grewPayload2);
+                    EnsureCapacity(ref _payloadBuf, header.payload_len, "control-event payload", ref _grewPayload);
+                    EnsureCapacity(ref _payload2Buf, header.payload2_len, "control-event payload2", ref _grewPayload2);
                     rc = NativeMethods.dcu_event_next(out header,
                         _payloadBuf, _payloadBuf.Length, _payload2Buf, _payload2Buf.Length);
                 }
@@ -611,7 +611,7 @@ namespace DataChannelUnity
 
                 if (rc == NativeMethods.ErrTooSmall)
                 {
-                    EnsureCapacity(ref _messageBuf, n, "消息", ref _grewMessage);
+                    EnsureCapacity(ref _messageBuf, n, "message", ref _grewMessage);
                     rc = NativeMethods.dcu_dc_receive(
                         dc.NativeHandle, _messageBuf, _messageBuf.Length, out n);
                 }
@@ -658,8 +658,8 @@ namespace DataChannelUnity
             if (alreadyGrew) return;
             alreadyGrew = true;
             DataChannelLog.Emit(LogLevel.Info,
-                which + " 缓冲首次超过基线：" + from + " -> " + buf.Length + " 字节。"
-                + "缓冲只涨不缩，此后常驻这个尺寸（上界由协商出的 MaxMessageSize 决定）。");
+                which + " buffer grew past its baseline for the first time: " + from + " -> " + buf.Length + " bytes. "
+                + "Buffers only grow, never shrink, so this size is now resident (bounded by the negotiated MaxMessageSize).");
         }
 
         private static void Dispatch(NativeMethods.EventHeader h, string p1, string p2)
@@ -753,10 +753,10 @@ namespace DataChannelUnity
             var err = MapError(code);
             var selfFixable = err == DataChannelError.Invalid || err == DataChannelError.TooSmall;
             var message = selfFixable
-                ? what + ": 参数无效 (code=" + err + ", raw=" + code
-                  + ")。检查通道是否已 Dispose、载荷是否超过协商的 MaxMessageSize。"
-                : what + ": 运行时失败 (code=" + err + ", raw=" + code
-                  + ")。这通常不是用法问题，请附 DataChannelLog 输出提 issue。";
+                ? what + ": invalid argument (code=" + err + ", raw=" + code
+                  + "). Check whether the channel is already disposed, or the payload exceeds the negotiated MaxMessageSize."
+                : what + ": runtime failure (code=" + err + ", raw=" + code
+                  + "). This is usually not a usage problem; please file an issue and attach the DataChannelLog output.";
             return new DataChannelException(message, err, code);
         }
 

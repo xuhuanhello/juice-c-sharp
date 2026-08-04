@@ -25,7 +25,7 @@ namespace DataChannelUnity.Tests
         public void Setup()
         {
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
             _savedLevel = DataChannelLog.Level;
             _captured.Clear();
             DataChannelLog.MessageLogged += Capture;
@@ -62,7 +62,7 @@ namespace DataChannelUnity.Tests
             PumpAWhile();
 
             Assert.That(_captured, Has.Some.Contains("protocol"),
-                "上游异常文本必须经桥到达托管日志，否则只剩一个不知所云的错误码。");
+                "Upstream exception text must reach the managed log through the bridge, otherwise only an opaque error code remains.");
         }
 
         /// <summary>
@@ -90,9 +90,9 @@ namespace DataChannelUnity.Tests
 
             var all = string.Join(" | ", _captured);
             Assert.That(all, Does.Contain("credentials=redacted@"),
-                "含凭证的 URL 必须被脱敏后才进日志。");
+                "A URL containing credentials must be redacted before it reaches the log.");
             Assert.That(all, Does.Not.Contain("s3cret"),
-                "凭证明文出现在日志里 —— 脱敏没接进日志路径，或正则没匹配上这个形态。");
+                "Plaintext credentials appeared in the log: redaction is not wired into the log path, or the pattern did not match this shape.");
         }
 
         [Test]
@@ -116,7 +116,7 @@ namespace DataChannelUnity.Tests
             PumpAWhile();
 
             Assert.That(_captured, Has.Some.Contains("protocol"),
-                "连续改级别之后桥必须仍然活着。收不到说明 InitLogger 的 nullptr 路径复活了。");
+                "The bridge must survive repeated level changes. Receiving nothing means the InitLogger nullptr path came back.");
         }
     }
 }

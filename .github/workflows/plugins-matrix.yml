@@ -51,7 +51,7 @@ jobs:
         run: |
           fail=0
           while read -r mode _ _ file; do
-            [[ "$mode" == "100755" ]] || { echo "::error file=$file::mode=$mode，应为 100755"; fail=1; }
+            [[ "$mode" == "100755" ]] || { echo "::error file=$file::mode=$mode, expected 100755"; fail=1; }
           done < <(git ls-files -s native/scripts/)
           exit $fail
 
@@ -98,7 +98,7 @@ jobs:
         run: |
           fail=0
           while read -r mode _ _ file; do
-            [[ "$mode" == "100755" ]] || { echo "::error file=$file::mode=$mode，应为 100755"; fail=1; }
+            [[ "$mode" == "100755" ]] || { echo "::error file=$file::mode=$mode, expected 100755"; fail=1; }
           done < <(git ls-files -s native/scripts/)
           exit $fail
 
@@ -143,7 +143,7 @@ jobs:
         run: |
           fail=0
           while read -r mode _ _ file; do
-            [[ "$mode" == "100755" ]] || { echo "::error file=$file::mode=$mode，应为 100755"; fail=1; }
+            [[ "$mode" == "100755" ]] || { echo "::error file=$file::mode=$mode, expected 100755"; fail=1; }
           done < <(git ls-files -s native/scripts/)
           exit $fail
 

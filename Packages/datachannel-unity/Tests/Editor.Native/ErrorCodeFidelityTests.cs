@@ -30,7 +30,7 @@ namespace DataChannelUnity.Tests
         {
             // 缺席必须是失败，不是跳过（SPEC §11）。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
         }
 
         [TearDown]
@@ -74,10 +74,10 @@ namespace DataChannelUnity.Tests
             var ex = Assert.Throws<DataChannelException>(() => new PeerConnection(cfg));
 
             Assert.AreEqual(DataChannelError.Invalid, ex.ErrorCode,
-                "上游抛的是 std::invalid_argument，必须保真映射到 Invalid。"
-                + "落到 Failure 说明压平回来了。");
+                "Upstream throws std::invalid_argument, which must map faithfully to Invalid. "
+                + "Landing on Failure means the mapping was flattened again.");
             Assert.AreEqual((int)DataChannelError.Invalid, ex.RawCode,
-                "RawCode 必须带出 ABI 的原始数值。");
+                "RawCode must carry the raw ABI value through.");
         }
 
         [Test]
@@ -105,7 +105,7 @@ namespace DataChannelUnity.Tests
 
             // 两类措辞的价值是告诉人「该查自己还是该找我们」；RawCode 始终带在消息里。
             Assert.That(ex.Message, Does.Contain("raw=" + (int)DataChannelError.Invalid));
-            Assert.That(ex.Message, Does.Contain("参数无效"));
+            Assert.That(ex.Message, Does.Contain("invalid argument"));
         }
 
         [Test]
@@ -121,7 +121,7 @@ namespace DataChannelUnity.Tests
 
             foreach (var raw in new[] { -1, -2, -3, -4 })
                 Assert.AreNotEqual(raw, (int)DataChannelError.Invalid,
-                    "dcu 错误码不得与上游 RTC_ERR_* 逐值相同。");
+                    "dcu error codes must not be value-identical to the upstream RTC_ERR_* codes.");
         }
     }
 }

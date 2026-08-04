@@ -110,7 +110,7 @@ def run(cmd: list[str]) -> str:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise AuditError(
-            f"命令失败（rc={proc.returncode}）: {' '.join(cmd)}\n{proc.stderr.strip()}")
+            f"Command failed (rc={proc.returncode}): {' '.join(cmd)}\n{proc.stderr.strip()}")
     return proc.stdout
 
 
@@ -123,14 +123,15 @@ def resolve_tool(explicit: str | None, fallback: str, why: str) -> str:
     if explicit:
         if Path(explicit).is_file() or shutil.which(explicit):
             return explicit
-        raise AuditError(f"传入的 {why} 路径不存在: {explicit}")
+        raise AuditError(f"The {why} path passed in does not exist: {explicit}")
     found = shutil.which(fallback)
     if found:
         return found
     raise AuditError(
-        f"找不到 {fallback}（{why}）。\n"
-        "  本门禁不会因为工具缺失而跳过检查 —— 那会让「没验过」和「验过且通过」\n"
-        "  在报告里长得一模一样。请安装该工具，或由 CMake 显式传入其路径。")
+        f"Cannot find {fallback} ({why}).\n"
+        "  This gate will not skip a check because a tool is missing: that would make\n"
+        "  'never ran' and 'ran and passed' look identical in the report. Install the\n"
+        "  tool, or have CMake pass its path explicitly.")
 
 
 def find_dumpbin(linker: str | None) -> str:
@@ -173,10 +174,10 @@ def find_dumpbin(linker: str | None) -> str:
                 return str(hits[-1])
 
     raise AuditError(
-        "找不到 dumpbin.exe（读取导出表与依赖）。\n"
-        "  依次试过：--linker 的同目录、PATH、vswhere 定位的 VS 安装。\n"
+        "Cannot find dumpbin.exe (reads the export table and dependencies).\n"
+        "  Tried in order: the --linker directory, PATH, and the VS install located via vswhere.\n"
         "  本门禁不会因为工具缺失而跳过检查 —— 那会让「没验过」和「验过且通过」\n"
-        "  在报告里长得一模一样。")
+        "  'never ran' and 'ran and passed' look identical in the report.")
 
 
 # ---------- 导出符号 ----------
@@ -287,10 +288,10 @@ def check_deps(platform: str, deps: list[str]) -> None:
     bad_crypto = [d for d in deps if CRYPTO_DENY.search(d)]
     if bad_crypto:
         raise AuditError(
-            "产物依赖了 crypto 动态库，说明静态链接**没有生效**：\n"
+            "The artifact depends on a dynamic crypto library, so static linking did NOT take effect:\n"
             + "".join(f"    {d}\n" for d in bad_crypto)
-            + "  典型成因：构建机上装了 OpenSSL，libdatachannel 的 find_package 找到了它。\n"
-              "  产品路径是 vendored 静态 MbedTLS（SPEC §3/§9），brew/系统 crypto 是禁止的。")
+            + "  Typical cause: OpenSSL is installed on the build machine and libdatachannel's find_package picked it up.\n"
+              "  The product path is vendored static MbedTLS (SPEC sections 3/9); brew or system crypto is forbidden.")
 
     if platform == "darwin":
         unexpected = [d for d in deps
@@ -304,23 +305,23 @@ def check_deps(platform: str, deps: list[str]) -> None:
                       if d.lower() not in WINDOWS_ALLOWED_NAMES
                       and not any(d.lower().startswith(p) for p in WINDOWS_ALLOWED_PREFIXES)]
         allowed_desc = ("、".join(sorted(WINDOWS_ALLOWED_NAMES))
-                        + "，以及前缀 " + "、".join(WINDOWS_ALLOWED_PREFIXES))
+                        + ", plus the prefixes " + "、".join(WINDOWS_ALLOWED_PREFIXES))
 
     if unexpected:
         raise AuditError(
-            "产物依赖了允许列表之外的库：\n"
+            "The artifact depends on libraries outside the allowlist:\n"
             + "".join(f"    {d}\n" for d in unexpected)
-            + f"  允许的是：{allowed_desc}\n"
-              "  这里刻意用允许列表而非禁止列表：禁令只拦得住已经遇到过的形状。\n"
-              "  若这是**上游合法新增的系统依赖**，把它加进本脚本的允许列表并说明理由；\n"
-              "  若不是，它多半意味着某个依赖没被静态链接进来。")
+            + f"  Allowed: {allowed_desc}\n"
+              "  This is deliberately an allowlist, not a denylist: bans only stop shapes already encountered.\n"
+              "  If this is a legitimate new system dependency from upstream, add it to the allowlist in this script with a reason;\n"
+              "  if it is not, it most likely means some dependency was not linked statically.")
 
 
 def check_exports(actual: set[str], expected_file: Path) -> int:
     if not expected_file.is_file():
         raise AuditError(
-            f"缺少导出清单 {expected_file}\n"
-            "  它是门禁的一部分，不是可选文件；不要删掉它让 audit 变绿。")
+            f"Missing the export list {expected_file}\n"
+            "  It is part of the gate, not an optional file. Do not delete it to make the audit pass.")
 
     expected = set()
     for raw in expected_file.read_text(encoding="utf-8").splitlines():
@@ -331,21 +332,21 @@ def check_exports(actual: set[str], expected_file: Path) -> int:
     non_dcu = sorted(n for n in actual if not n.startswith("dcu_"))
     if non_dcu:
         raise AuditError(
-            "导出了非 dcu_* 符号（允许列表漏了东西）：\n"
+            "Non-dcu_* symbols are exported (the allowlist let something through):\n"
             + "".join(f"    {n}\n" for n in non_dcu[:50]))
 
     missing = sorted(expected - actual)
     extra = sorted(actual - expected)
     if missing or extra:
-        lines = [f"导出集与 {expected_file.name} 不一致："]
-        lines += [f"  缺少（清单里有、插件没导出）: {n}" for n in missing]
-        lines += [f"  多出（插件导出、清单里没有）: {n}" for n in extra]
+        lines = [f"The export set does not match {expected_file.name}:"]
+        lines += [f"  missing (in the list, not exported by the plugin): {n}" for n in missing]
+        lines += [f"  extra (exported by the plugin, not in the list): {n}" for n in extra]
         lines += [
             "",
-            "  注意：链接期白名单现在也由这份清单生成（gen_exports.py），所以",
-            "  「有人从清单里删了一个名字」不会在这里被发现 —— 那一类由",
-            "  gen_exports.py 的 DCU_API 交叉校验在配置期拦下。这里拦的是",
-            "  「清单里有、二进制里却没有」（实现缺失或改名），以及产物不是本次构建的。",
+            "  Note: the link-time allowlist is now generated from this same list (gen_exports.py), so ",
+            "  'someone deleted a name from the list' will NOT be caught here. That case is caught by ",
+            "  the DCU_API cross-check in gen_exports.py, at configure time. What this catches is ",
+            "  'in the list but not in the binary' (missing or renamed implementation), and an artifact that is not from this build.",
         ]
         raise AuditError("\n".join(lines))
 
@@ -353,14 +354,14 @@ def check_exports(actual: set[str], expected_file: Path) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="原生插件离线门禁")
+    ap = argparse.ArgumentParser(description="Offline gate for the native plugin")
     ap.add_argument("--binary", required=True, type=Path)
     ap.add_argument("--platform", required=True, choices=["darwin", "linux", "windows"])
     ap.add_argument("--expected", required=True, type=Path)
     ap.add_argument("--nm", default=None, help="CMAKE_NM")
     ap.add_argument("--readelf", default=None, help="CMAKE_READELF")
     ap.add_argument("--linker", default=None,
-                    help="CMAKE_LINKER（Windows 下用来推导同目录的 dumpbin.exe）")
+                    help="CMAKE_LINKER (used on Windows to locate dumpbin.exe in the same directory)")
     args = ap.parse_args()
 
     binary = args.binary
@@ -370,50 +371,50 @@ def main() -> int:
         if inner.is_file():
             binary = inner
     if not binary.is_file():
-        raise AuditError(f"产物不存在: {args.binary}")
+        raise AuditError(f"Artifact does not exist: {args.binary}")
 
     if args.platform == "darwin":
-        nm = resolve_tool(args.nm, "nm", "读取导出符号")
-        otool = resolve_tool(None, "otool", "读取动态依赖")
+        nm = resolve_tool(args.nm, "nm", "reads exported symbols")
+        otool = resolve_tool(None, "otool", "reads dynamic dependencies")
         # universal 产物的**每个架构都要单独过一遍**，两条断言都是。只查宿主架构
         # 等于让另外半个二进制没有门禁 —— 而它照样会随包发给采用者。
         archs = macho_archs(binary)
-        print(f"==> 架构: {' '.join(archs)}")
+        print(f"==> architectures: {' '.join(archs)}")
         actual, deps = None, []
         for arch in archs:
             arch_exports = exports_macos(binary, nm, arch)
             arch_deps = deps_macos(binary, otool, arch)
-            print(f"==> 依赖 (darwin/{arch})")
+            print(f"==> dependencies (darwin/{arch})")
             for d in arch_deps:
                 print(f"    {d}")
             check_deps("darwin", arch_deps)
             count = check_exports(arch_exports, args.expected)
-            print(f"    {arch}: {count} 个 dcu_* 导出与清单一致")
+            print(f"    {arch}: {count} dcu_* exports match the list")
             if actual is not None and arch_exports != actual:
                 raise AuditError(
-                    "universal 产物的各架构导出集不一致 —— 说明某一半没按预期链接：\n"
-                    f"    只在 {archs[0]}: {sorted(actual - arch_exports)}\n"
-                    f"    只在 {arch}: {sorted(arch_exports - actual)}")
+                    "The universal artifact has different export sets per architecture, so one half did not link as expected:\n"
+                    f"    only in {archs[0]}: {sorted(actual - arch_exports)}\n"
+                    f"    only in {arch}: {sorted(arch_exports - actual)}")
             actual, deps = arch_exports, arch_deps
-        print(f"OK: {len(archs)} 个架构各自的导出与依赖均通过")
+        print(f"OK: exports and dependencies passed for all {len(archs)} architecture(s)")
         return 0
     elif args.platform == "linux":
         nm = resolve_tool(args.nm, "nm", "读取导出符号")
-        readelf = resolve_tool(args.readelf, "readelf", "读取 DT_NEEDED")
+        readelf = resolve_tool(args.readelf, "readelf", "reads DT_NEEDED")
         actual, deps = exports_linux(binary, nm), deps_linux(binary, readelf)
     else:
         dumpbin = find_dumpbin(args.linker)
         actual, deps = exports_windows(binary, dumpbin), deps_windows(binary, dumpbin)
 
-    print(f"==> 依赖 ({args.platform})")
+    print(f"==> dependencies ({args.platform})")
     for d in deps:
         print(f"    {d}")
     check_deps(args.platform, deps)
 
-    print("==> 导出符号")
+    print("==> exported symbols")
     count = check_exports(actual, args.expected)
 
-    print(f"OK: {count} 个 dcu_* 导出与 {args.expected.name} 一致，依赖均在允许列表内")
+    print(f"OK: {count} dcu_* exports match {args.expected.name}; all dependencies are within the allowlist")
     return 0
 
 

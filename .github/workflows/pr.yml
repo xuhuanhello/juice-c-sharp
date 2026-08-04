@@ -85,7 +85,7 @@ jobs:
           fail=0
           while read -r mode _ _ file; do
             if [[ "$mode" != "100755" ]]; then
-              echo "::error file=$file::git 索引里的 mode 是 $mode，应为 100755。请用 'git update-index --chmod=+x $file' 修正，不要在 CI 里 chmod。"
+              echo "::error file=$file::git index mode is $mode, expected 100755. Fix with 'git update-index --chmod=+x $file'; do not chmod in CI."
               fail=1
             fi
           done < <(git ls-files -s native/scripts/)

@@ -58,8 +58,8 @@ namespace DataChannelUnity.Internal
                 {
                     _warnedUncaptured = true;
                     DataChannelLog.Emit(LogLevel.Error,
-                        "主线程标识从未被捕获，" + api + " 的线程断言无法执行。"
-                        + "这是本包的缺陷，请附 Unity 版本提 issue。");
+                        "The main-thread identity was never captured, so the thread assertion for " + api + " cannot run. "
+                        + "This is a defect in this package; please file an issue and include your Unity version.");
                 }
                 return;
             }
@@ -67,10 +67,10 @@ namespace DataChannelUnity.Internal
             if (Thread.CurrentThread.ManagedThreadId == main) return;
 
             throw new System.InvalidOperationException(
-                api + " 只能在 Unity 主线程调用（当前线程 "
-                + Thread.CurrentThread.ManagedThreadId + "，主线程 " + main + "）。"
-                + "本包的公开面**全部**限主线程，Dispose 也不例外 —— 见 docs/SPEC.md §6。"
-                + "若要从后台线程释放，请把调用调度回主线程。");
+                api + " may only be called on the Unity main thread (current thread "
+                + Thread.CurrentThread.ManagedThreadId + ", main thread " + main + "）。"
+                + "The entire public surface of this package is main-thread only, Dispose included. See docs/SPEC.md section 6. "
+                + "To release from a background thread, marshal the call back to the main thread.");
         }
     }
 }

@@ -84,13 +84,13 @@ namespace DataChannelUnity.Internal
                     : "DataChannel(handle=" + r.Handle + ", label=\"" + r.Label + "\")";
 
                 var site = r.CreationSite != null
-                    ? "创建于：\n" + r.CreationSite
-                    : "（创建时 LeakDetection 为 Disabled，故没有创建栈。）";
+                    ? "Created at:\n" + r.CreationSite
+                    : "(LeakDetection was Disabled at creation time, so no creation stack was captured.)";
 
                 DataChannelLog.Emit(LogLevel.Error,
-                    what + " 被 GC 回收时仍未 Dispose()。**原生对象没有被销毁** —— "
-                    + "终结器刻意不调 dcu_*，所以这是一次真实的原生泄漏，不是误报。"
-                    + "请显式 Dispose，或用 using。\n" + site);
+                    what + " was garbage-collected without Dispose(). The native object was NOT destroyed: "
+                    + "the finalizer deliberately does not call dcu_*, so this is a real native leak, not a false positive. "
+                    + "Dispose explicitly, or use a using statement.\n" + site);
             }
         }
 

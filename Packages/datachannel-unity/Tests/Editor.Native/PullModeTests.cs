@@ -39,7 +39,7 @@ namespace DataChannelUnity.Tests
         public void RequireNative()
         {
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
         }
 
         /// <summary>
@@ -86,8 +86,8 @@ namespace DataChannelUnity.Tests
                 incoming?.Dispose();
                 dc.Dispose();
 
-                Assert.IsTrue(received, "消息没送达，这条测试没测到它想测的东西。");
-                Assert.IsTrue(mutated, "回调没跑完 —— 可能在 Dispose/Create 处就抛了。");
+                Assert.IsTrue(received, "The message never arrived, so this test did not exercise what it claims to.");
+                Assert.IsTrue(mutated, "The callback did not run to completion; it probably threw at the Dispose/Create call.");
             }
         }
 
@@ -128,10 +128,10 @@ namespace DataChannelUnity.Tests
                 dc.Dispose();
                 incoming?.Dispose();
 
-                Assert.IsNotNull(receivedLength, "一条消息都没收到。");
+                Assert.IsNotNull(receivedLength, "No message was received at all.");
                 Assert.AreEqual(0, receivedLength.Value,
-                    "零长度消息必须原样送达；收到 4 说明它被吞了，先到的是哨兵。");
-                Assert.IsTrue(gotTail, "哨兵没到 —— 零长度消息之后的投递被破坏了。");
+                    "A zero-length message must arrive as-is; receiving 4 means it was swallowed and the sentinel arrived first.");
+                Assert.IsTrue(gotTail, "The sentinel never arrived: delivery after a zero-length message is broken.");
             }
         }
     }

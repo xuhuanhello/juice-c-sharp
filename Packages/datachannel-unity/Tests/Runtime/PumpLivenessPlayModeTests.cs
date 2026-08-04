@@ -42,7 +42,7 @@ namespace DataChannelUnity.Tests
         public void Setup()
         {
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过。");
+                "Native plugin not loaded. This is a failure, not a skip.");
             _captured.Clear();
             DataChannelLog.MessageLogged += Capture;
         }
@@ -66,22 +66,22 @@ namespace DataChannelUnity.Tests
             // pump 异常路径全程记 Error，那是本用例的**预期产物**。
             LogAssert.ignoreFailingMessages = true;
 
-            Assert.IsTrue(PumpIsRegistered(), "前提不成立：进入本用例时 pump 本该是注册好的。");
+            Assert.IsTrue(PumpIsRegistered(), "Precondition violated: the pump should already be registered when this test starts.");
 
             // ---- 第一轮：抹掉 -> 等 -> 调 API -> 应该重试注册一次 ----
             ErasePumpEntry();
-            Assert.IsFalse(PumpIsRegistered(), "模拟没生效，条目还在。");
+            Assert.IsFalse(PumpIsRegistered(), "The simulation had no effect; the entry is still there.");
 
             yield return WaitRealtime(StaleWaitSeconds);
             TouchPublicApi();
 
             Assert.IsTrue(PumpIsRegistered(),
-                "pump 停转超过阈值后，第一次调用公开 API 必须重试注册一次。");
-            Assert.That(_captured, Has.Some.Contains("重试注册一次"),
-                "错误消息必须说清它做了什么。而且**必须点名可能的成因**（第三方 SetPlayerLoop）"
-                + "—— 检测的全部价值在归因，故障本身早就很显眼了。");
+                "Once the pump has been stalled past the threshold, the first public API call must retry registration exactly once.");
+            Assert.That(_captured, Has.Some.Contains("Retrying registration ONCE"),
+                "The error must say what it did, and it MUST name the likely cause (a third-party SetPlayerLoop): "
+                + "the entire value of the detection is attribution; the fault itself is already obvious.");
             Assert.That(_captured, Has.Some.Contains("SetPlayerLoop"),
-                "错误消息没有点名成因，等于只告诉人「坏了」。");
+                "An error that does not name the cause only tells people that something is broken.");
 
             _captured.Clear();
 
@@ -91,10 +91,10 @@ namespace DataChannelUnity.Tests
             TouchPublicApi();
 
             Assert.IsFalse(PumpIsRegistered(),
-                "第二次被抹掉之后**不得**再插回去 —— 那就是在跟另一个包无限来回抢 "
-                + "PlayerLoop，而且是静默地抢（#45 决议 2）。");
-            Assert.That(_captured, Has.Some.Contains("已停止重试"),
-                "停手这件事必须说出来。默默不管比默默重试还糟。");
+                "After being wiped a second time it must NOT re-insert: that is an endless tug-of-war with another package over the "
+                + "PlayerLoop, and a silent one (#45, resolution 2).");
+            Assert.That(_captured, Has.Some.Contains("Retries have STOPPED"),
+                "Giving up must be stated out loud. Silently doing nothing is worse than silently retrying.");
         }
 
         // ------------------------------------------------------------------

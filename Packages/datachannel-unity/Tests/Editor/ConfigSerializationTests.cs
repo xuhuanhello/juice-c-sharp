@@ -18,9 +18,9 @@ namespace DataChannelUnity.Tests
         {
             Assert.IsNull(
                 Attribute.GetCustomAttribute(type, typeof(SerializableAttribute)),
-                type.Name + " 不得标 [Serializable]。这不是疏漏：一旦可在 Inspector 里填写，"
-                + "IceServer.Username / Credential 就会进 .unity / .prefab，随构建产物发出去且可被轻易提取。"
-                + "TURN 凭证应由信令服务器运行时下发。见 docs/SPEC.md §5 与 issue #34。");
+                type.Name + " must not be marked [Serializable]. This is not an oversight: once it can be filled in from the Inspector, "
+                + "IceServer.Username / Credential end up in .unity / .prefab files, ship inside the build, and are trivially extractable. "
+                + "TURN credentials should be issued at runtime by the signalling server. See docs/SPEC.md section 5 and issue #34.");
         }
     }
 }

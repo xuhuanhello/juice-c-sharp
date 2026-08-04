@@ -35,7 +35,7 @@ namespace DataChannelUnity.Tests
         {
             // 缺席必须是失败，不是跳过（SPEC §11）。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
             _captured.Clear();
             DataChannelLog.MessageLogged += Capture;
         }
@@ -66,8 +66,8 @@ namespace DataChannelUnity.Tests
 
             pc.Dispose();
 
-            Assert.AreEqual(DataChannelState.Closed, a.State, "子通道 a 没有被级联释放。");
-            Assert.AreEqual(DataChannelState.Closed, b.State, "子通道 b 没有被级联释放。");
+            Assert.AreEqual(DataChannelState.Closed, a.State, "Child channel a was not disposed in cascade.");
+            Assert.AreEqual(DataChannelState.Closed, b.State, "Child channel b was not disposed in cascade.");
             Assert.Throws<ObjectDisposedException>(() => a.Send(new byte[] { 1 }));
             Assert.Throws<ObjectDisposedException>(() => b.Send(new byte[] { 1 }));
         }
@@ -84,8 +84,8 @@ namespace DataChannelUnity.Tests
             // 行为与自行 Dispose 一致，**只有消息不同**（#29 决议 6）。这一句是整个
             // 级联设计里唯一朝用户暴露的地方 —— 少了它，「我明明没释放这个通道」
             // 会变成一次纯猜谜。
-            StringAssert.Contains("级联", ex.Message,
-                "级联释放的通道，其 ObjectDisposedException 必须点明成因是父 PC 被释放。");
+            StringAssert.Contains("cascade", ex.Message,
+                "For a cascade-disposed channel, ObjectDisposedException must name the parent PC disposal as the cause.");
         }
 
         [Test]
@@ -103,7 +103,7 @@ namespace DataChannelUnity.Tests
             // 用户回调（重入）；而且 Closed 的语义应是「通道被关闭了」，
             // 不是「你自己刚把它释放了」。
             Assert.IsFalse(closedFired,
-                "级联释放不得触发 Closed 事件（#29 决议 6）。");
+                "Cascade disposal must not raise Closed events (#29, resolution 6).");
         }
 
         [Test]
@@ -120,7 +120,7 @@ namespace DataChannelUnity.Tests
             Assert.Throws<DataChannelException>(() => new PeerConnection(badCfg));
             PumpAWhile();
             Assert.That(_captured, Has.Some.Contains("protocol"),
-                "阳性对照失败：原生错误文本没到达托管日志，本用例后面的断言因此没有意义。");
+                "Positive control failed: native error text never reached the managed log, so the later assertions in this test are meaningless.");
             _captured.Clear();
 
             var dc = pc.CreateDataChannel("direct");
@@ -129,7 +129,7 @@ namespace DataChannelUnity.Tests
             PumpAWhile();
 
             Assert.That(_captured, Has.None.Contains(StaleDcHandle),
-                "父 PC 对一个已自行释放的子通道再次 dcu_dc_destroy —— 子列表没被摘除（#29 决议 1）。");
+                "The parent PC called dcu_dc_destroy again on a child that had already disposed itself: it was not removed from the child list (#29, resolution 1).");
             Assert.That(_captured, Has.None.Contains(StalePcHandle));
         }
 
@@ -161,7 +161,7 @@ namespace DataChannelUnity.Tests
             PumpAWhile();
 
             Assert.That(_captured, Has.None.Contains(StaleDcHandle),
-                "级联之后应用再 Dispose 一次是**正常用法**（using 块、对象池），不得打到僵尸句柄上。");
+                "Disposing again after a cascade is NORMAL usage (using blocks, object pools) and must not hit a zombie handle.");
         }
 
         /// <summary>
@@ -205,16 +205,16 @@ namespace DataChannelUnity.Tests
                     Thread.Sleep(5);
                 }
 
-                Assert.AreEqual("hi", got, "回环没通 —— 后面的所有权断言无从谈起。");
+                Assert.AreEqual("hi", got, "The loopback never connected, so the ownership assertions below cannot mean anything.");
                 Assert.IsNotNull(incoming);
-                Assert.AreSame(b, incoming.Peer, "入向通道的 Peer 必须是接收端的 PC。");
+                Assert.AreSame(b, incoming.Peer, "An inbound channel's Peer must be the receiving PC.");
 
                 b.Dispose();    // 只释放 PC，不碰 incoming
 
                 Assert.AreEqual(DataChannelState.Closed, incoming.State,
-                    "入向通道没有随其 PC 级联释放 —— 应用够不着它，这就是个纯原生泄漏。");
+                    "The inbound channel was not disposed in cascade with its PC. The application cannot reach it, so this is a pure native leak.");
                 var ex = Assert.Throws<ObjectDisposedException>(() => incoming.Send(new byte[] { 1 }));
-                StringAssert.Contains("级联", ex.Message);
+                StringAssert.Contains("cascade", ex.Message);
             }
             finally
             {

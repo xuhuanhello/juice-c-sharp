@@ -17,7 +17,7 @@ namespace DataChannelUnity.Tests
         public void RequireNative()
         {
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
         }
 
         [TearDown]
@@ -64,8 +64,8 @@ namespace DataChannelUnity.Tests
             }
 
             CollectionAssert.AreEqual(new[] { 0, 1, 2 }, reached,
-                "第一个订阅者抛异常之后，后面两个必须照常收到。少了 1 和 2 说明隔离"
-                + "被写成了「整个 Invoke 包一个 try」。");
+                "After the first subscriber throws, the other two must still receive. Missing 1 and 2 means isolation "
+                + "was written as one try around the whole Invoke.");
         }
 
         /// <summary>消息事件：同一条契约，走的是缓存 invocation list 那条路径。</summary>
@@ -102,7 +102,7 @@ namespace DataChannelUnity.Tests
             }
 
             CollectionAssert.AreEqual(new[] { 0, 1, 2 }, reached,
-                "消息事件的隔离粒度同样必须是每订阅者。");
+                "Message events must be isolated per subscriber as well.");
         }
 
         /// <summary>抛异常的订阅者**不会**被自动退订。</summary>
@@ -155,7 +155,7 @@ namespace DataChannelUnity.Tests
             }
 
             Assert.AreEqual(2, calls,
-                "抛过异常的订阅者必须继续收到后续消息。只收到一次说明它被自动退订了。");
+                "A subscriber that threw must keep receiving later messages. Receiving only once means it was auto-unsubscribed.");
         }
 
         // ------------------------------------------------------------------
@@ -184,7 +184,7 @@ namespace DataChannelUnity.Tests
                 var data = new byte[16];
 
                 Assert.Throws<ArgumentOutOfRangeException>(() => dc.Send(data, 1, int.MaxValue),
-                    "offset + count 回绕成负数时检查必须仍然成立 —— 这是越界读之前的最后一道闸。");
+                    "The check must still hold when offset + count overflows to a negative value: it is the last gate before an out-of-bounds read.");
                 Assert.Throws<ArgumentOutOfRangeException>(() => dc.Send(data, int.MaxValue, 1));
                 Assert.Throws<ArgumentOutOfRangeException>(() => dc.Send(data, 0, 17));
                 Assert.Throws<ArgumentOutOfRangeException>(() => dc.Send(data, -1, 1));
@@ -212,9 +212,9 @@ namespace DataChannelUnity.Tests
                 var dc = pc.CreateDataChannel("bounds-ok");
                 var data = new byte[16];
 
-                AssertPassedArgumentChecks(() => dc.Send(data, 16, 0), "offset == length 的空切片");
-                AssertPassedArgumentChecks(() => dc.Send(data, 0, 16), "整个数组");
-                AssertPassedArgumentChecks(() => dc.Send(Array.Empty<byte>()), "零长度数组");
+                AssertPassedArgumentChecks(() => dc.Send(data, 16, 0), "empty slice where offset == length");
+                AssertPassedArgumentChecks(() => dc.Send(data, 0, 16), "the whole array");
+                AssertPassedArgumentChecks(() => dc.Send(Array.Empty<byte>()), "zero-length array");
             }
         }
 
@@ -229,7 +229,7 @@ namespace DataChannelUnity.Tests
         private static void AssertPassedArgumentChecks(Action action, string what)
         {
             try { action(); }
-            catch (ArgumentException e) { Assert.Fail(what + " 被参数校验误拒：" + e.Message); }
+            catch (ArgumentException e) { Assert.Fail(what + " was wrongly rejected by argument validation: " + e.Message); }
             catch (DataChannelException) { /* 越过校验、到了原生 —— 正是本用例要的 */ }
         }
     }

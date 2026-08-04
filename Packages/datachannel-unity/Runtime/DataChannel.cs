@@ -139,15 +139,15 @@ namespace DataChannelUnity
             MainThread.Assert("DataChannel.Send");
             ThrowIfDisposed();
             if (data == null) throw new ArgumentNullException(nameof(data));
-            if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset), "偏移不能为负。");
-            if (count < 0) throw new ArgumentOutOfRangeException(nameof(count), "长度不能为负。");
+            if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset), "Offset must not be negative.");
+            if (count < 0) throw new ArgumentOutOfRangeException(nameof(count), "Count must not be negative.");
             // **写成减法而不是加法。** offset 与 count 此刻已知非负，所以
             // data.Length - offset 不可能溢出；而 offset + count 在 int.MaxValue
             // 附近会回绕成负数，让这个检查**整个失效**。有了 fixed 之后，
             // 这是越界读之前的最后一道闸 —— 原先那句加法是真的能被绕过去的。
             if (data.Length - offset < count)
                 throw new ArgumentOutOfRangeException(nameof(count),
-                    "offset + count 超出数组长度（length=" + data.Length
+                    "offset + count exceeds the array length (length=" + data.Length
                     + ", offset=" + offset + ", count=" + count + "）。");
 
             SendCore(new ReadOnlySpan<byte>(data, offset, count));
@@ -250,8 +250,8 @@ namespace DataChannelUnity
             if (!_disposed) return;
             throw _disposedByParent
                 ? new ObjectDisposedException(nameof(DataChannel),
-                    "该通道随其 PeerConnection 一起被级联释放（PeerConnection.Dispose 会带走它的所有子通道）。"
-                    + "若需要通道活得比 PC 久，那是不成立的 —— 原生侧的子通道句柄在 PC 销毁后即悬空。")
+                    "This channel is disposed in cascade with its PeerConnection (PeerConnection.Dispose takes every child channel with it). "
+                    + "A channel cannot outlive its PeerConnection: the native child handle dangles once the PC is destroyed.")
                 : new ObjectDisposedException(nameof(DataChannel));
         }
 

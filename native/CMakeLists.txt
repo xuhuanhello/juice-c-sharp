@@ -57,15 +57,15 @@ set(DCU_PLUGIN_ROOT "${NATIVE_ROOT}/../Packages/datachannel-unity/Plugins"
 # 上游 checkout：缺失时 fetch-deps.sh 能补
 foreach(dep IN ITEMS "${MBEDTLS_SRC}" "${LIBDC_SRC}")
   if(NOT EXISTS "${dep}/CMakeLists.txt")
-    message(FATAL_ERROR "缺少 ${dep} —— 请先运行 native/scripts/fetch-deps.sh")
+    message(FATAL_ERROR "Missing ${dep} -- run native/scripts/fetch-deps.sh first")
   endif()
 endforeach()
 # 项目自有源码：fetch-deps.sh 不会生成，缺失几乎必然是 .gitignore 误伤
 if(NOT EXISTS "${MBEDTLS_USER_CFG}")
-  message(FATAL_ERROR "缺少 ${MBEDTLS_USER_CFG}（项目自有源码，应随仓库提供）")
+  message(FATAL_ERROR "Missing ${MBEDTLS_USER_CFG} (first-party source; it ships with the repository)")
 endif()
 if(NOT EXISTS "${DCU_SRC}/src/dcu_impl.cpp")
-  message(FATAL_ERROR "缺少 ${DCU_SRC}/src/dcu_impl.cpp（项目自有源码，应随仓库提供）")
+  message(FATAL_ERROR "Missing ${DCU_SRC}/src/dcu_impl.cpp (first-party source; it ships with the repository)")
 endif()
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -94,7 +94,7 @@ execute_process(
 )
 if(NOT DCU_GEN_EXPORTS_RC EQUAL 0)
   message(FATAL_ERROR
-    "生成导出白名单失败（rc=${DCU_GEN_EXPORTS_RC}）：\n${DCU_GEN_EXPORTS_ERR}")
+    "Failed to generate the export allowlists (rc=${DCU_GEN_EXPORTS_RC}):\n${DCU_GEN_EXPORTS_ERR}")
 endif()
 message(STATUS "${DCU_GEN_EXPORTS_OUT}")
 

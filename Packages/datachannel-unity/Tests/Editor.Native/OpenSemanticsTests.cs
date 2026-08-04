@@ -27,7 +27,7 @@ namespace DataChannelUnity.Tests
         public void RequireNative()
         {
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
-                "原生插件未加载。这是失败而非跳过 —— 若刚重建过插件，需重启 Editor。");
+                "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
         }
 
         [TearDown]
@@ -79,7 +79,7 @@ namespace DataChannelUnity.Tests
                 var ex = Assert.Throws<ArgumentException>(
                     () => pc.CreateDataChannel(new string('O', PeerConnection.MaxDataChannelLabelBytes + 1)));
                 Assert.That(ex.Message, Does.Contain(PeerConnection.MaxDataChannelLabelBytes.ToString()),
-                    "错误信息要说出上界，否则调用方不知道该改成多少。");
+                    "The error must state the upper bound, otherwise the caller does not know what to change it to.");
             }
         }
 
@@ -105,7 +105,7 @@ namespace DataChannelUnity.Tests
         {
             RunAfterConnectScenario(injectDelayMs: 0, out var openCount);
             Assert.AreEqual(1, openCount,
-                "Open 事件必须恰好一次。0 = 通知丢了且补发没救回来；2 = 去重失效。");
+                "The Open event must fire exactly once. 0 = the notification was lost and the re-emit did not save it; 2 = de-duplication failed.");
         }
 
         /// <summary>
@@ -120,8 +120,8 @@ namespace DataChannelUnity.Tests
         {
             RunAfterConnectScenario(injectDelayMs: 300, out var openCount);
             Assert.AreEqual(1, openCount,
-                "强制竞态下 Open 仍必须恰好一次 —— 这条专门验补发分支。"
-                + "0 说明补发没生效，2 说明补发与回调都投了、去重失效。");
+                "Open must still fire exactly once under a forced race; this test targets the re-emit branch. "
+                + "0 means the re-emit did not take effect; 2 means both the re-emit and the callback delivered and de-duplication failed.");
         }
 
         private void RunAfterConnectScenario(int injectDelayMs, out int openCount)
@@ -142,7 +142,7 @@ namespace DataChannelUnity.Tests
                 // 先用一条引导通道把连接建起来。
                 var bootstrap = a.CreateDataChannel("bootstrap");
                 PumpUntil(() => connected);
-                Assert.IsTrue(connected, "连接没建立，后续断言无意义。");
+                Assert.IsTrue(connected, "The connection was never established, so the assertions below are meaningless.");
 
                 // 现在 PC 已连接 —— 这才是 T1 竞态存在的那条路径。
                 dcu_test_set_open_race_delay_ms(injectDelayMs);
@@ -154,7 +154,7 @@ namespace DataChannelUnity.Tests
                 for (int i = 0; i < 40; i++) { DataChannelRuntime.Pump(); Thread.Sleep(5); }
 
                 Assert.AreEqual(DataChannelState.Open, late.State,
-                    "活查询必须报 Open —— 它是权威状态，与事件是否送达无关。");
+                    "The live query must report Open: it is the authoritative state, independent of whether events were delivered.");
 
                 late.Dispose();
                 bootstrap.Dispose();
@@ -177,8 +177,8 @@ namespace DataChannelUnity.Tests
 
                 dc.Dispose();
                 Assert.AreEqual(DataChannelState.Closed, dc.State,
-                    "已 Dispose 的通道报 Closed，而不是抛 ObjectDisposedException —— "
-                    + "状态查询是诊断手段，不该在最需要它的时候失效。");
+                    "A disposed channel reports Closed rather than throwing ObjectDisposedException: "
+                    + "state queries are a diagnostic tool and must not fail exactly when they are needed most.");
             }
         }
     }
