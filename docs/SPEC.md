@@ -127,11 +127,24 @@ The native and WebGL backends share the `dcu_*` surface and the ICE-configuratio
 |------|-------------|
 | Self-contained | All crypto + usrsctp + juice + libdatachannel **static** into the single plugin binary |
 | No device crypto drift | Post-build audit: `otool -L` / `ldd` / `dumpbin` must not list openssl/mbedtls from `/opt/homebrew`, `/usr/local`, or vcpkg shared trees |
-| Export surface | **Only `dcu_*`** (Apple: `native/exports/macos-exported-symbols.txt`; ELF: `linux-version-script.map`; Windows: `windows-exports.def`) |
+| Export surface | **Only `dcu_*`**. `native/exports/expected-symbols.txt` is the one hand-written source (undecorated names); the three link-time files (Mach-O list, ELF version script, PE `.def`) are **generated** from it by `gen_exports.py` into the build directory and **never committed** |
 | Compile | `-fvisibility=hidden` (+ inlines hidden) on wrapper and deps where possible |
-| macOS product | **One** artifact per arch: `datachannel_unity.dylib` only — **no** side-by-side `.dylib` |
+| macOS product | **One** artifact, a **universal** `datachannel_unity.dylib` (arm64 + x86_64) — no per-arch subdirectories, no `.bundle` (§8) |
 
-**Decisions:** [#17](https://github.com/xuhuanhello/juice-c-sharp/issues/17), [#18](https://github.com/xuhuanhello/juice-c-sharp/issues/18), [#19](https://github.com/xuhuanhello/juice-c-sharp/issues/19)
+**Decisions:** [#17](https://github.com/xuhuanhello/juice-c-sharp/issues/17), [#18](https://github.com/xuhuanhello/juice-c-sharp/issues/18), [#19](https://github.com/xuhuanhello/juice-c-sharp/issues/19), [#47](https://github.com/xuhuanhello/juice-c-sharp/issues/47), [#50](https://github.com/xuhuanhello/juice-c-sharp/issues/50)
+
+#### What hidden visibility does and does not buy (measured, [#47](https://github.com/xuhuanhello/juice-c-sharp/issues/47))
+
+`-fvisibility=hidden` **does** propagate into the vendored subprojects. Measured on the shipped macOS artifact: **27** external symbols escape, not the hundreds an earlier reading of #18 assumed. Treat any restatement of a four-digit leak count as stale — the number is in `docs/research/platform-symbol-audit.md`, together with how it was taken.
+
+What it does **not** buy is duplicate-symbol safety in a static library. Two plugins that each vendor MbedTLS both define the same symbols; the default lazy linking **does not error**, it silently binds to whichever came first. We enable `MBEDTLS_SSL_DTLS_SRTP` and another plugin most likely does not, so the failure mode is *the wrong implementation, quietly* — worse than a link error. This is why the iOS `.a` narrows symbols with a one-step `ld -r -exported_symbols_list` (§9) rather than relying on visibility flags alone.
+
+Two constraints follow, and both are load-bearing:
+
+- **`ld -r -exported_symbols_list` can only demote, never promote.** Naming an already-hidden symbol in the list makes `ld` fail outright.
+- Therefore **`expected-symbols.txt` must equal the set annotated `DCU_API` in the sources, exactly.** One extra name is a hard link failure on iOS, not a silent pass — which makes the iOS link a second enforcer of the same list the audit diffs against.
+
+The Windows side has its own asymmetry worth stating, because the shape invites the opposite assumption: the export gate on Windows is `DCU_API` (`__declspec(dllexport)`), **not** the `.def` file. A `.def` that is missing symbols passes silently; one naming deleted symbols fails hard (LNK2001). It is kept only as a generated artifact, where neither mode can occur.
 
 ### Package semver (this UPM)
 
@@ -752,7 +765,7 @@ On the normal path upstream logs ICE servers as `hostname:port` only and never t
 
 ## 8. Plugins layout and PluginImporter
 
-**Decision:** [#10](https://github.com/xuhuanhello/juice-c-sharp/issues/10)
+**Decisions:** [#10](https://github.com/xuhuanhello/juice-c-sharp/issues/10), revised by map [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46) — [#49](https://github.com/xuhuanhello/juice-c-sharp/issues/49), [#52](https://github.com/xuhuanhello/juice-c-sharp/issues/52), [#55](https://github.com/xuhuanhello/juice-c-sharp/issues/55), [#65](https://github.com/xuhuanhello/juice-c-sharp/issues/65)
 
 ### Tree
 
@@ -760,13 +773,14 @@ On the normal path upstream logs ICE servers as `hostname:port` only and never t
 Packages/datachannel-unity/
   package.json                    # name: com.xuhuanhello.datachannel
   Runtime/                        # C# + asmdef
-  Plugins/
+  Editor/                         # PluginPlatformGuard (§10)
+  Plugins/                        # binaries and their .meta — nothing else
     Windows/
       x86_64/datachannel_unity.dll
-      ARM64/datachannel_unity.dll
     macOS/
-      x64/datachannel_unity.dylib
-      arm64/datachannel_unity.dylib
+      datachannel_unity.dylib              # ONE universal file: arm64 + x86_64
+    Linux/
+      x86_64/libdatachannel_unity.so       # note the lib prefix
     Android/
       arm64-v8a/libdatachannel_unity.so    # no libs/ segment
     iOS/
@@ -774,23 +788,36 @@ Packages/datachannel-unity/
     WebGL/
       libdatachannel_unity.a
       webrtc.jslib                         # no websocket.jslib
-  Samples~/                           # preferred for dual-peer sample
+  Report~/                        # one build record per shipped binary (§10)
+  Samples~/                       # preferred for dual-peer sample
 ```
+
+**Three shapes in that tree were decided against an earlier version of this spec, and the earlier version is left visible rather than overwritten** — the rule is that changing a decision is a new decision:
+
+- ~~`macOS/x64/…dylib` + `macOS/arm64/…dylib` — thin, one per arch, explicitly no `lipo`~~ → **one universal `.dylib`**. #10's table recorded "no universal" with *no reason attached at all*, and that alone is enough to overturn it: the decision existed, the argument never did. Against it: `CMAKE_OSX_ARCHITECTURES="arm64;x86_64"` produces both in one command with no extra job or toolchain file, the LFS cost is the same (a full-matrix refresh measures ~20 MB either way, [#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54)), and it removes **two artifacts with the same file name**, which [#49](https://github.com/xuhuanhello/juice-c-sharp/issues/49) identified as the actual source of Unity's `CheckFileCollisions` conflict and the reimport error storm.
+- ~~macOS ships a `.bundle`~~ → **a plain `.dylib`**. Measured: `CalculateFinalPluginPath` treats the two identically, and Unity's own `com.unity.burst` ships a universal `.dylib`. The directory form imposed four separate special cases — `.gitattributes` had to match by path (the Mach-O inside a `.bundle` has no extension), a second exception was needed for `Info.plist`, `stage_plugin.py` had to build `Contents/MacOS/` and write a plist template, and `gen_support_table.py` needed prefix matching for a directory artifact. **The fourth one shipped a real bug**: the first version matched exactly, so macOS could never be reported as landed.
+- ~~`Windows/ARM64/datachannel_unity.dll`~~ → **removed, and not deferred**. Unity 2022.3's Standalone Windows target has **no ARM64 slot**: the editor sources return an empty plugin path for that combination, and multi-architecture Windows only arrives in Unity 6000.0. On 2022.3 the artifact has no consumer — building it produces a binary that cannot be installed into any Player. Confirmed independently from two directions ([#48](https://github.com/xuhuanhello/juice-c-sharp/issues/48) from the platform-support surface, [#49](https://github.com/xuhuanhello/juice-c-sharp/issues/49) from the editor sources and a real Editor's written `.meta`). If this package's minimum Unity is ever raised to 6000.0, that is a new decision, not a resumption of this one.
 
 ### Per-platform rules
 
-| Platform | Artifact | DllImport | Editor |
-|----------|----------|-----------|--------|
-| Windows x64 / arm64 | `.dll`, CRT `/MD`, self-contained | `datachannel_unity` | Yes (matching CPU) |
-| macOS x64 / arm64 | **Thin** `.bundle` (not universal) | `datachannel_unity` | Yes |
-| Android arm64 | `libdatachannel_unity.so` | `datachannel_unity` | No |
-| iOS arm64 | static `.a` | `__Internal` | No (no simulator v1) |
-| WebGL | `.a` + `webrtc.jslib` | `__Internal` | No |
+| Platform | Artifact | DllImport | Editor | Audit: symbols read with | Audit: dependency rule |
+|----------|----------|-----------|--------|--------------------------|------------------------|
+| Windows x64 | `.dll`, CRT `/MD`, self-contained | `datachannel_unity` | Yes | `dumpbin` | Name allowlist — PE imports carry no path — plus the `api-ms-win-` prefix, since UCRT's API sets change with the CRT version |
+| macOS universal | **One** `.dylib`, arm64 + x86_64 | `datachannel_unity` | Yes | `nm` + `otool` + `lipo` | Path-prefix allowlist (`/System/Library/Frameworks/`, `/usr/lib/`, `@loader_path`) |
+| Linux x64 | `libdatachannel_unity.so` | `datachannel_unity` | Yes | `nm` + `readelf` | Name allowlist — `DT_NEEDED` carries only sonames |
+| Android arm64-v8a | `libdatachannel_unity.so` | `datachannel_unity` | No | `nm` + `readelf` | As Linux |
+| iOS arm64 | static `.a`, symbols narrowed by `ld -r` | `__Internal` | No (no simulator v1) | `nm -g` on the archive *(designed, not built — §9)* | **None** — see the gap in §11 |
+| WebGL | `.a` + `webrtc.jslib` | `__Internal` | No | — | — |
 
-- Explicit `.meta` for every plugin; do not rely on folder magic alone.
-- Binaries in **Git LFS**; `.meta` in normal git.
+**A crypto-name ban sits on top of the allowlist**, because macOS really does ship `/usr/lib/libssl.dylib` — a path-prefix rule alone would wave it through. It bans the bundled-crypto family (openssl, mbedtls, gnutls, wolfssl); Windows' `bcrypt.dll` / `crypt32.dll` are **allowed** and are not an exception to it — they are the OS's own crypto API, which libjuice and libdatachannel use for randomness and certificates, not a crypto library of ours that failed to link statically.
+
+**These are allowlists on purpose, not denylists.** The dependency table is the only observable evidence that static linking actually took effect — a build script saying so is not evidence, and this repository has been burned exactly there (§10: a CI job installed brew OpenSSL and was, in fact, broken). A denylist only stops the shapes already encountered. A legitimate new system dependency from upstream is added to the list **with its reason**, in the script.
+
+- Explicit `.meta` for every plugin; do not rely on folder magic alone. Every `.meta` under `Plugins/` is **generated and diffed in CI** — see §10 and §11 for the mechanism and its limits.
+- **`Plugins/` holds binaries and their `.meta`, nothing else.** Build records live in `Report~/` (§10). A pure build record is not an asset, and minting a GUID for a file that nothing will ever reference is issuing an ID card to a non-asset.
+- Binaries in **Git LFS**; `.meta` in normal git. Every landed artifact is a single file, so the LFS rules match **by extension**; the path-matching rules and the `Info.plist` exception that the `.bundle` once required are gone with it.
 - Self-contained: crypto + backend deps **static-linked** into the plugin (see §3 linking rules).
-- macOS: never ship both `.bundle` and `.dylib` for the same arch.
+- **Linux's `lib` prefix is not cosmetic** — `libdatachannel_unity.so` is what `DllImport("datachannel_unity")` resolves to on ELF, and it is why the Linux artifact name differs from Windows' and macOS'.
 
 ### WebGL hard constraints
 
@@ -811,31 +838,43 @@ The choice between those two is deferred with the facade itself, which is not ye
 
 ## 9. Native build system
 
-**Decisions / research:** [#4](https://github.com/xuhuanhello/juice-c-sharp/issues/4), [#24](https://github.com/xuhuanhello/juice-c-sharp/issues/24), ~~[#23](https://github.com/xuhuanhello/juice-c-sharp/issues/23) / [#25](https://github.com/xuhuanhello/juice-c-sharp/issues/25)~~ **rescinded by** [#27](https://github.com/xuhuanhello/juice-c-sharp/issues/27),  
-`docs/research/meson-subprojects-static-graph.md`
+**Decisions / research:** [#4](https://github.com/xuhuanhello/juice-c-sharp/issues/4), [#24](https://github.com/xuhuanhello/juice-c-sharp/issues/24), ~~[#23](https://github.com/xuhuanhello/juice-c-sharp/issues/23) / [#25](https://github.com/xuhuanhello/juice-c-sharp/issues/25)~~ **rescinded by** [#27](https://github.com/xuhuanhello/juice-c-sharp/issues/27); map [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46) — [#50](https://github.com/xuhuanhello/juice-c-sharp/issues/50), [#51](https://github.com/xuhuanhello/juice-c-sharp/issues/51), [#55](https://github.com/xuhuanhello/juice-c-sharp/issues/55),  
+`docs/research/meson-subprojects-static-graph.md`, `docs/research/platform-symbol-audit.md`, `docs/research/platform-ci-toolchains.md`
 
 ### Product entry (local + CI)
 
 ```bash
 ./native/scripts/fetch-deps.sh
-cmake -S native -B native/build/macos-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build native/build/macos-arm64
-# cross-compiling: add -DCMAKE_TOOLCHAIN_FILE=native/cross/<file>.cmake
+cmake -S native -B native/build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build native/build/macos
 # thin wrapper (same path):
 ./native/scripts/build-macos.sh
 python3 ./native/scripts/audit_plugin.py --binary Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib --platform darwin --expected native/exports/expected-symbols.txt
 ```
+
+**Per-platform entry.** All three landed platforms build **natively on their own host**; only the generator differs. Windows uses CMake's Visual Studio generator because it locates MSVC by itself — no pre-`vcvars` step, and therefore no third-party action to set one up:
+
+| Target | Configure | Build |
+|--------|-----------|-------|
+| macOS universal | `-G Ninja -DCMAKE_BUILD_TYPE=Release` | `cmake --build <dir>` |
+| Linux x64 | `-G Ninja -DCMAKE_BUILD_TYPE=Release` | `cmake --build <dir>` |
+| Windows x64 | `-G "Visual Studio 17 2022" -A x64` (multi-config) | `cmake --build <dir> --config Release` |
+
+macOS needs no `-DCMAKE_OSX_ARCHITECTURES`: `native/CMakeLists.txt` defaults it to `arm64;x86_64`, so the universal artifact is what a plain configure produces.
+
+**`native/cross/` is empty, and honestly so.** This section has always described it as holding the CMake toolchain files, but nothing in the shipped matrix cross-compiles — each of the three desktop platforms builds on its own host. When Android lands it will use the **NDK's own** `build/cmake/android.toolchain.cmake`, not a file we write; iOS is the one target expected to need a toolchain file of ours. Until then the directory is a placeholder, and `-DCMAKE_TOOLCHAIN_FILE=` is a path this project has **never exercised** — see "Phased platforms" below, which prices that.
 
 | Rule | Detail |
 |------|--------|
 | **CMake is the only product entry** | `native/CMakeLists.txt` — same for local mac and CI; no “dev uses brew openssl .a + clang” product path |
 | **Sources in `subprojects/`** | `mbedtls` @ lock, `libdatachannel` @ lock — fetched by `fetch-deps.sh`, never committed |
 | **Staging + audit** | `POST_BUILD` custom commands on the plugin target; no shell shim in between |
-| **Platform mapping** | `CMAKE_SYSTEM_NAME` / `CMAKE_SYSTEM_PROCESSOR`, so it **follows the toolchain file**; `native/cross/` holds CMake toolchain files |
+| **Platform mapping** | `CMAKE_SYSTEM_NAME` / `CMAKE_SYSTEM_PROCESSOR`, so it **follows the toolchain file** if one is ever supplied; `native/cross/` is reserved for CMake toolchain files and is currently empty (above) |
 | **MbedTLS** | Built from **subprojects source** with `MBEDTLS_USER_CONFIG_FILE` → `MBEDTLS_SSL_DTLS_SRTP`; static `.a` only; injected as `MbedTLS::MbedTLS` into libdatachannel (**not** brew find_package) |
 | **libdatachannel** | `USE_MBEDTLS=ON`, `BUILD_SHARED_LIBS=OFF`, `NO_MEDIA/NO_WEBSOCKET`, hidden visibility |
-| **Exports** | `native/exports/*` allowlist (`dcu_*` only), checked against `expected-symbols.txt` (§11) |
-| **Install** | Single macOS `.bundle` per arch into UPM `Plugins/` |
+| **Exports** | `expected-symbols.txt` is the single hand-written list; the per-platform link-time files are **generated** from it (`gen_exports.py`) and git-ignored, so an ABI change is one file plus `DCU_ABI_VERSION` and cannot drift (§3, §11) |
+| **Install** | `stage_plugin.py` (POST_BUILD) stages one artifact per platform into UPM `Plugins/` — universal `.dylib`, `.dll`, `lib….so` (§8) |
+| **Generated alongside** | `gen_plugin_meta.py` writes the artifact's `.meta`, `gen_build_info.py` writes its build record into `Report~/` (§10) — same POST_BUILD chain, same Python-called-from-CMake shape |
 | **Scripts must be executable in git** | `git update-index --chmod=+x`; CI **asserts** this rather than running a fallback `chmod` (§11) |
 
 ### Why not Meson (this was reversed)
@@ -857,49 +896,133 @@ Verification of the switch: the produced binary was **byte-identical** to the pr
 | **Why SPEC preferred MbedTLS** | Larger static footprint; historically awkward mobile packaging | Smaller, common for static/mobile game plugins; LTS 3.6 |
 | **Product rule** | **Not used.** Forbidden as a system/brew dylib, and the static-vendored escape hatch was removed (#27 / #36) | **The product path**: vendored, static, with the DTLS-SRTP user config applied |
 
+### Tooling and declared floors
+
+**The post-build tools are Python, invoked from CMake `POST_BUILD`** — `stage_plugin.py`, `audit_plugin.py`, `gen_plugin_meta.py`, `gen_build_info.py`. A `cmake -P` script was chosen first and then reversed on measurement: in script mode CMake defines **none** of `CMAKE_NM` / `CMAKE_OBJDUMP` / `CMAKE_LINKER` — not even `CMAKE_SYSTEM_NAME` — because `CMakeFindBinUtils` runs at configure time inside `project()`. Its one remaining advantage over a shell script (immunity to CRLF and to the executable-bit trap on Windows) Python has too, with better text handling. Tool paths are passed in from CMake either way.
+
+Two constraints that came out of the same investigation and still hold:
+
+- **No `sed` / `grep` / `cut` in any build-time tool.** They do not exist on Windows runners; swapping bash's traps for coreutils' traps is not progress.
+- **Under MSVC, CMake exposes only `LINKER MT AR`** — no `NM`, no `dumpbin`. `dumpbin.exe` sits next to `link.exe`, so derive it from `CMAKE_LINKER`. This also disposes of "dumpbin is in the image but not on `PATH`".
+
+**Toolchain versions are pinned explicitly, not left to the runner default** ([#51](https://github.com/xuhuanhello/juice-c-sharp/issues/51)): Xcode via `xcode-select` (26.6, matching the development machine), MSVC via the `windows-2022` image rather than `windows-latest` (which now means VS 2026, where the generator name `Visual Studio 17 2022` does not resolve at all). A hosted mac runner cannot be locked the way a container can — Xcode does not install into a Linux image — so selecting the version explicitly is the only equivalent available, and without it GitHub rotating an image silently changes our deployment target and linker behaviour.
+
+**Declared Linux floor: Ubuntu 22.04 / glibc 2.35.** This is a **declaration, not a measurement** — there is no Docker build and no verified compatibility floor below it. It follows from `runs-on: ubuntu-22.04` being the oldest surviving Ubuntu label (`ubuntu-20.04` was retired), and it is **one notch above what Unity 2022.3 itself declares** (Ubuntu 20.04 / glibc 2.31), so adopters must be told rather than left to discover it on an old system. Carrying a whole Docker build path for a distribution that reached end of standard support in 2025-05 is not worth it; declaring the floor is the honest alternative.
+
+### iOS symbol narrowing (decided, not yet built)
+
+The static `.a` narrows its symbols in **one step**, `ld -r -exported_symbols_list`, not by renaming with a prefix:
+
+```
+ar x <archives>                    # explode to .o
+ld -r -arch <arch> -platform_version <plat> <min> <sdk> \
+   -exported_symbols_list <generated list> -o combined.o <all .o>
+ar crs libdatachannel_unity.a combined.o
+```
+
+Verified end-to-end on a real iPhoneOS SDK: non-allowlisted symbols go `T` → `t`, cross-object references stay intact (`nm -u` empty), the final link exits 0, and a second archive defining the same names links alongside without collision. Prefix renaming is deliberately **not** copied from the reference implementation that does it: that project exports `sqlite3_*`, which *must* collide with the system libsqlite3; we export `dcu_*`, which does not, and our upstream is ~195 sources plus MbedTLS's build-time code generation rather than a single-file amalgamation.
+
+The consequence worth keeping: after narrowing, `nm -g` on the archive really does show only `dcu_*`, so **the iOS export gate is not a vacuous assertion** — it is as strict as the other platforms'. One thing is left to measure when iOS actually produces an artifact: `ld -r` will also localise libc++'s weak symbols (vtables, typeinfo, template instantiations). Our boundary is pure C with no C++ types crossing it, so the expectation is a size cost rather than a correctness problem — expectation, not proof.
+
 ### Phased platforms
 
-Risk order: WebGL > iOS > Win arm64 > Android > macOS > Win x64.
+Desktop is done: **macOS universal, Windows x64 and Linux x64 are built by CI and landed** (§10). What is left, in risk order:
+
+| Remaining | Why it is where it is |
+|-----------|-----------------------|
+| **WebGL** | Out of scope for now (§16 and map [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46)): not one more toolchain but a different behaviour contract — it needs the datachannel-wasm C facade, and §8 records that the back-pressure guarantee is physically unavailable there |
+| **iOS arm64** | The cost is in `native/`, not in CI: `add_library(... SHARED ...)` is hard-coded, the staging step branches on `if(APPLE)` and would build a `.bundle` around a static library, the audit has no static-archive branch, and the `ld -r` narrowing above is designed but unbuilt. **Today the target produces no artifact at all** |
+| **Android arm64-v8a** | One question is genuinely open, so enabling it would decide it silently: Unity 2022.3's floor is API 22 while libjuice's `getifaddrs` needs API 24, and the runners' default NDK 27.3 needs explicit 16 KB page-alignment flags (Play requires them from 2025-11-01, prebuilt libraries included) |
+| ~~Windows arm64~~ | **Out of the matrix** — no ARM64 slot on 2022.3's Standalone Windows (§8) |
+
+The desktop three did not arrive by copying a template platform one after another; they came up **side by side in one matrix**, and the platform-specific differences converged into exactly three places: the artifact's name and shape (`stage_plugin.py`), the tools used to read symbols and dependencies (`audit_plugin.py`), and the shape of the dependency allowlist (paths on Mach-O, names on PE and ELF). Adding a mobile platform means one new branch in each of those three, plus its own open question above.
 
 ---
 
 ## 10. CI, LFS, and signing
 
-**Decisions:** [#13](https://github.com/xuhuanhello/juice-c-sharp/issues/13), [#20](https://github.com/xuhuanhello/juice-c-sharp/issues/20), workflow alignment [#36](https://github.com/xuhuanhello/juice-c-sharp/issues/36), first commit and LFS [#35](https://github.com/xuhuanhello/juice-c-sharp/issues/35)
+**Decisions:** [#13](https://github.com/xuhuanhello/juice-c-sharp/issues/13), [#20](https://github.com/xuhuanhello/juice-c-sharp/issues/20), workflow alignment [#36](https://github.com/xuhuanhello/juice-c-sharp/issues/36), first commit and LFS [#35](https://github.com/xuhuanhello/juice-c-sharp/issues/35); map [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46) — [#51](https://github.com/xuhuanhello/juice-c-sharp/issues/51), [#53](https://github.com/xuhuanhello/juice-c-sharp/issues/53), [#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54), [#65](https://github.com/xuhuanhello/juice-c-sharp/issues/65), [#68](https://github.com/xuhuanhello/juice-c-sharp/issues/68)
 
 ### Local vs CI
 
 | Role | Builds | Checks |
 |------|--------|--------|
-| **Local (default)** | **mac only** (`native/scripts/build-macos.sh` —— 单一 universal 产物) | Developer may run `audit_plugin.py` |
-| **CI** | **Full matrix** | Link audit (no system crypto dylibs), export allowlist (`dcu_*` only), script-executable-bit assertion, shell/Python syntax. **No Unity, therefore no C# tests** — §11 |
+| **Local (default)** | **mac only** (`native/scripts/build-macos.sh` — one universal artifact) | Developer may run `audit_plugin.py` |
+| **CI** | **Full matrix** | Link audit (no system crypto dylibs), export allowlist (`dcu_*` only), script-executable-bit assertion, `.meta` and support-table regeneration diff, shell/Python syntax. **No Unity, therefore no C# tests** — §11 |
 
 ### Rules the workflows must keep
 
 - **No dependency installation that contradicts §3/§9.** `brew install openssl@3` + `OPENSSL_ROOT` was removed: it directly conflicts with the fully static vendored MbedTLS product path, which means that job had in fact been broken.
-- **No fallback `chmod +x`.** Instead the workflow **asserts** the scripts are executable and, on failure, prints the correct fix (`git update-index --chmod=+x`). Deleting the fallback alone would only fix today; the assertion makes the same regression surface immediately next time (§11).
+- **No fallback `chmod +x`, and do not test the filesystem bit either.** The workflow asserts on **`git ls-files -s native/scripts/`** — every entry must be `100755` — and on failure prints the fix (`git update-index --chmod=+x`). Testing `-x` on disk is worse than useless on Windows: under Git Bash the bit is fabricated from the shebang when msys2 has no ACLs, so the assertion is **always true** and the exact regression it exists for passes green. The git index mode is the thing that was actually lost in [#35](https://github.com/xuhuanhello/juice-c-sharp/issues/35), and it reads identically on every runner.
+- **`defaults.run.shell: bash` on every job that runs shell.** Windows runners default to `pwsh`, where the assertion above is a *syntax error* — and an assertion that cannot run is **always false**, the same disease from the other side.
+- **CRLF is fixed in `.gitattributes`, not in the workflow.** Runner images carry a system-level `core.autocrlf=true` that `actions/checkout` does not override, which turns `set -o pipefail` into `invalid option name` and makes `versions.lock` parse as `v0.24.5\r`. A repository rule also protects local Windows developers; a job-level setting protects only CI.
 - **No Unity job, and the workflow says why in place.** A licensed Unity job was removed rather than left permanently skipped ([#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43), §11) — a job that will never be enabled is a gate-shaped thing that is not a gate. The comment left in its place exists so the next person does not reach for a licence again.
+- **Artifacts upload with their build record.** Uploading the binary alone leaves the maintainer holding no provenance, and a locally regenerated record has `ci: null`, which the landing gate below (correctly) rejects — so a CI artifact would be impossible to land. Both paths share the package root as their common ancestor, so the zip contains `Plugins/…` and `Report~/…` — exactly the shape it has to be unpacked into.
 
-### Plugin binaries and LFS
+### Landing binaries: in batches, not all at once
 
-Plugin binaries are **not** committed until the matrix produces all of them — a partial matrix (one platform of six) is worse than none. The `.gitattributes` LFS rules are nevertheless in place already, because retrofitting them later means rewriting history. They match **by path, not by extension**: the macOS artifact is an extensionless Mach-O inside a `.bundle` directory, which no extension-based template rule can catch.
+~~Plugin binaries are not committed until the matrix produces all of them — a partial matrix is worse than none.~~ **Overturned ([#53](https://github.com/xuhuanhello/juice-c-sharp/issues/53)): binaries land in batches.** Desktop (macOS universal, Windows x64, Linux x64) is the first batch and has landed; Android and iOS are the second.
+
+The original rule was not wrong for its context — it was written when **nobody knew which platforms would work**, and a partial matrix then meant an adopter discovering the gap as a `DllNotFoundException` on an end user's device. Two mechanisms have since removed that context, and both are load-bearing for the reversal:
+
+- **A build-time guard.** `PluginPlatformGuard` (`IPreprocessBuildWithReport`) **fails the build** when the target platform has no binary under `Plugins/`, naming the platform and pointing at the support table. Without it, batching would be using adopters as the detector: the default behaviour is a successful build followed by a `DllNotFoundException` on the user's device that is indistinguishable from "file missing" ([#49](https://github.com/xuhuanhello/juice-c-sharp/issues/49)).
+- **A support list that cannot lie.** Its authoritative source is **the contents of `Plugins/` itself**. Because a binary is only committed after that platform's on-device smoke passes, "is there a binary" and "was this platform verified" are the *same fact*, and the directory cannot go stale against itself. The human-readable table in the package README is **generated** from it by `gen_support_table.py` and diffed in CI — the same produce-and-verify-with-one-mechanism shape as the `.meta` generator (§11).
+
+**A batch may be committed when, and only when:** every platform in it is green in CI (build + exported-symbol diff + dependency allowlist); each has a **real-device Test Runner result XML** attached to its ticket (§11); and the `.meta` and support-table regeneration diffs are clean.
+
+**Those conditions are the whole trigger — there is no schedule.** The second batch lands when Android and iOS meet them, which means first settling the questions §9 records against each. A batch is not owed a release date.
+
+### LFS
+
+The `.gitattributes` LFS rules were in place before any binary landed, because retrofitting them means rewriting history. They match **by extension** — every artifact in the matrix is a single file. (They once had to match by path, plus an `Info.plist` exception, purely because the macOS `.bundle` was a directory holding an extensionless Mach-O; both special cases went away with the bundle, §8.)
+
+**Refresh policy: on release only, and do not strip.** A full-matrix refresh was measured at roughly **20 MB** ([#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54)) — five times smaller than the estimate that had made storage look like a constraint, so quota does not drive this. What does drive it is that every refresh is permanent history; tying refreshes to releases keeps that history meaningful. Stripping is declined for the opposite reason it is usually adopted: the size it would save is not needed, and symbols are what make a crash report from an adopter actionable.
+
+### Provenance: one build record per shipped binary
+
+Every landed binary has a JSON build record in **`Packages/datachannel-unity/Report~/`**, flat-named after the binary's directory — `macOS.json`, `Windows-x86_64.json`, `Linux-x86_64.json`.
+
+~~The build record sits in the same directory as the binary.~~ **Overturned ([#65](https://github.com/xuhuanhello/juice-c-sharp/issues/65)).** #54 justified the same directory by a use case that does not hold: **no adopter goes rummaging through `Plugins/` for a json file on a hunch.** The real path is a maintainer pointing at it, and the README saying where it is. So: **`Plugins/` holds binaries and their `.meta`, nothing else** (§8), and a pure build record — which no asset will ever reference — does not get a `.meta`, because minting a GUID is issuing an ID card to a non-asset.
+
+`~` makes Unity's asset database ignore the directory outright (the same mechanism as `Samples~`), so the records ship with the package without appearing in the Project window.
+
+**The unforgeable pairing survives the move intact.** The gate still derives the expected record from *the binary's own path*; only the derivation changed by one line. That derivation lives in exactly one place, `gen_plugin_meta.report_name`, shared by the writer (`gen_build_info.py`) and the reader (`gen_support_table.py --check`), so there is no second table for the two ends to disagree about. The record's file name also appears as a **`Build record` column in the generated support table** — for the same reason the platform rows are generated at all: a hand-written "where is the record for my platform" list is one more thing that goes stale on the day a platform lands and nobody remembers the README.
+
+**The adopter-facing path is part of the decision, not incidental documentation.** The package README states where `Report~/` ends up for each install method — `Library/PackageCache/com.xuhuanhello.datachannel@<hash>/Report~/` for a git URL — and asks for the matching record when reporting a bug against a binary. That sentence is the entire replacement for the use case #65 struck down.
+
+**Fields (`schema: 1`):** `schema`, `plugin`, `abi_version`, `platform`, `architectures`, `built_at`, `source.commit`, `upstream`, `toolchain`, `ci`.
+
+**The landing criterion is `ci != null` and `ci.event != pull_request`. There is no third condition.**
+
+- `ci: null` means a local build: no run URL, and its `source.commit` describes the checkout rather than what was compiled.
+- A `pull_request` run's commit is GitHub's synthetic merge ref, which stops existing once the PR merges — the binary would become untraceable. Land from a push-to-main run, or from `plugins-matrix.yml`.
+- **There is deliberately no `source.dirty` field, and that absence is the point** ([#68](https://github.com/xuhuanhello/juice-c-sharp/issues/68)). It existed briefly and was removed: a CI build *is* a fresh checkout of `source.commit`, so "was the working tree clean" is **constant across the entire population the gate ever reads** and carries no information. The question it appears to answer is answered directly by `ci`. It is written down here because it is the kind of field a reader looking at `ci: null` and `commit` will feel is missing and reinvent. (It was never part of #54's field list either — it arrived with the implementation, unargued, which is why removing it needs no strikethrough: there was no decision to overturn.)
+- **`dcu_build_info()` as an exported function stays rejected** (#54): it would change the ABI and destroy the byte-for-byte reproducibility check from [#27](https://github.com/xuhuanhello/juice-c-sharp/issues/27).
 
 ### PR vs release / LFS
 
 | Gate | Requirement |
 |------|-------------|
-| **PR** | **At least one mac build + audit** (automated) + the local checklist in `CONTRIBUTING.md` (not automated — §11) |
-| **Release / maintainer LFS commit** | **Full matrix green**; artifacts → maintainer commit to `Plugins/` + Git LFS |
+| **PR** | ~~At least one mac build + audit~~ → **one representative of each of the three toolchain shapes**: macOS (Mach-O / clang / `nm`+`otool`), Windows x64 (PE / MSVC / `dumpbin`), Linux x64 (ELF / gcc / `readelf`). Plus the local checklist in `CONTRIBUTING.md` (not automated — §11) |
+| **Release / maintainer LFS commit** | The landing conditions above, for every platform in the batch; artifacts → maintainer commit to `Plugins/` + `Report~/` + Git LFS |
 
-### GitHub Actions (spec-level matrix)
+**The PR criterion is new information, not platform count.** A change to `CMakeLists.txt` or `dcu.h` can perfectly well be green on macOS and red on Windows or Linux, and the full matrix only runs weekly — worst case is seven days broken with a pile of commits on top. Conversely a second platform of the *same* shape (Android is ELF like Linux, iOS is Mach-O like macOS) adds nearly nothing on a PR, so those stay in the full matrix.
 
-| Runner | Outputs |
-|--------|---------|
-| windows | `datachannel_unity.dll` x64; arm64 when runner/toolchain available |
-| macos | macOS thin **bundles** x64+arm64; iOS `.a` |
-| ubuntu or macos | Android `arm64-v8a` `.so`; WebGL `.a` + `webrtc.jslib` |
+### GitHub Actions (actual job shape)
 
-Workflow skeleton: `.github/workflows/pr.yml` (light), `.github/workflows/plugins-matrix.yml` (full; manual/schedule/release).
+In the **full matrix** (`.github/workflows/plugins-matrix.yml`) jobs are split **by host**, each with an internal `strategy.matrix` listing the targets it owns. Same-host targets then share their preparation steps (Xcode / apt / MSVC) and **not one `if:` is needed**; adding a target is adding a matrix row.
+
+| Job | `runs-on` | Targets today | Reserved for |
+|-----|-----------|---------------|--------------|
+| `macos` | `macos-26` (Xcode pinned to 26.6) | macOS universal | iOS arm64 |
+| `ubuntu` | `ubuntu-22.04` | Linux x64 | Android arm64-v8a |
+| `windows` | `windows-2022` | Windows x64 | — |
+
+`fail-fast: false` throughout, so one red platform does not hide the state of the others. It runs on dispatch, on a weekly schedule and on release, uploading artifacts for the maintainer to land; **it never pushes to `main` itself.**
+
+The **PR workflow** (`.github/workflows/pr.yml`) needs only one target per host, so it is a single `native` job matrixed over the three, plus a `static-checks` job (shell/Python syntax, `.meta` regeneration diff, support-table regeneration diff). It runs on every PR and every push to `main`. The two workflows will diverge in shape as mobile targets land — the full matrix grows rows, the PR workflow deliberately does not (see the criterion above).
+
+The two disabled platforms are documented **in the workflow, at the end, with the specific thing each is blocked on** rather than left as an optimistic commented-out row. That shape has bitten this repository before: `windows-exports.def` sat in the skeleton listing four deleted symbols and missing six live ones, precisely because nothing ever ran it.
 
 ### Signing
 
@@ -912,7 +1035,7 @@ Workflow skeleton: `.github/workflows/pr.yml` (light), `.github/workflows/plugin
 
 ## 11. Samples and testing
 
-**Decision:** [#14](https://github.com/xuhuanhello/juice-c-sharp/issues/14), [#39](https://github.com/xuhuanhello/juice-c-sharp/issues/39)
+**Decisions:** [#14](https://github.com/xuhuanhello/juice-c-sharp/issues/14), [#39](https://github.com/xuhuanhello/juice-c-sharp/issues/39); map [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46) — [#50](https://github.com/xuhuanhello/juice-c-sharp/issues/50), [#52](https://github.com/xuhuanhello/juice-c-sharp/issues/52), [#53](https://github.com/xuhuanhello/juice-c-sharp/issues/53)
 
 ### Sample (required)
 
@@ -931,8 +1054,9 @@ The dividing line is **"does it need Unity?"** Anything that does runs **locally
 | | Runs where |
 |--|-----------|
 | All three C# test tiers (below) | **Local Unity Editor** |
-| Native build, exported-symbol diff, crypto-dylib audit, script-executable-bit assertion | **CI** — `native-macos-arm64`, on every PR and push to `main` |
-| Shell / Python syntax checks | **CI** |
+| Per-platform on-device smoke, before that platform's binary lands | **Real device**, machine-judged (below) |
+| Native build, exported-symbol diff, dependency allowlist, script-executable-bit assertion | **CI** — one job per toolchain shape (macOS / Windows x64 / Linux x64), on every PR and push to `main` (§10) |
+| Shell / Python syntax, `.meta` regeneration diff, support-table regeneration diff | **CI** |
 
 **Unity tests must not be added to CI.** The reason is not cost or convenience: GitHub does not pass repository secrets to `pull_request` runs from a fork, but **repository variables are visible**. Enabling a licensed Unity job upstream therefore means every external contributor's PR starts the job, receives an empty licence, and turns red on something unrelated to their change and unfixable by them. (The converse worry — that a contributor could exfiltrate the maintainer's licence — does not arise for the same reason; that risk belongs to `pull_request_target`, which this repo does not use.)
 
@@ -1009,6 +1133,33 @@ It lives at `Assets/DataChannelUnity.Verification/Editor/` — the host project,
 
 **The probe records `EnterPlayModeOptions` before judging**, because that switch decides which of the two paths in §6 is under test — `DisableDomainReload` means entering play mode does *not* reload the domain, so that route exercises `SubsystemRegistration` and never touches `beforeAssemblyReload`. Without sampling the setting first, a green run does not tell you which path it proved.
 
+### Per-platform on-device smoke (gates landing, §10)
+
+CI can prove a binary builds, exports only `dcu_*` and links nothing forbidden. It cannot prove the binary **loads inside Unity** on that platform, because there is no Unity in CI ([#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43)) — and `.meta` mistakes surface only on a real device. So each platform's binary is committed only after one **real-device dual-peer smoke**.
+
+**It reuses the existing PlayMode suite; no new probe is written.** Build the `DataChannelUnity.Tests.Runtime` assembly into a Player via the Test Runner, run it on the device, and keep the **NUnit result XML**. That satisfies the rule above by construction: the evidence is a structured file, not a line read out of a Console — reading a log line is the same disease as `|| true`, in its fourth form. The suite-level teardown assertions (`dcu_shutdown()` → 0, `dcu_event_queue_depth()` → 0) come along for free, since they are already in the suite.
+
+**Zero tests run is a failure, not a pass** — it means the plugin did not load, which is exactly what this step exists to detect.
+
+The XML goes on the ticket for that platform; §10's landing conditions require one per platform in the batch. **Stated cost:** this drags the whole test assembly onto the target device.
+
+### The `.meta` files are generated, and that is also how they are checked
+
+Producing and verifying `.meta` are **one mechanism** ([#52](https://github.com/xuhuanhello/juice-c-sharp/issues/52)): `gen_plugin_meta.py` writes them, and CI re-runs it and diffs. It needs no Unity, so it can live in CI at all — which works out only because of what [#49](https://github.com/xuhuanhello/juice-c-sharp/issues/49) measured: the parts that are checkable as plain text are exactly the parts Unity itself never validates and fails **silently** on.
+
+GUIDs are read back from the existing file and preserved — a landed GUID cannot change.
+
+**One mechanism producing and checking has an inherent hole**: if the generator itself is wrong, its output and the repository agree forever and the gate is permanently green. That is closed by **golden samples** in `native/exports/plugin-meta-golden/` — bytes a real Editor (2022.3.62f3) actually wrote to disk, not our reading of the documentation. The generator's output must match them, so the source of truth is Unity's own output. This also disposes of the `serializedVersion` trap by construction (a `.meta` claiming `serializedVersion: 3` has its entire `platformData` silently dropped on 2022.3).
+
+**The samples must be re-collected from a real Editor when the Unity version changes** — never edited or renamed by hand, which would quietly turn them from an independent source of truth into a copy of the generator's output. The procedure is in `CONTRIBUTING.md`; it was exercised when macOS moved from `.bundle` to `.dylib` (§8) and the sample was re-collected rather than renamed.
+
+### Known gaps in the automated gates
+
+Stated explicitly, in the same spirit as the enum-insertion gap below — a gap that is written down is a decision; a gap that is merely absent is an accident waiting to be rediscovered.
+
+- **No dependency gate on the iOS static library** ([#50](https://github.com/xuhuanhello/juice-c-sharp/issues/50)). The dependency check reads a dynamic artifact's dependency table against a path-prefix allowlist. A `.a` has no dependency table; the only proxy is its undefined-symbol set (322 of them, measured), which drifts with compiler and optimisation level. High maintenance, low catch rate — so the gate is **not built**, and iOS is covered on exports only.
+- **The `.meta` checker cannot cover everything, and the split is not arbitrary.** What it does cover is what plain text can express — and that happens to be the class Unity never validates, where a mistake is silently ineffective. What it cannot cover is anything only a real Editor decides. This is why the on-device smoke above is a landing condition rather than a nicety: it is the only thing standing behind the other class.
+
 ### Upstream-upgrade gate
 
 Upgrading libdatachannel requires, in addition to the tiers above:
@@ -1067,6 +1218,8 @@ libdatachannel is **MPL-2.0** (use ≥ 0.18; avoid historical LGPL lines). datac
 6. New C ABI / C# files with **no** MPL code may use a separate license (e.g. MIT) as Larger Work; do not copy MPL code into them without keeping MPL.  
 7. Do not add EULA terms that strip MPL source rights.
 
+**The notices do not vary by platform.** Every platform links the same vendored set from the same pins (§3) — the artifact differs, the dependency set does not — so landing a new platform does not by itself change `ThirdPartyNotices.md`. Only a pin change does. Item 2's mapping is per binary, and each binary's exact source pins are recorded in its build record under `Report~/` (§10).
+
 *Informational research only — not legal advice.*
 
 ---
@@ -1086,16 +1239,19 @@ libdatachannel is **MPL-2.0** (use ≥ 0.18; avoid historical LGPL lines). datac
     datachannel-unity/      ← UPM package
       package.json
       Runtime/
-      Plugins/              ← LFS binaries
+      Editor/               ← build-time platform guard (§10)
+      Plugins/              ← LFS binaries + their .meta, nothing else (§8)
+      Report~/              ← one build record per shipped binary (§10)
       Samples~/
       Tests/                ← three test assemblies (§11)
   native/
     CMakeLists.txt          ← the only build entry
     versions.lock
-    cross/                  ← CMake toolchain files
+    cross/                  ← reserved for CMake toolchain files; empty today (§9)
     dcu/                    ← stable C ABI sources (include/ + src/)
-    exports/                ← per-platform allowlists + expected-symbols.txt
-    scripts/                ← fetch-deps, build wrappers, audit
+    exports/                ← expected-symbols.txt (the one hand-written list)
+                              + plugin-meta-golden/ (Editor-written .meta samples)
+    scripts/                ← fetch-deps, build wrappers, audit, generators
     subprojects/            ← pinned upstream checkouts (not committed)
   .github/workflows/        ← GHA
 ```
@@ -1114,8 +1270,8 @@ The scaffold, the CMake build, the desktop plugin and a first pass at the event 
 4. **Log bridge and credential path** (§7): bounded log queue, non-detaching level changes, structured `rtc::IceServer` assignment, one-directional initialization.
 5. **Lifecycle wiring** (§6): the five domain / play-mode / quit scenarios.
 6. **Tests** (§11): three assemblies, the required-contract list, the persistent domain-reload probe; delete `Assets/DataChannelVerify/`. *(The exported-symbol diff was pulled forward out of this step — it gates step 2, so it had to exist first, and it is already in place.)*
-7. Expand plugins: Android → iOS → Win arm64 → WebGL (+ jslib).
-8. `CONTRIBUTING.md` gates in force; GHA + LFS maintainer flow.
+7. Expand plugins. ~~Android → iOS → Win arm64 → WebGL (+ jslib)~~ — **the desktop batch (macOS universal, Windows x64, Linux x64) is built by CI and landed**; Win arm64 left the matrix (§8). What remains is Android and iOS as a second batch, each blocked on its own open question (§9), with WebGL after them if at all.
+8. `CONTRIBUTING.md` gates in force; GHA + LFS maintainer flow. **In force as of the desktop batch** — the workflows, the batch landing conditions and the build-time platform guard are all live (§10).
 9. ThirdPartyNotices + README (signaling ownership, signing, platforms).
 
 ---
@@ -1176,6 +1332,26 @@ The scaffold, the CMake build, the desktop plugin and a first pass at the event 
 | C API vs C++ API research | [#41](https://github.com/xuhuanhello/juice-c-sharp/issues/41) | §2 |
 | C API vs C++ API decision | [#42](https://github.com/xuhuanhello/juice-c-sharp/issues/42) | §2 |
 
+### Map [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46) — desktop platform matrix (CI output and LFS landing)
+
+| Topic | Issue | Section |
+|-------|-------|---------|
+| Symbol visibility and audit tooling across the matrix | [#47](https://github.com/xuhuanhello/juice-c-sharp/issues/47) | §3, §8, §9 |
+| CI runner and cross-compilation constraints | [#48](https://github.com/xuhuanhello/juice-c-sharp/issues/48) | §8, §9, §10 |
+| `PluginImporter` `.meta` format; checkable without Unity | [#49](https://github.com/xuhuanhello/juice-c-sharp/issues/49) | §8, §10, §11 |
+| One symbol list or many; criterion for static-library platforms | [#50](https://github.com/xuhuanhello/juice-c-sharp/issues/50) | §3, §9, §11 |
+| CI job shape; native vs cross split; declared Linux floor | [#51](https://github.com/xuhuanhello/juice-c-sharp/issues/51) | §9, §10 |
+| How `.meta` is produced and kept from being wrong | [#52](https://github.com/xuhuanhello/juice-c-sharp/issues/52) | §8, §11 |
+| Batch landing: threshold, verified-platform list, minimum smoke evidence | [#53](https://github.com/xuhuanhello/juice-c-sharp/issues/53) | §10, §11 |
+| LFS size, refresh cadence, binary provenance | [#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54) | §10 |
+| Windows x64 template built end to end; desktop batch landed; #10 partly overturned | [#55](https://github.com/xuhuanhello/juice-c-sharp/issues/55) | §8, §9, §10 |
+| Write these decisions back | [#56](https://github.com/xuhuanhello/juice-c-sharp/issues/56) | — |
+| Where the build record lives (overturns #54's "same directory") | [#65](https://github.com/xuhuanhello/juice-c-sharp/issues/65) | §8, §10 |
+| Landing the move into `Report~/` | [#66](https://github.com/xuhuanhello/juice-c-sharp/issues/66) | §10 |
+| `source.dirty` removed — constant over everything the gate reads | [#68](https://github.com/xuhuanhello/juice-c-sharp/issues/68) | §10 |
+
+Research notes from this map: `docs/research/platform-symbol-audit.md`, `platform-ci-toolchains.md`, `plugin-importer-meta.md`.
+
 ### After the maps closed
 
 | Topic | Issue | Section |
@@ -1196,6 +1372,7 @@ Not required to start implementation. Each is deliberately unspecified, with the
 | **Disconnecting when the app is backgrounded** | Product semantics, not lifecycle hygiene (§6) |
 | **Observability beyond `BufferedAmount`** | Queue depth, drop counts, per-frame stats all currently go to logs, which suffice for attribution. Exposing them for application network HUDs should be its own decision, not a rider on another one |
 | **Inbound rate limiting / malicious-peer defence** | §1 out of scope: the accepted weakness in §6 has its correct fix at a connection layer that can react per peer — a new mechanism, not a hardening of an existing one |
+| **Android's minimum API level** | Two floors disagree: Unity 2022.3 supports down to API 22, libjuice's `getifaddrs` needs API 24. Enabling the Android job before this is settled would decide it silently, so §9 lists the platform as blocked on it rather than phased in |
 | **HarmonyOS** | Waiting on Unity/tooling |
 | ~~Implementation milestones / PR slicing~~ | **Done** — [#44](https://github.com/xuhuanhello/juice-c-sharp/issues/44) slices §14 steps 2–3 into nine vertical cuts, each leaving the tree green |
 | Optional later | Selected-candidate-pair API, device farm CI, WebSocket bindings, FishNet transport mapping |

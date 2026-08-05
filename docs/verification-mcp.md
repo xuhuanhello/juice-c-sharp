@@ -1,7 +1,7 @@
 # DataChannel Unity — MCP self-verification checklist
 
 **Tickets:** [#21](https://github.com/xuhuanhello/juice-c-sharp/issues/21), revised by [#39](https://github.com/xuhuanhello/juice-c-sharp/issues/39)  
-**Maps:** [#16](https://github.com/xuhuanhello/juice-c-sharp/issues/16), [#26](https://github.com/xuhuanhello/juice-c-sharp/issues/26)  
+**Maps:** [#16](https://github.com/xuhuanhello/juice-c-sharp/issues/16), [#26](https://github.com/xuhuanhello/juice-c-sharp/issues/26), [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46)  
 **Purpose:** This is the **manual** — how verification is executed in this project with Unity MCP. *What* must be verified is [`docs/SPEC.md` §11](./SPEC.md); *when* it must be run is [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 **Prerequisite:** Unity Editor has this project open (`juice-c-sharp`) with MCP for Unity connected. If multiple editors are connected, select this instance (`set_active_instance` / `mcpforunity://instances`).
@@ -15,15 +15,15 @@
 >
 > So running this checklist after a rebuild, without restarting, **verifies the previous binary and reports a pass**. That is a false green of exactly the kind this project keeps getting caught by — it is indistinguishable from a real one in every field the checklist reads.
 >
-> `refresh_unity` does **not** help; neither does re-importing the `.bundle`.
+> `refresh_unity` does **not** help; neither does re-importing the plugin.
 >
 > **Cheap machine check** before trusting any result — the Editor must have started *after* the plugin was written:
 >
 > ```csharp
-> var bundle = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(),
->     "Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib/Contents/MacOS/datachannel_unity");
+> var plugin = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(),
+>     "Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib");
 > var editorStarted = System.DateTime.Now.AddSeconds(-UnityEditor.EditorApplication.timeSinceStartup);
-> return new { stale = editorStarted <= System.IO.File.GetLastWriteTime(bundle) };
+> return new { stale = editorStarted <= System.IO.File.GetLastWriteTime(plugin) };
 > ```
 >
 > `stale = true` ⇒ stop and restart the Editor. Do not interpret any step below.
@@ -39,12 +39,16 @@
 Run from repo root before Editor work:
 
 ```bash
-./native/scripts/audit-macos-plugin.sh \
-  Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib
+python3 native/scripts/audit_plugin.py \
+  --binary Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib \
+  --platform darwin \
+  --expected native/exports/expected-symbols.txt
 ```
 
-**Expect:** **exit code 0** — the exported symbols diff clean against `native/exports/expected-symbols.txt`, and no forbidden crypto dylibs.  
-**Expect `otool -L`:** only `@loader_path/…`, system `CoreFoundation` / `Security` / `libc++` / `libSystem` — no Homebrew openssl/mbedtls.
+**Expect:** **exit code 0** — the exported symbols diff clean against `native/exports/expected-symbols.txt`, and every dependency inside the allowlist.  
+**The dependency rule on macOS is a path-prefix allowlist** (`/System/Library/Frameworks/`, `/usr/lib/`, `@loader_path/…`) plus a crypto-name ban that applies even under those prefixes — `/usr/lib/libssl.dylib` genuinely exists, and a prefix rule alone would wave it through. Anything from `/opt/homebrew/` or `/usr/local/` is red.
+
+The same script covers the other two platforms with `--platform windows` (`dumpbin`, name allowlist) and `--platform linux` (`readelf`, name allowlist); the artifact paths are in SPEC §8.
 
 A diff failure means one of two things, and the script's output distinguishes them: a symbol was renamed or added deliberately (update the expectations file **in the same commit as the `DCU_ABI_VERSION` bump**), or upstream leaked a symbol through the allowlist.
 
@@ -194,6 +198,28 @@ The artifact separates the failure modes rather than just saying "not zero": a c
 **Reading a line out of the Console does not satisfy this step.** The probe must emit something assertable; otherwise this is the same disease as `|| true` (SPEC §11).
 
 > Step 3 calls `dcu_shutdown`, which tears the native library down — that is the point, it is the only way to ask "how many objects survived". The probe therefore calls `dcu_init()` again **after** reading the count, and you should leave that in place: `DataChannelRuntime` has no idea the library went away, its `_initAttempted` is still `true`, so `EnsureNative()` returns immediately and does **not** re-initialise. Measured consequence of getting this wrong: every subsequent `dcu_pc_create` in the session fails with `raw=-102`, taking 25 native-tier tests down with it.
+
+---
+
+## 8b. On-device smoke, before a platform's binary lands
+
+**Only needed when landing a new platform binary** (SPEC §10 / CONTRIBUTING). Everything above runs in the Editor on the development machine; this one runs the same PlayMode suite on the *target device*, because that is the only place a wrong `.meta` or a binary Unity refuses to load actually shows up.
+
+**Build the existing suite into a Player. Do not write a device-specific probe** — that would be a second thing to keep in step with the contracts.
+
+| Step | |
+|------|--|
+| 1 | Test Runner → PlayMode → **Run all tests (`<target platform>`)**, or headless: `Unity -runTests -testPlatform <Android\|iOS\|StandaloneWindows64\|StandaloneLinux64\|StandaloneOSX> -batchmode -projectPath . -testResults /tmp/smoke-<platform>.xml` |
+| 2 | Let it run **on the device**, not in the Editor |
+| 3 | Retrieve the NUnit result XML and attach it to that platform's ticket |
+
+**Expect:** every test passed, and — just as importantly — **a non-zero test count**. Zero tests run is a failure: it means the plugin did not load, which is the whole reason this step exists.
+
+The suite-level teardown assertions (step 9) come along for free, since they are part of the same assembly.
+
+**What does not count as evidence:** a screenshot, a Console line, or a description of what you saw. The result XML is the artifact; a manual step still has to be machine-judged (SPEC §11).
+
+**Reading a failure.** A `DllNotFoundException` on the device with everything green in CI points at the `.meta`, not the binary — check that `gen_plugin_meta.py --check` is clean and that the platform's entry in `PLATFORMS` matches what a real Editor writes (`native/exports/plugin-meta-golden/`).
 
 ---
 
