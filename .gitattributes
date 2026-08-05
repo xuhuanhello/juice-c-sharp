@@ -180,14 +180,27 @@ native/scripts/*.sh      text eol=lf
 native/scripts/*.py      text eol=lf
 native/versions.lock     text eol=lf
 
-# ---- datachannel-unity 原生插件 ----
-# 五个平台的产物**全都是单个文件**，所以按扩展名匹配就够了。
-# macOS 曾经发 .bundle（一个目录，里面是无扩展名的 Mach-O），那时必须按路径匹配，
-# 还要为里面的 Info.plist 再加一条例外 —— 两条特例随 .bundle 一起删掉了，
-# 理由见 native/scripts/stage_plugin.py 的 darwin 分支。
-# 注：桌面三平台（macOS / Windows x64 / Linux x64）的二进制已入库；移动两平台仍被
-# .gitignore 忽略，等它们各自那批达标后由维护者提交（分批入库见 SPEC §10）。
-# 规则在首个二进制入库之前就位，避免日后补 LFS 要改写历史。
-Packages/datachannel-unity/Plugins/**/*.dylib      filter=lfs diff=lfs merge=lfs -text
-# *.jslib 是 JS 文本，不进 LFS
+# ---- datachannel-unity 原生插件：**不进 LFS** ----
+# 上面的模板把 *.dll / *.so / *.a 都设成了 lfs。本包的插件二进制必须**逐条撤销**
+# 那些规则 —— 它们是采用者唯一的交付物，而 LFS 恰恰会毁掉唯一的交付路径。
+#
+# 实际发生过（v0.1.0 就是坏的）：UPM 用 git URL 装包时若 LFS 没能取到对象，
+# 会**静默**检出 132 字节的指针文本，Unity 读到它报
+# "expected x64 architecture, but was Unknown architecture"。
+# 无 error 无 warning，与「文件根本没构建出来」不可区分 —— 正是 CONTRIBUTING
+# 第一原则点名的病，只不过这次咬的是采用者而不是我们。
+#
+# LFS 存在的理由是仓库体积，而 #54 实测全矩阵一次刷新约 20 MB —— 这个量级上
+# 那个理由本就不成立，却拿它换掉了包能不能装。决策与理由见 SPEC §10。
+#
+# `-filter` 是**这里最关键的一个字**：上面的 `[attr]lfs` 宏展开成
+# `filter=lfs diff=lfs merge=lfs -text`，而 `binary` 宏只等于 `-diff -merge -text`
+# —— 它**碰不到 filter**。只写 `binary` 的话 *.dll / *.so 仍然走 LFS，
+# 而 *.dylib 会因为模板里没有这条而"看起来修好了"。三个平台表现不一致，
+# 恰恰是这个 bug 最初被误读成「只有 Windows 坏了」的原因。
+Packages/datachannel-unity/Plugins/**/*.dll        -filter binary
+Packages/datachannel-unity/Plugins/**/*.dylib      -filter binary
+Packages/datachannel-unity/Plugins/**/*.so         -filter binary
+Packages/datachannel-unity/Plugins/**/*.a          -filter binary
+# *.jslib 是 JS 文本，本来就不该进 LFS
 Packages/datachannel-unity/Plugins/**/*.jslib      text eol=lf

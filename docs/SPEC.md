@@ -26,7 +26,7 @@ This document consolidates all closed wayfinder decisions from the three maps ab
   - PeerConnection + DataChannel only (P2P data path)
 - Application-supplied **signaling transport** (SDP / ICE candidates) and **ICE server config** (STUN/TURN URLs)
 - **CMake-only** native build orchestrating upstream CMake projects (§9)
-- CI (GitHub Actions) producing plugins; maintainers commit via **Git LFS**
+- CI (GitHub Actions) producing plugins; maintainers commit the binaries into git (§10 — deliberately **not** LFS)
 
 ### Out of scope (v1)
 
@@ -817,7 +817,7 @@ Packages/datachannel-unity/
 
 - Explicit `.meta` for every plugin; do not rely on folder magic alone. Every `.meta` under `Plugins/` is **generated and diffed in CI** — see §10 and §11 for the mechanism and its limits.
 - **`Plugins/` holds binaries and their `.meta`, nothing else.** Build records live in `Report~/` (§10). A pure build record is not an asset, and minting a GUID for a file that nothing will ever reference is issuing an ID card to a non-asset.
-- Binaries in **Git LFS**; `.meta` in normal git. Every landed artifact is a single file, so the LFS rules match **by extension**; the path-matching rules and the `Info.plist` exception that the `.bundle` once required are gone with it.
+- **Binaries are committed directly to git, not through LFS** (§10 — LFS silently breaks the UPM git-URL install, which is this package's only delivery path). `.meta` files are ordinary git as well. Every landed artifact is a single file, so `.gitattributes` matches **by extension**; the path-matching rules and the `Info.plist` exception that the `.bundle` once required are gone with it.
 - Self-contained: crypto + backend deps **static-linked** into the plugin (see §3 linking rules).
 - **Linux's `lib` prefix is not cosmetic** — `libdatachannel_unity.so` is what `DllImport("datachannel_unity")` resolves to on ELF, and it is why the Linux artifact name differs from Windows' and macOS'.
 
@@ -941,7 +941,7 @@ The desktop three did not arrive by copying a template platform one after anothe
 
 ---
 
-## 10. CI, LFS, and signing
+## 10. CI, binary distribution, and signing
 
 **Decisions:** [#13](https://github.com/xuhuanhello/juice-c-sharp/issues/13), [#20](https://github.com/xuhuanhello/juice-c-sharp/issues/20), workflow alignment [#36](https://github.com/xuhuanhello/juice-c-sharp/issues/36), first commit and LFS [#35](https://github.com/xuhuanhello/juice-c-sharp/issues/35); map [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46) — [#51](https://github.com/xuhuanhello/juice-c-sharp/issues/51), [#53](https://github.com/xuhuanhello/juice-c-sharp/issues/53), [#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54), [#65](https://github.com/xuhuanhello/juice-c-sharp/issues/65), [#68](https://github.com/xuhuanhello/juice-c-sharp/issues/68)
 
@@ -974,9 +974,22 @@ The original rule was not wrong for its context — it was written when **nobody
 
 **Those conditions are the whole trigger — there is no schedule.** The second batch lands when Android and iOS meet them, which means first settling the questions §9 records against each. A batch is not owed a release date.
 
-### LFS
+### Plugin binaries are committed directly — **not** through Git LFS
 
-The `.gitattributes` LFS rules were in place before any binary landed, because retrofitting them means rewriting history. They match **by extension** — every artifact in the matrix is a single file. (They once had to match by path, plus an `Info.plist` exception, purely because the macOS `.bundle` was a directory holding an extensionless Mach-O; both special cases went away with the bundle, §8.)
+~~Plugin binaries are LFS-tracked; keeping them in LFS is what preserves the UPM git-URL install.~~ **Overturned ([#73](https://github.com/xuhuanhello/juice-c-sharp/issues/73)), and the reason is the exact inverse of the original one: LFS is what *breaks* the git-URL install.**
+
+What happens is silent by construction. UPM clones the repository; if the Git LFS objects are not fetched — the client is missing, credentials are missing, or the `?path=` subfolder form defeats the `.gitattributes` lookup — it checks out the **pointer files**, a 132-byte text stub, with no error and no warning. Unity then loads that stub and reports `expected x64 architecture, but was Unknown architecture`. **v0.1.0 shipped this way on all three platforms**, and every gate was green while it did.
+
+The original argument for LFS was repository size. [#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54) measured a full-matrix refresh at ~20 MB, which is precisely the measurement that makes the argument collapse: LFS was buying a size saving that does not matter, at the price of the package's only delivery path. Unity's own documentation now advises against putting a package's essential assets under LFS.
+
+Committing the bytes directly is also **verifiable here**, which the alternative is not: a clone with `GIT_LFS_SKIP_SMUDGE=1` yields real binaries, so the result cannot depend on any LFS behaviour at all. The rejected alternative — a second `.gitattributes` at the package root, which Unity documents as the supported location for `?path=` installs — leaves correctness resting on the adopter's LFS client, credentials and clone depth, each failing the same silent way.
+
+Two consequences worth stating:
+
+- **`-filter` is the operative attribute.** Unity's `.gitattributes` template routes `*.dll` / `*.so` / `*.a` through an `[attr]lfs` macro that expands to `filter=lfs diff=lfs merge=lfs -text`. The `binary` macro is only `-diff -merge -text` and **does not touch `filter`**. Marking the plugin paths `binary` alone leaves `.dll` and `.so` in LFS while `.dylib` — absent from the template — appears fixed. That asymmetry is why this first read as "only Windows is broken".
+- **A gate now asserts what git stores**, not what is on disk: every landed binary's blob must begin with the right magic (`MZ`, `\x7fELF`, Mach-O, `!<arch>`). Nothing else could have caught this — every other check reads the working tree, where the developer's smudge filter has already substituted the real bytes, and the audit inspects a freshly built artifact rather than the landed one. It asserts what the artifact **is** rather than how the filter is configured, because an attribute check would pass on an empty file or a truncated one.
+
+History keeps the old LFS objects; nothing is rewritten. New commits simply store the bytes.
 
 **Refresh policy: on release only, and do not strip.** A full-matrix refresh was measured at roughly **20 MB** ([#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54)) — five times smaller than the estimate that had made storage look like a constraint, so quota does not drive this. What does drive it is that every refresh is permanent history; tying refreshes to releases keeps that history meaningful. Stripping is declined for the opposite reason it is usually adopted: the size it would save is not needed, and symbols are what make a crash report from an adopter actionable.
 
@@ -1001,12 +1014,12 @@ Every landed binary has a JSON build record in **`Packages/datachannel-unity/Rep
 - **There is deliberately no `source.dirty` field, and that absence is the point** ([#68](https://github.com/xuhuanhello/juice-c-sharp/issues/68)). It existed briefly and was removed: a CI build *is* a fresh checkout of `source.commit`, so "was the working tree clean" is **constant across the entire population the gate ever reads** and carries no information. The question it appears to answer is answered directly by `ci`. It is written down here because it is the kind of field a reader looking at `ci: null` and `commit` will feel is missing and reinvent. (It was never part of #54's field list either — it arrived with the implementation, unargued, which is why removing it needs no strikethrough: there was no decision to overturn.)
 - **`dcu_build_info()` as an exported function stays rejected** (#54): it would change the ABI and destroy the byte-for-byte reproducibility check from [#27](https://github.com/xuhuanhello/juice-c-sharp/issues/27).
 
-### PR vs release / LFS
+### PR vs release
 
 | Gate | Requirement |
 |------|-------------|
 | **PR** | ~~At least one mac build + audit~~ → **one representative of each of the three toolchain shapes**: macOS (Mach-O / clang / `nm`+`otool`), Windows x64 (PE / MSVC / `dumpbin`), Linux x64 (ELF / gcc / `readelf`). Plus the local checklist in `CONTRIBUTING.md` (not automated — §11) |
-| **Release / maintainer LFS commit** | The landing conditions above, for every platform in the batch; artifacts → maintainer commit to `Plugins/` + `Report~/` + Git LFS |
+| **Release / maintainer binary commit** | The landing conditions above, for every platform in the batch; artifacts → maintainer commit to `Plugins/` + `Report~/` (plain git, no LFS) |
 
 **The PR criterion is new information, not platform count.** A change to `CMakeLists.txt` or `dcu.h` can perfectly well be green on macOS and red on Windows or Linux, and the full matrix only runs weekly — worst case is seven days broken with a pile of commits on top. Conversely a second platform of the *same* shape (Android is ELF like Linux, iOS is Mach-O like macOS) adds nearly nothing on a PR, so those stay in the full matrix.
 
@@ -1243,7 +1256,7 @@ libdatachannel is **MPL-2.0** (use ≥ 0.18; avoid historical LGPL lines). datac
       CHANGELOG.md          ← release history; §3's pin-bump gate names it
       Runtime/
       Editor/               ← build-time platform guard (§10)
-      Plugins/              ← LFS binaries + their .meta, nothing else (§8)
+      Plugins/              ← binaries + their .meta, nothing else (§8; not LFS)
       Report~/              ← one build record per shipped binary (§10)
       Samples~/
       Tests/                ← three test assemblies (§11)
@@ -1274,7 +1287,7 @@ The scaffold, the CMake build, the desktop plugin and a first pass at the event 
 5. **Lifecycle wiring** (§6): the five domain / play-mode / quit scenarios.
 6. **Tests** (§11): three assemblies, the required-contract list, the persistent domain-reload probe; delete `Assets/DataChannelVerify/`. *(The exported-symbol diff was pulled forward out of this step — it gates step 2, so it had to exist first, and it is already in place.)*
 7. Expand plugins. ~~Android → iOS → Win arm64 → WebGL (+ jslib)~~ — **the desktop batch (macOS universal, Windows x64, Linux x64) is built by CI and landed**; Win arm64 left the matrix (§8). What remains is Android and iOS as a second batch, each blocked on its own open question (§9), with WebGL after them if at all.
-8. `CONTRIBUTING.md` gates in force; GHA + LFS maintainer flow. **In force as of the desktop batch** — the workflows, the batch landing conditions and the build-time platform guard are all live (§10).
+8. `CONTRIBUTING.md` gates in force; GHA + the maintainer landing flow. **In force as of the desktop batch** — the workflows, the batch landing conditions and the build-time platform guard are all live (§10).
 9. ThirdPartyNotices + README (signaling ownership, signing, platforms).
 
 ---
@@ -1360,6 +1373,7 @@ Research notes from this map: `docs/research/platform-symbol-audit.md`, `platfor
 | Topic | Issue | Section |
 |-------|-------|---------|
 | Unity tests do not run in CI (supersedes part of #39) | [#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43) | §10, §11 |
+| Plugin binaries out of Git LFS — LFS silently broke the git-URL install (overturns map #46's distribution premise) | [#73](https://github.com/xuhuanhello/juice-c-sharp/issues/73) | §8, §10 |
 
 ---
 

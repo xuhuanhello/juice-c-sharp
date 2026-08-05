@@ -114,6 +114,79 @@ def is_landed(rel: str, tracked: set[str]) -> bool:
     return rel in tracked or any(t.startswith(rel + "/") for t in tracked)
 
 
+# What a real artifact starts with, keyed by the extension git actually stores.
+# A Git LFS pointer is ASCII text beginning "version https://git-lfs...", so any
+# of these magics is enough to tell the two apart.
+BINARY_MAGIC = {
+    ".dll": (b"MZ",),                       # PE
+    ".so": (b"\x7fELF",),                   # ELF
+    ".dylib": (b"\xcf\xfa\xed\xfe",         # Mach-O 64 LE (thin)
+               b"\xca\xfe\xba\xbe",         # universal (fat), big-endian magic
+               b"\xbe\xba\xfe\xca"),        # universal, byte-swapped
+    ".a": (b"!<arch>",),                    # ar archive
+}
+
+LFS_POINTER_PREFIX = b"version https://git-lfs"
+
+
+def check_binary_blobs(repo_root: Path, plugin_root: Path, landed: list[str]) -> list[str]:
+    """Every landed binary must be a **real binary in git**, not an LFS pointer.
+
+    This gate exists because the failure it catches actually shipped. v0.1.0's
+    binaries were tracked, audited, `.meta`-checked and listed in the support
+    table -- and every one of them was a 132-byte text file in git, because the
+    repository-root `.gitattributes` routed `*.dll` / `*.so` through Git LFS.
+    Installing the package from a Git URL got the pointer, and Unity reported
+    "expected x64 architecture, but was Unknown architecture".
+
+    Nothing else here could have seen it. Every other check reads the file **on
+    disk**, where a developer's LFS smudge filter has already replaced the
+    pointer with the real bytes; the audit even passes, because it audits a
+    freshly built artifact rather than the landed one. The only place the truth
+    lives is the blob git stores, so that is what this reads -- via `git show`,
+    never the working tree.
+
+    Deliberately a positive assertion about the content, not "is the filter
+    attribute unset": an attribute check would pass on an empty file, a
+    truncated one, or a `.dll` that is secretly a shell script. Assert what the
+    artifact **is**, not how it was configured.
+    """
+    problems = []
+    for rel in landed:
+        path = (plugin_root / rel)
+        suffix = path.suffix.lower()
+        magics = BINARY_MAGIC.get(suffix)
+        if magics is None:
+            problems.append(
+                f"  {rel}: no magic number is known for '{suffix}'. Add one to "
+                "BINARY_MAGIC -- an unknown extension must not silently skip this gate.")
+            continue
+        git_path = path.resolve().relative_to(repo_root.resolve()).as_posix()
+        proc = subprocess.run(["git", "-C", str(repo_root), "show", f"HEAD:{git_path}"],
+                              capture_output=True)
+        if proc.returncode != 0:
+            problems.append(f"  {rel}: cannot read the blob git stores "
+                            f"({proc.stderr.decode('utf-8', 'replace').strip()})")
+            continue
+        head = proc.stdout[:8]
+        if any(head.startswith(m) for m in magics):
+            continue
+        if proc.stdout.startswith(LFS_POINTER_PREFIX):
+            problems.append(
+                f"  {rel}: git stores a **Git LFS pointer**, not the binary.\n"
+                "      An adopter installing from a Git URL receives that text file, and\n"
+                "      Unity reports 'Unknown architecture' -- this is exactly how v0.1.0\n"
+                "      shipped broken. Plugin binaries must not be LFS-tracked (SPEC §10).\n"
+                "      Fix: check `.gitattributes` really unsets the filter for this path\n"
+                "      (`-filter`; the `binary` macro alone does NOT), then re-add the file:\n"
+                f"        git rm --cached {git_path} && git add {git_path}")
+        else:
+            problems.append(
+                f"  {rel}: git stores something that is not a {suffix} "
+                f"(first bytes: {head!r}).")
+    return problems
+
+
 def check_build_info(tracked_reports: set[str], landed: list[str],
                      report_root: Path) -> list[str]:
     """Every landed binary needs a CI-produced provenance file in `Report~/`."""
@@ -205,6 +278,12 @@ def main() -> int:
 
     tracked = tracked_files(args.repo_root, args.plugin_root)
     landed = [rel for rel in PLATFORMS if is_landed(rel, tracked)]
+
+    problems = check_binary_blobs(args.repo_root, args.plugin_root, landed)
+    if problems:
+        raise SupportTableError(
+            "Landed artifacts that are not the binary they claim to be:\n"
+            + "\n".join(problems))
 
     problems = check_build_info(tracked_files(args.repo_root, args.report_root),
                                 landed, args.report_root)

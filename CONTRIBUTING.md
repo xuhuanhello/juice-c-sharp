@@ -57,7 +57,9 @@ Evidence for the rule, from this project: two reference bindings' connectivity t
 
 Binaries land **in batches**, not all at once (SPEC §10). Desktop — macOS universal, Windows x64, Linux x64 — has landed; Android and iOS are the second batch.
 
-Before committing any batch to `Plugins/` + `Report~/` + Git LFS, all of this must be true:
+Binaries go into `Plugins/` as **ordinary git objects — never Git LFS** (SPEC §10: an LFS-tracked plugin reaches adopters as a 132-byte pointer file, silently, and that is how v0.1.0 shipped broken).
+
+Before committing any batch to `Plugins/` + `Report~/`, all of this must be true:
 
 1. **CI green for every platform in the batch** — build, exported-symbol diff, dependency allowlist. Take the artifacts from a `push`-to-`main` run or from `plugins-matrix.yml`.
 2. **A real-device smoke result for every platform in the batch**, and the result XML attached to that platform's ticket. See below.
