@@ -9,6 +9,8 @@ datachannel-wasm=v0.4.0
 # 注：上游同时存在 v3.6.7 与 mbedtls-3.6.7 两个附注标签，指向同一 commit 068ff080。
 mbedtls=v3.6.7
 crypto=mbedtls-3.6.7-static-subproject
+# 这里**不再记 dcu_abi**：它曾写着 1，而 dcu.h 里的 DCU_ABI_VERSION 早在 S1 就是 2，
+# 且没有任何代码读过这个键 —— 一个已经烂掉的重复真相源。ABI 版本只有 dcu.h 一处，
+# build-info.json 从那里取（#54 / #55 E 节）。
 unity_min=2022.3
 emscripten_unity=3.1.8-unity
-dcu_abi=1

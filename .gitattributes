@@ -181,14 +181,12 @@ native/scripts/*.py      text eol=lf
 native/versions.lock     text eol=lf
 
 # ---- datachannel-unity 原生插件 ----
-# macOS 的产物是 .bundle 里**无扩展名**的 Mach-O，上面按扩展名匹配的规则
-# （*.a / *.so / *.dll）一条都套不上，必须按路径匹配。
+# 六个平台的产物**全都是单个文件**，所以按扩展名匹配就够了。
+# macOS 曾经发 .bundle（一个目录，里面是无扩展名的 Mach-O），那时必须按路径匹配，
+# 还要为里面的 Info.plist 再加一条例外 —— 两条特例随 .bundle 一起删掉了，
+# 理由见 native/scripts/stage_plugin.py 的 darwin 分支。
 # 注：这些产物目前仍被 .gitignore 忽略（#35 决定首次提交不含二进制，
 # 待平台矩阵补齐后由维护者提交）。规则先就位，避免日后补 LFS 要改写历史。
-Packages/datachannel-unity/Plugins/**/*.bundle/**  filter=lfs diff=lfs merge=lfs -text
 Packages/datachannel-unity/Plugins/**/*.dylib      filter=lfs diff=lfs merge=lfs -text
 # *.jslib 是 JS 文本，不进 LFS
 Packages/datachannel-unity/Plugins/**/*.jslib      text eol=lf
-# .bundle 里的 Info.plist 是文本，上面那条按路径匹配的规则会把它一起吸进 LFS。
-# 进 LFS 不算错，但没意义且 diff 不可读 —— 单独放行。
-Packages/datachannel-unity/Plugins/**/*.bundle/**/*.plist  text eol=lf -filter -diff -merge

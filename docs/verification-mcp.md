@@ -21,14 +21,14 @@
 >
 > ```csharp
 > var bundle = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(),
->     "Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle/Contents/MacOS/datachannel_unity");
+>     "Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib/Contents/MacOS/datachannel_unity");
 > var editorStarted = System.DateTime.Now.AddSeconds(-UnityEditor.EditorApplication.timeSinceStartup);
 > return new { stale = editorStarted <= System.IO.File.GetLastWriteTime(bundle) };
 > ```
 >
 > `stale = true` ⇒ stop and restart the Editor. Do not interpret any step below.
 
-**Native product path:** `Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle` (built via **CMake** — see `docs/SPEC.md` §9).
+**Native product path:** `Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib` (built via **CMake** — see `docs/SPEC.md` §9).
 
 > **No literal expected numbers in this file.** Export counts, test counts and the ABI version live where they get checked — `native/exports/expected-symbols.txt` and `dcu.h` — not in prose that nobody runs. See §11 of the SPEC for why.
 
@@ -40,7 +40,7 @@ Run from repo root before Editor work:
 
 ```bash
 ./native/scripts/audit-macos-plugin.sh \
-  Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle
+  Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib
 ```
 
 **Expect:** **exit code 0** — the exported symbols diff clean against `native/exports/expected-symbols.txt`, and no forbidden crypto dylibs.  

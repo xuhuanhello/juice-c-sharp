@@ -129,7 +129,7 @@ The native and WebGL backends share the `dcu_*` surface and the ICE-configuratio
 | No device crypto drift | Post-build audit: `otool -L` / `ldd` / `dumpbin` must not list openssl/mbedtls from `/opt/homebrew`, `/usr/local`, or vcpkg shared trees |
 | Export surface | **Only `dcu_*`** (Apple: `native/exports/macos-exported-symbols.txt`; ELF: `linux-version-script.map`; Windows: `windows-exports.def`) |
 | Compile | `-fvisibility=hidden` (+ inlines hidden) on wrapper and deps where possible |
-| macOS product | **One** artifact per arch: `datachannel_unity.bundle` only — **no** side-by-side `.dylib` |
+| macOS product | **One** artifact per arch: `datachannel_unity.dylib` only — **no** side-by-side `.dylib` |
 
 **Decisions:** [#17](https://github.com/xuhuanhello/juice-c-sharp/issues/17), [#18](https://github.com/xuhuanhello/juice-c-sharp/issues/18), [#19](https://github.com/xuhuanhello/juice-c-sharp/issues/19)
 
@@ -765,8 +765,8 @@ Packages/datachannel-unity/
       x86_64/datachannel_unity.dll
       ARM64/datachannel_unity.dll
     macOS/
-      x64/datachannel_unity.bundle/
-      arm64/datachannel_unity.bundle/
+      x64/datachannel_unity.dylib
+      arm64/datachannel_unity.dylib
     Android/
       arm64-v8a/libdatachannel_unity.so    # no libs/ segment
     iOS/
@@ -823,7 +823,7 @@ cmake --build native/build/macos-arm64
 # cross-compiling: add -DCMAKE_TOOLCHAIN_FILE=native/cross/<file>.cmake
 # thin wrapper (same path):
 ./native/scripts/build-macos.sh
-python3 ./native/scripts/audit_plugin.py --binary Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle --platform darwin --expected native/exports/expected-symbols.txt
+python3 ./native/scripts/audit_plugin.py --binary Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib --platform darwin --expected native/exports/expected-symbols.txt
 ```
 
 | Rule | Detail |

@@ -198,6 +198,29 @@ if(DCU_STAGE_PLUGIN)
     VERBATIM
   )
 
+  # 溯源信息：与二进制同目录，随它一起入库（#54）。
+  # 采用者手里只有一个包目录，没有 git 历史也没有 CI 日志 —— 报 bug 时要能反查
+  # 这份二进制的来历，靠的就是它。刻意不做成 dcu_build_info() 导出：那会动 ABI，
+  # 且让二进制内容每次构建都变，毁掉 #27 赖以验证 Meson→CMake 迁移的字节可复现性。
+  add_custom_command(TARGET datachannel_unity POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}"
+            "${NATIVE_ROOT}/scripts/gen_build_info.py"
+            --out       "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/build-info.json"
+            --repo-root "${NATIVE_ROOT}/.."
+            --header    "${DCU_SRC}/include/dcu.h"
+            --lock      "${NATIVE_ROOT}/versions.lock"
+            --platform  "$<IF:$<BOOL:${APPLE}>,darwin,$<IF:$<BOOL:${WIN32}>,windows,linux>>"
+            --architectures     "${CMAKE_OSX_ARCHITECTURES}"
+            --target-system     "${CMAKE_SYSTEM_NAME}"
+            --target-processor  "${CMAKE_SYSTEM_PROCESSOR}"
+            --compiler-id       "${CMAKE_CXX_COMPILER_ID}"
+            --compiler-version  "${CMAKE_CXX_COMPILER_VERSION}"
+            --deployment-target "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+            --cmake-version     "${CMAKE_VERSION}"
+    COMMENT "Writing build-info.json"
+    VERBATIM
+  )
+
   # 离线门禁：暂存之后无条件跑，三个平台一视同仁。
   # 与暂存拆成两条命令，是因为门禁需要 CMake 才知道的工具路径；从 stage_plugin.py
   # 透传只会多一层。SPEC §9 写的就是「staging + audit 都是 POST_BUILD 自定义命令，
@@ -208,7 +231,7 @@ if(DCU_STAGE_PLUGIN)
   add_custom_command(TARGET datachannel_unity POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"
             "${NATIVE_ROOT}/scripts/audit_plugin.py"
-            --binary   "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/$<IF:$<BOOL:${APPLE}>,datachannel_unity.bundle,$<IF:$<BOOL:${WIN32}>,datachannel_unity.dll,libdatachannel_unity.so>>"
+            --binary   "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/$<IF:$<BOOL:${APPLE}>,datachannel_unity.dylib,$<IF:$<BOOL:${WIN32}>,datachannel_unity.dll,libdatachannel_unity.so>>"
             --platform "$<IF:$<BOOL:${APPLE}>,darwin,$<IF:$<BOOL:${WIN32}>,windows,linux>>"
             --expected "${DCU_EXPECTED_SYMBOLS}"
             --nm       "${CMAKE_NM}"
