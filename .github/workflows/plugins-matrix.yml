@@ -33,6 +33,7 @@ jobs:
           - name: macOS universal
             platform: darwin
             artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib
+            build_info_path: Packages/datachannel-unity/Plugins/macOS/build-info.json
     steps:
       - uses: actions/checkout@v4
 
@@ -70,10 +71,16 @@ jobs:
             --platform ${{ matrix.platform }} \
             --expected native/exports/expected-symbols.txt
 
+      # 产物**与它的 build-info.json 一起**上传。只传二进制的话，维护者下载后
+      # 手里没有溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py 的
+      # 门禁（正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
       - uses: actions/upload-artifact@v4
         with:
           name: datachannel_unity-${{ matrix.platform }}
-          path: ${{ matrix.artifact_path }}
+          path: |
+            ${{ matrix.artifact_path }}
+            ${{ matrix.build_info_path }}
+          if-no-files-found: error
 
   ubuntu:
     name: ${{ matrix.name }}
@@ -88,6 +95,7 @@ jobs:
           - name: Linux x64
             platform: linux
             artifact_path: Packages/datachannel-unity/Plugins/Linux/x86_64/libdatachannel_unity.so
+            build_info_path: Packages/datachannel-unity/Plugins/Linux/x86_64/build-info.json
     steps:
       - uses: actions/checkout@v4
 
@@ -117,10 +125,16 @@ jobs:
             --platform ${{ matrix.platform }} \
             --expected native/exports/expected-symbols.txt
 
+      # 产物**与它的 build-info.json 一起**上传。只传二进制的话，维护者下载后
+      # 手里没有溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py 的
+      # 门禁（正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
       - uses: actions/upload-artifact@v4
         with:
           name: datachannel_unity-${{ matrix.platform }}
-          path: ${{ matrix.artifact_path }}
+          path: |
+            ${{ matrix.artifact_path }}
+            ${{ matrix.build_info_path }}
+          if-no-files-found: error
 
   windows:
     name: ${{ matrix.name }}
@@ -136,6 +150,7 @@ jobs:
           - name: Windows x64
             platform: windows
             artifact_path: Packages/datachannel-unity/Plugins/Windows/x86_64/datachannel_unity.dll
+            build_info_path: Packages/datachannel-unity/Plugins/Windows/x86_64/build-info.json
     steps:
       - uses: actions/checkout@v4
 
@@ -164,10 +179,16 @@ jobs:
             --platform ${{ matrix.platform }} \
             --expected native/exports/expected-symbols.txt
 
+      # 产物**与它的 build-info.json 一起**上传。只传二进制的话，维护者下载后
+      # 手里没有溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py 的
+      # 门禁（正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
       - uses: actions/upload-artifact@v4
         with:
           name: datachannel_unity-${{ matrix.platform }}
-          path: ${{ matrix.artifact_path }}
+          path: |
+            ${{ matrix.artifact_path }}
+            ${{ matrix.build_info_path }}
+          if-no-files-found: error
 
 # ────────────────────────────────────────────────────────────────────────────
 # 移动两平台**尚未启用**，各自卡在一件具体的事上。把原因写清楚而不是留一行
