@@ -1,0 +1,38 @@
+{
+  "abi_version": 2,
+  "architectures": [
+    "arm64",
+    "x86_64"
+  ],
+  "built_at": "2026-08-05T03:26:52+00:00",
+  "ci": {
+    "event": "workflow_dispatch",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "30972175512",
+    "run_url": "https://github.com/xuhuanhello/juice-c-sharp/actions/runs/30972175512",
+    "workflow": "Plugins matrix"
+  },
+  "platform": "darwin",
+  "plugin": "datachannel_unity",
+  "schema": 1,
+  "source": {
+    "commit": "8cf54c60a957194c24d5f2ce2c0c4f004cd017d1",
+    "dirty": false
+  },
+  "toolchain": {
+    "cmake": "4.4.0",
+    "compiler_id": "AppleClang",
+    "compiler_version": "21.0.0.21000101",
+    "deployment_target": null,
+    "target_system": "Darwin"
+  },
+  "upstream": {
+    "crypto": "mbedtls-3.6.7-static-subproject",
+    "datachannel-wasm": "v0.4.0",
+    "emscripten_unity": "3.1.8-unity",
+    "libdatachannel": "v0.24.5",
+    "mbedtls": "v3.6.7",
+    "unity_min": "2022.3"
+  }
+}

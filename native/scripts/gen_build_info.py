@@ -165,8 +165,11 @@ def main() -> int:
     }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    # newline="\n": on Windows, text mode would translate "\n" to "\r\n", so the
+    # artifact and the repo copy would differ byte-for-byte (git normalises on
+    # commit, hiding it). Landing the desktop batch is where that showed up.
     args.out.write_text(json.dumps(info, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-                        encoding="utf-8")
+                        encoding="utf-8", newline="\n")
     where = "CI" if info["ci"] else "local"
     dirty = " (dirty worktree)" if info["source"]["dirty"] else ""
     print(f"build-info: {args.platform} {'/'.join(info['architectures'])} "
