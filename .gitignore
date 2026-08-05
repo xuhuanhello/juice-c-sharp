@@ -117,6 +117,11 @@ InitTestScene*.unity*
 # R3.Unity.asmdef 按名字硬引用 R3.dll / Microsoft.Bcl.AsyncInterfaces，
 # 排除它会让新 clone 编译不过（仅 2MB）。
 
+# 编辑器本地配置。.vscode/settings.json 由 Unity 的 VSCode 集成自动生成，
+# 忽略后本地会自动重建。launch.json / extensions.json 也一并不入库 ——
+# 它们是各人的环境偏好，不是项目的一部分。
+.vscode/
+
 # datachannel-unity native
 native/build/
 
