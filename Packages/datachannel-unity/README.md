@@ -41,10 +41,10 @@ text editor.
 Add to `Packages/manifest.json` — **pin a tag**:
 
 ```json
-"com.xuhuanhello.datachannel": "https://github.com/xuhuanhello/juice-c-sharp.git?path=Packages/datachannel-unity#v0.1.0"
+"com.xuhuanhello.datachannel": "https://github.com/xuhuanhello/juice-c-sharp.git?path=Packages/datachannel-unity#v0.1.1"
 ```
 
-Without the `#v0.1.0` suffix, UPM tracks the default branch: the package can change under you between two `Library/` resolves, and the binary you tested against is not necessarily the one that ships. Pin, and bump deliberately — see [`CHANGELOG.md`](./CHANGELOG.md).
+Without the `#v0.1.1` suffix, UPM tracks the default branch: the package can change under you between two `Library/` resolves, and the binary you tested against is not necessarily the one that ships. Pin, and bump deliberately — see [`CHANGELOG.md`](./CHANGELOG.md).
 
 For local development against a checkout of this repository:
 
@@ -70,7 +70,7 @@ cmake --build native/build/macos
 - **Self-contained:** static MbedTLS 3.6 (with DTLS-SRTP user config) into the plugin; `otool -L` must not show Homebrew openssl/mbedtls.
 - **Exports:** only `dcu_*`. `native/exports/expected-symbols.txt` is the one hand-written list; the per-platform link-time files are generated from it and not committed.
 - **Windows/Linux** build the same way (Windows uses CMake's Visual Studio generator instead of Ninja); nothing cross-compiles today.
-- **CI:** three jobs, one per toolchain shape, on every PR; the full matrix runs on a schedule and uploads artifacts, and a maintainer commits them to LFS (see `docs/SPEC.md` §9–§10).
+- **CI:** three jobs, one per toolchain shape, on every PR; the full matrix runs on a schedule and uploads artifacts, and a maintainer commits them (plain git — deliberately **not** Git LFS, see `docs/SPEC.md` §10).
 
 **Linux support floor: Ubuntu 22.04 / glibc 2.35** — one notch above what Unity 2022.3 itself declares. This is a declared floor, not a measured one: the binary is built on that image and no compatibility below it is claimed.
 

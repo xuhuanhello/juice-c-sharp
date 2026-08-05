@@ -5,7 +5,28 @@ All notable changes to this package are documented here. The format follows
 in [`docs/SPEC.md`](../../docs/SPEC.md) §3 — upstream patch → patch, upstream minor
 or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
+## [0.1.1] — 2026-08-05
+
+### Fixed
+
+- **The plugin binaries were unusable when the package was installed from a Git
+  URL — on every platform.** They were tracked with Git LFS, so what an adopter
+  received was a 132-byte pointer file rather than the library, with no error or
+  warning anywhere; Unity reported `expected x64 architecture, but was Unknown
+  architecture` and the native plugin never loaded. **v0.1.0 is affected and
+  should not be used.** The binaries are now committed as ordinary git objects,
+  which makes the result independent of any LFS client, credentials or clone
+  behaviour. A CI gate now asserts that what git stores really is a binary
+  (SPEC §10).
+
+Nothing else changed: the binaries are byte-for-byte the ones from v0.1.0, and
+no source, compiler flag or public API moved.
+
 ## [0.1.0] — 2026-08-05
+
+> **Withdrawn — do not install.** Its plugin binaries reach adopters as Git LFS
+> pointer files (see 0.1.1). Everything below still describes the package;
+> only the delivery was broken.
 
 First release. Desktop only.
 
@@ -50,4 +71,5 @@ has since been removed from the schema (it was constant across everything the la
 gate reads, and therefore carried no information); it disappears on the next binary
 refresh rather than being edited by hand, because CI artifacts are not hand-edited.
 
+[0.1.1]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.1.0
