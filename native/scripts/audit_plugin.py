@@ -83,6 +83,18 @@ LINUX_ALLOWED_NAMES = {
     "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1",
 }
 
+# Android：Bionic 的 DT_NEEDED **不带版本后缀**（libc.so，不是 libc.so.6），
+# 所以 glibc 那份名字集合一条都套不上 —— 平台键必须独立（决议 #79）。
+#
+# **这个集合故意是空的。** 决议 #85 C 节：具体条目等第一次 CI 实跑把真实的
+# DT_NEEDED 打出来，照实填，不预先猜。check_deps 在报错前会逐行打印实际依赖
+# （见 main() 里的 "==> dependencies"），所以第一次跑虽然是红的，但红的内容
+# 就是要填进来的清单本身。
+#
+# 先填一份「看起来对」的猜测更糟：万一上游多带了一个我们没想到的库，猜的那份
+# 会恰好把它放过去，而这道门禁存在的全部意义就是发现「产物依赖了不该依赖的东西」。
+ANDROID_ALLOWED_NAMES: set[str] = set()
+
 # Windows：PE 导入表只有 DLL 名。
 # bcrypt/crypt32 是 **Windows 自带的系统 crypto API**，不是我们捆绑的 crypto 库
 # ——libjuice/libdatachannel 用它们取随机数与证书。它们不违反「crypto 必须静态
@@ -300,6 +312,11 @@ def check_deps(platform: str, deps: list[str]) -> None:
     elif platform == "linux":
         unexpected = [d for d in deps if d not in LINUX_ALLOWED_NAMES]
         allowed_desc = "、".join(sorted(LINUX_ALLOWED_NAMES))
+    elif platform == "android":
+        unexpected = [d for d in deps if d not in ANDROID_ALLOWED_NAMES]
+        allowed_desc = ("、".join(sorted(ANDROID_ALLOWED_NAMES))
+                        if ANDROID_ALLOWED_NAMES
+                        else "(still empty on purpose -- fill it from the first real CI run, see #85)")
     else:
         unexpected = [d for d in deps
                       if d.lower() not in WINDOWS_ALLOWED_NAMES
@@ -315,6 +332,55 @@ def check_deps(platform: str, deps: list[str]) -> None:
               "  This is deliberately an allowlist, not a denylist: bans only stop shapes already encountered.\n"
               "  If this is a legitimate new system dependency from upstream, add it to the allowlist in this script with a reason;\n"
               "  if it is not, it most likely means some dependency was not linked statically.")
+
+
+def check_page_align(binary: Path, readelf: str, minimum: int) -> None:
+    """断言每个 PT_LOAD 段的对齐 >= minimum（决议 #81）。
+
+    判据是 **>=** 而不是 ==：更大的对齐同样满足页要求，写死相等会在链接器某天
+    给出更大值时**假红**。假红与假绿同样坏 —— 都让断言的措辞与它真正保证的
+    东西不一致。
+
+    用 `-lW`（wide）：不加 -W 时 GNU readelf 把每个程序头拆成两行，对齐值落在
+    第二行末尾，按「首列是 LOAD」取末列会取到上一行的地址，静默取错。
+    """
+    out = run([readelf, "-lW", str(binary)])
+    aligns = []
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and parts[0] == "LOAD":
+            try:
+                aligns.append(int(parts[-1], 16))
+            except ValueError:
+                raise AuditError(
+                    "Cannot parse the alignment column of a LOAD program header:\n"
+                    f"    {line.strip()}\n"
+                    "  This gate will not silently skip: an unparsable header means the check did not run.")
+
+    # 一个 LOAD 都没解析到，几乎必然是 readelf 输出格式与这里的假设不符。
+    # 当作失败而不是「没有违规项，通过」——那正是 CONTRIBUTING 第一原则说的
+    # 「让『没跑过』和『跑了且通过』长得一样」。
+    if not aligns:
+        raise AuditError(
+            f"No PT_LOAD program headers were found in {binary.name}.\n"
+            "  Expected `readelf -lW` to list them; the check cannot pass on an empty result.")
+
+    bad = [a for a in aligns if a < minimum]
+    if bad:
+        raise AuditError(
+            f"LOAD segments are aligned below {minimum} bytes ({minimum // 1024} KB):\n"
+            + "".join(f"    align = {a} (0x{a:x})\n" for a in sorted(set(bad)))
+            + f"  Required: every PT_LOAD aligned to at least 0x{minimum:x}.\n"
+              "  The link-time request is -Wl,-z,max-page-size, declared in "
+              "native/platforms/Android.cmake; this is its acceptance check.\n"
+              "\n"
+              "  Scope: this check guarantees the alignment of the .so ITSELF. How the .so is\n"
+              "  stored inside an APK/AAB -- compressed or not, and whether its zip entry is page\n"
+              "  aligned -- is decided by the adopter's packaging configuration and is outside this\n"
+              "  package (see docs/research/android-packaging-alignment.md).")
+
+    print(f"==> page alignment: {len(aligns)} LOAD segment(s), "
+          f"min align = 0x{min(aligns):x} (required >= 0x{minimum:x})")
 
 
 def check_exports(actual: set[str], expected_file: Path) -> int:
@@ -356,17 +422,30 @@ def check_exports(actual: set[str], expected_file: Path) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Offline gate for the native plugin")
     ap.add_argument("--binary", required=True, type=Path)
-    ap.add_argument("--platform", required=True, choices=["darwin", "linux", "windows"])
+    ap.add_argument("--platform", required=True,
+                    choices=["darwin", "linux", "windows", "android"])
     ap.add_argument("--expected", required=True, type=Path)
     ap.add_argument("--nm", default=None, help="CMAKE_NM")
     ap.add_argument("--readelf", default=None, help="CMAKE_READELF")
     ap.add_argument("--linker", default=None,
                     help="CMAKE_LINKER (used on Windows to locate dumpbin.exe in the same directory)")
+    # 声明式：只有在平台文件里声明了 DCU_REQUIRE_PAGE_ALIGN 的平台，CMake 才会
+    # 传这个参数（决议 #81）。不传 = 该平台不需要页对齐，而不是「检查被跳过了」。
+    ap.add_argument("--require-page-align", type=int, default=None,
+                    help="Minimum PT_LOAD alignment in bytes (Android: 16384)")
     args = ap.parse_args()
 
     binary = args.binary
     if not binary.is_file():
         raise AuditError(f"Artifact does not exist: {args.binary}")
+
+    # 页对齐检查读的是 ELF 程序头。在 Mach-O / PE 上传这个参数，说明平台文件和
+    # 这里的实现对不上 —— 硬失败，不要「传了但没跑」，那又是一次沉默的缺席。
+    if args.require_page_align is not None and args.platform not in ("linux", "android"):
+        raise AuditError(
+            f"--require-page-align is only implemented for ELF targets, not '{args.platform}'.\n"
+            "  It reads PT_LOAD program headers. Remove DCU_REQUIRE_PAGE_ALIGN from that\n"
+            "  platform file, or implement the equivalent for its object format.")
 
     if args.platform == "darwin":
         nm = resolve_tool(args.nm, "nm", "reads exported symbols")
@@ -393,7 +472,10 @@ def main() -> int:
             actual, deps = arch_exports, arch_deps
         print(f"OK: exports and dependencies passed for all {len(archs)} architecture(s)")
         return 0
-    elif args.platform == "linux":
+    elif args.platform in ("linux", "android"):
+        # Android 与 Linux 同为 ELF，**共用实现，不共用身份**（决议 #79）：
+        # 提取逻辑一字不改地复用，但平台键独立，允许列表各自一份 —— Bionic 的
+        # DT_NEEDED 不带版本后缀，glibc 那份套不上。
         nm = resolve_tool(args.nm, "nm", "读取导出符号")
         readelf = resolve_tool(args.readelf, "readelf", "reads DT_NEEDED")
         actual, deps = exports_linux(binary, nm), deps_linux(binary, readelf)
@@ -405,6 +487,10 @@ def main() -> int:
     for d in deps:
         print(f"    {d}")
     check_deps(args.platform, deps)
+
+    if args.require_page_align is not None:
+        readelf = resolve_tool(args.readelf, "readelf", "reads program headers")
+        check_page_align(binary, readelf, args.require_page_align)
 
     print("==> exported symbols")
     count = check_exports(actual, args.expected)

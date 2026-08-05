@@ -56,14 +56,39 @@ jobs:
           done < <(git ls-files -s native/scripts/)
           exit $fail
 
+      # NDK 钉 **r27 大版本**，小版本取镜像上最新的（决议 #79）。理由与 macos job
+      # 的 Pin Xcode 一字不差：$ANDROID_NDK_HOME 指向哪一版会随镜像漂，而 Android
+      # 的产物完全由工具链决定。找不到 27.* 就直接红，不回落到默认 NDK。
+      - name: Pin Android NDK (r27, highest minor)
+        if: matrix.platform == 'android'
+        run: |
+          set -euo pipefail
+          ndk_root=$(ls -d "$ANDROID_SDK_ROOT"/ndk/27.* 2>/dev/null | sort -V | tail -1 || true)
+          if [[ -z "$ndk_root" || ! -d "$ndk_root" ]]; then
+            echo "::error::No NDK 27.* under $ANDROID_SDK_ROOT/ndk (decision #79 pins the r27 major)"
+            ls -1 "$ANDROID_SDK_ROOT/ndk" 2>/dev/null || echo "(no ndk directory at all)"
+            exit 1
+          fi
+          echo "ANDROID_NDK_ROOT=$ndk_root" >> "$GITHUB_ENV"
+          echo "Pinned NDK: $ndk_root"
+
       - name: Fetch pinned upstream deps
         run: ./native/scripts/fetch-deps.sh
 
+      # Android 只多一个 -DCMAKE_TOOLCHAIN_FILE=。平台配置按 CMAKE_SYSTEM_NAME
+      # 自动选取（native/platforms/Android.cmake），这里不再声明产物名或落点（#81）。
       - name: Build plugin (CMake)
         run: |
-          cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if [[ "${{ matrix.platform }}" == "android" ]]; then
+            cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$PWD/native/cross/android-arm64.cmake"
+          else
+            cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+          fi
           cmake --build native/build/ci
 
+      # 与 pr.yml 同：页对齐要求由平台文件声明、由 POST_BUILD 那次 audit 执行，
+      # 这里不重复 --require-page-align，避免第二个真相源。这一步是门禁的子集。
       - name: Audit plugin
         run: |
           python3 native/scripts/audit_plugin.py \
@@ -99,6 +124,10 @@ jobs:
             platform: linux
             artifact_path: Packages/datachannel-unity/Plugins/Linux/x86_64/libdatachannel_unity.so
             build_info_path: Packages/datachannel-unity/Report~/Linux-x86_64.json
+          - name: Android arm64-v8a
+            platform: android
+            artifact_path: Packages/datachannel-unity/Plugins/Android/arm64-v8a/libdatachannel_unity.so
+            build_info_path: Packages/datachannel-unity/Report~/Android-arm64-v8a.json
     steps:
       - uses: actions/checkout@v5
 
@@ -205,9 +234,12 @@ jobs:
           if-no-files-found: error
 
 # ────────────────────────────────────────────────────────────────────────────
-# 移动两平台**尚未启用**，各自卡在一件具体的事上。把原因写清楚而不是留一行
-# 乐观的注释，是因为「骨架里列着但从没跑过」正是这个仓库已经吃过亏的形状 ——
+# **iOS 尚未启用**，卡在一件具体的事上。把原因写清楚而不是留一行乐观的注释，
+# 是因为「骨架里列着但从没跑过」正是这个仓库已经吃过亏的形状 ——
 # windows-exports.def 就是那样烂掉的（带着四个已删符号，缺六个现存符号）。
+#
+# （**Android arm64-v8a 已启用**，见上面 ubuntu job 的 matrix：决议 #79/#80/#81，
+# 施工 #85。它的 16 KB 页对齐要求声明在 native/platforms/Android.cmake。）
 #
 # **iOS arm64** —— 加一行 matrix 不够，`native/` 先要改：
 #   - `add_library(datachannel_unity SHARED ...)` 是硬编码的，iOS 要 STATIC
@@ -215,19 +247,6 @@ jobs:
 #   - 静态 .a 没有导出表，符号收窄要走 `ld -r -exported_symbols_list`（#47 实测
 #     通过；注意它**只能降级不能提升**，白名单必须恰好等于 DCU_API 那一组）
 #   - audit 的静态库分支尚未实现；依赖检查在 .a 上不建，缺口写进 SPEC（#50）
-#
-# **Android arm64-v8a** —— 有一个**尚未拍板**的问题，现在启用等于静默替人决定：
-#   - ~~两个下界打架：Unity 最低 API 22 vs libjuice 的 getifaddrs 需 API 24~~
-#     **这条实测不成立**：libjuice 的 socket.h 对 __ANDROID__ 无条件 #define
-#     NO_IFADDRS，udp.c 走 SIOCGIFCONF 分支，任何 API 级别都不调 getifaddrs。
-#     usrsctp 那处在 #if __APPLE__/__DragonFly__/__FreeBSD__ 里，编不到。
-#     代价是**行为差异**而非编译不了：ifconf 只带 IPv4，IPv6 靠单独一次
-#     get_local_default_inet6 探测 —— 该由真机 smoke 去看。见 SPEC §9。
-#   - runner 默认 NDK 27.3 需显式加 16 KB page 对齐 flags（Play 自 2025-11-01
-#     起要求，官方点名 prebuilt 也要重编）
-#   toolchain 形状：
-#     -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake
-#     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-<未定>
 #
 # **Windows ARM64 已出图**：2022.3 的 Standalone Windows 没有 ARM64 槽位（编辑器
 # 源码显式返回空路径，Unity 6000.0 才改成多架构）。产出它等于产出一个装不进任何
