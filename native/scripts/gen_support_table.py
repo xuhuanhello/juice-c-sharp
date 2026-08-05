@@ -145,7 +145,14 @@ def check_build_info(tracked_reports: set[str], landed: list[str],
     return problems
 
 
-def render(landed: list[str]) -> str:
+def render(landed: list[str], report_dirname: str) -> str:
+    """The table also names each platform's provenance file, for the same reason
+    the platform rows are generated at all (#53): a hand-written "where is the
+    build record for my platform" list is one more thing that goes stale the day
+    a platform lands and nobody remembers to edit the README. The file name comes
+    from the same `report_name` the gate uses, so the column cannot point at a
+    file that is not the one being checked.
+    """
     lines = [BEGIN, ""]
     if not landed:
         lines += [
@@ -157,12 +164,13 @@ def render(landed: list[str]) -> str:
         ]
     else:
         lines += [
-            "| Platform | Architecture | Loaded by |",
-            "|---|---|---|",
+            "| Platform | Architecture | Loaded by | Build record |",
+            "|---|---|---|---|",
         ]
         for rel in landed:
             name, arch, where = DISPLAY[rel]
-            lines.append(f"| {name} | {arch} | {where} |")
+            record = report_name(Path(rel).parent.as_posix())
+            lines.append(f"| {name} | {arch} | {where} | `{report_dirname}/{record}` |")
         missing = [r for r in PLATFORMS if r not in landed]
         if missing:
             lines += ["", "Not shipped yet: "
@@ -210,7 +218,7 @@ def main() -> int:
 
     head, _, rest = text.partition(BEGIN)
     _, _, tail = rest.partition(END)
-    updated = head + render(landed) + tail
+    updated = head + render(landed, args.report_root.name) + tail
 
     if updated == text:
         print(f"OK: the support table lists {len(landed)}/{len(PLATFORMS)} platform(s) "
