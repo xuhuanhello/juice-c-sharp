@@ -3,6 +3,8 @@
 # 布局：
 #   native/CMakeLists.txt          (本文件)
 #   native/dcu/                    项目自有的稳定 C ABI 层
+#   native/platforms/<系统名>.cmake 每平台一份配置数据（#81）；加平台=加文件
+#   native/cross/                  交叉编译的 toolchain file
 #   native/subprojects/mbedtls/            上游，由 scripts/fetch-deps.sh 拉取
 #   native/subprojects/libdatachannel/     同上
 #   native/mbedtls/user_config.h   MbedTLS 用户配置（DTLS-SRTP）
@@ -13,8 +15,10 @@
 #   cmake -S native -B native/build/<name> -G Ninja -DCMAKE_BUILD_TYPE=Release
 #   cmake --build native/build/<name>
 #
-# 交叉编译：追加 -DCMAKE_TOOLCHAIN_FILE=<file>。产物暂存路径由
-# CMAKE_SYSTEM_NAME / CMAKE_SYSTEM_PROCESSOR 推导，因此会跟随 toolchain file。
+# 交叉编译：追加 -DCMAKE_TOOLCHAIN_FILE=native/cross/<平台>.cmake
+#   Android arm64-v8a：native/cross/android-arm64.cmake
+# 平台配置按 CMAKE_SYSTEM_NAME 选取，因此**自动跟随 toolchain file**：
+# toolchain 说这是 Android，就用 platforms/Android.cmake，没有第二处要同步。
 cmake_minimum_required(VERSION 3.16)
 project(datachannel_unity LANGUAGES C CXX)
 
@@ -103,6 +107,50 @@ if(NOT DCU_GEN_EXPORTS_RC EQUAL 0)
 endif()
 message(STATUS "${DCU_GEN_EXPORTS_OUT}")
 
+# ---------- 平台配置：数据，不是分支（决议 #81） ----------
+# 每个平台一份 native/platforms/<CMAKE_SYSTEM_NAME>.cmake，声明该平台的全部数据。
+# 本文件**不做任何平台判断** —— 加平台 = 加一份文件。
+#
+# 为什么不是 if/elseif 链：原先五处平台差异（插件目录、平台键、产物名、导出白名单
+# 与传法、附加链接项）全是**查表**，没有一条是逻辑。而写成 if/else 会带一个
+# `else()` 兜底，于是「未识别的平台」自动变成 linux —— 三处生成表达式都这样，其中
+# gen_build_info 会**静默写错**（JSON 内容 platform=linux，文件名却是
+# Android__arm64-v8a.json，名实矛盾且无门禁会红）。
+#
+# 数据驱动的形状里**没有 fall-through 可落**：文件不存在就是硬失败。缺陷是被
+# 结构消掉的，不是被检查挡住的。
+set(DCU_PLATFORM_FILE "${NATIVE_ROOT}/platforms/${CMAKE_SYSTEM_NAME}.cmake")
+if(NOT EXISTS "${DCU_PLATFORM_FILE}")
+  file(GLOB _dcu_platform_files "${NATIVE_ROOT}/platforms/*.cmake")
+  set(_dcu_known "")
+  foreach(_f IN LISTS _dcu_platform_files)
+    get_filename_component(_n "${_f}" NAME_WE)
+    string(APPEND _dcu_known " ${_n}")
+  endforeach()
+  message(FATAL_ERROR
+    "No platform configuration for CMAKE_SYSTEM_NAME='${CMAKE_SYSTEM_NAME}'.\n"
+    "  Expected: ${DCU_PLATFORM_FILE}\n"
+    "  Known platforms:${_dcu_known}\n"
+    "  Adding a platform means adding that file, not adding a branch here.")
+endif()
+include("${DCU_PLATFORM_FILE}")
+
+# 平台文件必须声明的东西。少一个就硬失败，而不是让下游拿到空字符串继续 ——
+# 空的 DCU_ARTIFACT_NAME 会让 audit 去查一个目录，报出的错与真正的原因无关。
+foreach(_req IN ITEMS
+    DCU_PLATFORM_KEY DCU_PLUGIN_REL DCU_ARTIFACT_NAME
+    DCU_EXPORT_FILE DCU_EXPORT_LINK_OPTIONS)
+  if(NOT DEFINED ${_req})
+    message(FATAL_ERROR
+      "${DCU_PLATFORM_FILE} does not set ${_req}.\n"
+      "  Every platform file must set: DCU_PLATFORM_KEY, DCU_PLUGIN_REL, "
+      "DCU_ARTIFACT_NAME, DCU_EXPORT_FILE, DCU_EXPORT_LINK_OPTIONS.\n"
+      "  Optional: DCU_EXTRA_LINK_LIBRARIES, DCU_EXTRA_LINK_OPTIONS, DCU_REQUIRE_PAGE_ALIGN.")
+  endif()
+endforeach()
+message(STATUS
+  "Platform: ${DCU_PLATFORM_KEY} → Plugins/${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}")
+
 # ---------- MbedTLS 3.6.x 静态 + DTLS-SRTP ----------
 set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
@@ -148,58 +196,32 @@ set_target_properties(datachannel_unity PROPERTIES
   PREFIX "lib"
 )
 
-# 仅导出 dcu_*（决策 #18）。白名单是生成物，见上面的 gen_exports.py 块。
-if(APPLE)
-  target_link_libraries(datachannel_unity PRIVATE
-    "-framework CoreFoundation"
-    "-framework Security"
-  )
-  set(DCU_EXPORT_FILE "${DCU_GEN_EXPORTS_DIR}/macos-exported-symbols.txt")
-  target_link_options(datachannel_unity PRIVATE
-    "LINKER:-exported_symbols_list,${DCU_EXPORT_FILE}"
-  )
-elseif(WIN32)
-  set(DCU_EXPORT_FILE "${DCU_GEN_EXPORTS_DIR}/windows-exports.def")
-  target_link_options(datachannel_unity PRIVATE "/DEF:${DCU_EXPORT_FILE}")
-else()
-  set(DCU_EXPORT_FILE "${DCU_GEN_EXPORTS_DIR}/linux-version-script.map")
-  target_link_options(datachannel_unity PRIVATE
-    "LINKER:--version-script=${DCU_EXPORT_FILE}"
-    "LINKER:--exclude-libs,ALL"
-  )
+# 仅导出 dcu_*（决策 #18）。白名单是生成物，见上面的 gen_exports.py 块；
+# 用哪一份、怎么传给链接器，由平台文件声明。
+if(DCU_EXTRA_LINK_LIBRARIES)
+  target_link_libraries(datachannel_unity PRIVATE ${DCU_EXTRA_LINK_LIBRARIES})
 endif()
+target_link_options(datachannel_unity PRIVATE
+  ${DCU_EXPORT_LINK_OPTIONS}
+  ${DCU_EXTRA_LINK_OPTIONS}
+)
 
 # 白名单变了就必须重链。少了这条，改 expected-symbols.txt 会重新配置、
 # 重新生成白名单，却仍然沿用旧的 .dylib —— 又是「改了源文件不重建」。
 set_target_properties(datachannel_unity PROPERTIES LINK_DEPENDS "${DCU_EXPORT_FILE}")
 
 # ---------- 暂存进 UPM Plugins 布局 ----------
-# 平台映射走 CMAKE_SYSTEM_*，因此交叉编译时会跟随 toolchain file，
-# 而不是像旧的 shell shim 那样按 host 猜。
+# 落点、产物名、平台键全部来自平台文件（上面 include 的那份），这里不再推导。
 if(DCU_STAGE_PLUGIN)
-  if(APPLE)
-    # 单一 universal 产物，没有架构子目录（见文件开头的理由）
-    set(DCU_PLUGIN_REL "macOS")
-  elseif(WIN32)
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
-      set(DCU_PLUGIN_REL "Windows/ARM64")
-    else()
-      set(DCU_PLUGIN_REL "Windows/x86_64")
-    endif()
-  elseif(ANDROID)
-    set(DCU_PLUGIN_REL "Android/${CMAKE_ANDROID_ARCH_ABI}")
-  else()
-    set(DCU_PLUGIN_REL "Linux/${CMAKE_SYSTEM_PROCESSOR}")
-  endif()
-
   add_custom_command(TARGET datachannel_unity POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"
             "${NATIVE_ROOT}/scripts/stage_plugin.py"
-            --binary      "$<TARGET_FILE:datachannel_unity>"
-            --host-system "$<IF:$<BOOL:${APPLE}>,darwin,$<IF:$<BOOL:${WIN32}>,windows,linux>>"
-            --plugin-root "${DCU_PLUGIN_ROOT}"
-            --rel         "${DCU_PLUGIN_REL}"
-    COMMENT "Staging plugin → ${DCU_PLUGIN_REL}"
+            --binary        "$<TARGET_FILE:datachannel_unity>"
+            --platform      "${DCU_PLATFORM_KEY}"
+            --artifact-name "${DCU_ARTIFACT_NAME}"
+            --plugin-root   "${DCU_PLUGIN_ROOT}"
+            --rel           "${DCU_PLUGIN_REL}"
+    COMMENT "Staging plugin → ${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}"
     VERBATIM
   )
 
@@ -220,7 +242,7 @@ if(DCU_STAGE_PLUGIN)
             --repo-root "${NATIVE_ROOT}/.."
             --header    "${DCU_SRC}/include/dcu.h"
             --lock      "${NATIVE_ROOT}/versions.lock"
-            --platform  "$<IF:$<BOOL:${APPLE}>,darwin,$<IF:$<BOOL:${WIN32}>,windows,linux>>"
+            --platform  "${DCU_PLATFORM_KEY}"
             --architectures     "${CMAKE_OSX_ARCHITECTURES}"
             --target-system     "${CMAKE_SYSTEM_NAME}"
             --target-processor  "${CMAKE_SYSTEM_PROCESSOR}"
@@ -239,15 +261,25 @@ if(DCU_STAGE_PLUGIN)
   #
   # MSVC 分支的 CMake 不提供 NM，dumpbin 更是完全没建模（CMakeFindBinUtils 只给
   # LINKER/MT/AR）——所以传 CMAKE_LINKER 进去，让脚本从 link.exe 同目录找 dumpbin.exe。
+  #
+  # 页对齐断言是**声明式**的（决议 #81）：只有声明了 DCU_REQUIRE_PAGE_ALIGN 的平台
+  # 才检查。桌面三份平台文件不声明，于是这个参数根本不出现在命令行上 —— 检查的
+  # 存在与否，跟着「谁需要它」这个事实走，而不是 audit 里再写一遍平台判断。
+  set(DCU_AUDIT_EXTRA_ARGS "")
+  if(DEFINED DCU_REQUIRE_PAGE_ALIGN)
+    list(APPEND DCU_AUDIT_EXTRA_ARGS --require-page-align "${DCU_REQUIRE_PAGE_ALIGN}")
+  endif()
+
   add_custom_command(TARGET datachannel_unity POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"
             "${NATIVE_ROOT}/scripts/audit_plugin.py"
-            --binary   "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/$<IF:$<BOOL:${APPLE}>,datachannel_unity.dylib,$<IF:$<BOOL:${WIN32}>,datachannel_unity.dll,libdatachannel_unity.so>>"
-            --platform "$<IF:$<BOOL:${APPLE}>,darwin,$<IF:$<BOOL:${WIN32}>,windows,linux>>"
+            --binary   "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}"
+            --platform "${DCU_PLATFORM_KEY}"
             --expected "${DCU_EXPECTED_SYMBOLS}"
             --nm       "${CMAKE_NM}"
             --readelf  "${CMAKE_READELF}"
             --linker   "${CMAKE_LINKER}"
+            ${DCU_AUDIT_EXTRA_ARGS}
     COMMENT "Auditing plugin (exports + dependencies)"
     VERBATIM
   )

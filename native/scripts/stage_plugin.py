@@ -35,9 +35,16 @@ _force_utf8_output()
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", required=True, help="Path to built shared library")
-    ap.add_argument("--host-system", required=True, choices=["darwin", "windows", "linux"])
+    # 平台键与产物名都由 native/platforms/<系统名>.cmake 声明后传进来，本脚本
+    # **不再自己推导名字**（决议 #81）。两处各推一份就是两个真相源，而其中一份
+    # 迟早会与另一份错开 —— 那正是 audit 去找的文件与构建写出的文件可以悄悄不同
+    # 的那种缝（#65 在溯源文件名上已经踩过同一形状）。
+    ap.add_argument("--platform", required=True,
+                    choices=["darwin", "windows", "linux", "android"])
+    ap.add_argument("--artifact-name", required=True,
+                    help="e.g. datachannel_unity.dylib / libdatachannel_unity.so")
     ap.add_argument("--plugin-root", required=True)
-    ap.add_argument("--rel", required=True, help="e.g. macOS or Windows/x86_64")
+    ap.add_argument("--rel", required=True, help="e.g. macOS or Android/arm64-v8a")
     args = ap.parse_args()
 
     binary = pathlib.Path(args.binary)
@@ -59,7 +66,12 @@ def main() -> int:
         elif junk.is_file():
             junk.unlink()
 
-    if args.host_system == "darwin":
+    dest = out_dir / args.artifact_name
+    if dest.exists():
+        dest.unlink()
+    shutil.copy2(binary, dest)
+
+    if args.platform == "darwin":
         # 单个 universal .dylib，不是 .bundle 目录。
         #
         # #10 的题面把「macOS bundle 还是 dylib」列为待决问题，决议表写了 bundle
@@ -71,26 +83,17 @@ def main() -> int:
         # 无扩展名，按扩展名的规则套不上）、还要再加一条 Info.plist 例外、这里要
         # 造 Contents/MacOS 与 plist、支持表要为目录写前缀匹配（第一版还写错了）。
         # 而 macOS 是六个平台里唯一的目录形态。
-        dest = out_dir / "datachannel_unity.dylib"
-        if dest.exists():
-            dest.unlink()
-        shutil.copy2(binary, dest)
+        #
+        # install name 是 macOS 独有的一步，不是命名差异 —— 命名已经由
+        # --artifact-name 统一处理掉了，这里剩下的才是真正的平台差异。
         # check=True：install name 设失败会让插件按绝对路径去找自己，在采用者机器上
         # 加载失败。旧代码用 check=False 把这个失败吞掉了 —— 那是「缺席变成沉默」。
         subprocess.run(
-            ["install_name_tool", "-id", "@loader_path/datachannel_unity.dylib", str(dest)],
+            ["install_name_tool", "-id", f"@loader_path/{args.artifact_name}", str(dest)],
             check=True,
         )
-        print(f"Installed {dest}")
-    else:
-        # Windows/Linux: copy with expected name
-        if args.host_system == "windows":
-            dest = out_dir / "datachannel_unity.dll"
-        else:
-            dest = out_dir / "libdatachannel_unity.so"
-        shutil.copy2(binary, dest)
-        print(f"Installed {dest}")
 
+    print(f"Installed {dest}")
     return 0
 
 
