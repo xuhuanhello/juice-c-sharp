@@ -217,7 +217,12 @@ jobs:
 #   - audit 的静态库分支尚未实现；依赖检查在 .a 上不建，缺口写进 SPEC（#50）
 #
 # **Android arm64-v8a** —— 有一个**尚未拍板**的问题，现在启用等于静默替人决定：
-#   - 两个下界打架：Unity 2022.3 最低 API 22，而 libjuice 的 getifaddrs 需 API 24
+#   - ~~两个下界打架：Unity 最低 API 22 vs libjuice 的 getifaddrs 需 API 24~~
+#     **这条实测不成立**：libjuice 的 socket.h 对 __ANDROID__ 无条件 #define
+#     NO_IFADDRS，udp.c 走 SIOCGIFCONF 分支，任何 API 级别都不调 getifaddrs。
+#     usrsctp 那处在 #if __APPLE__/__DragonFly__/__FreeBSD__ 里，编不到。
+#     代价是**行为差异**而非编译不了：ifconf 只带 IPv4，IPv6 靠单独一次
+#     get_local_default_inet6 探测 —— 该由真机 smoke 去看。见 SPEC §9。
 #   - runner 默认 NDK 27.3 需显式加 16 KB page 对齐 flags（Play 自 2025-11-01
 #     起要求，官方点名 prebuilt 也要重编）
 #   toolchain 形状：
