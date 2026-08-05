@@ -19,9 +19,12 @@ Also enforced here, because this script already walks the landed artifacts:
 
     every landed binary must have a CI-produced provenance file in `Report~/`.
 
-A build-info file with `ci: null` was produced by someone's local build; it
-records a dirty worktree and no run URL, so it has no provenance value at all
-(#54). Landing one would leave a binary nobody can trace.
+A build-info file with `ci: null` was produced by someone's local build: no run
+URL, and a commit that describes the checkout rather than what was compiled, so
+it has no provenance value at all (#54). Landing one would leave a binary nobody
+can trace. `ci` is the whole test -- a CI record is a fresh checkout of
+`source.commit`, so nothing further needs asserting about the tree it came from
+(#68 deleted the `dirty` field that used to imply otherwise).
 
 #65 moved those files out of `Plugins/` and into `Report~/<flattened>.json`,
 which changes only where this gate looks -- **not what it can prove**. The
@@ -132,8 +135,9 @@ def check_build_info(tracked_reports: set[str], landed: list[str],
         if not ci:
             problems.append(
                 f"  {name}: ci is null, so this came from a local build. "
-                "Land the CI-produced file instead -- a local one records a dirty "
-                "worktree and no run URL, so it has no provenance value.")
+                "Land the CI-produced file instead -- a local one has no run URL, "
+                "and its commit describes the checkout rather than what was "
+                "compiled, so it has no provenance value.")
             continue
         if ci.get("event") == "pull_request":
             problems.append(

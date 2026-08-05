@@ -38,10 +38,21 @@ Sources of truth, each read from exactly one place
   key that nothing read and that had already drifted from the real value (2).
   Removing it is the same rule as the export list: one authoritative source.
 - Upstream pins: `versions.lock`.
-- Commit / dirty state: git.
+- Commit: git.
 - Compiler, architectures, deployment target: passed in by CMake, which is the
   only thing that actually knows them.
 - CI run: the GitHub Actions environment.
+
+Deliberately NOT recorded: whether the worktree was dirty (#68). The gate only
+ever examines CI-produced records, and a CI build is a fresh checkout of
+`source.commit` -- so the field was constant across the entire population it
+would be read against, which is another way of saying it carried no
+information. The question it looked like it answered ("is this someone's local
+build?") is answered directly by `ci`, which is null exactly then. It was never
+part of decision #54's field list; it arrived with the implementation (#55 E),
+and after the binaries landed it read `true` on every CI build -- an LFS pointer
+being overwritten by the staged artifact, i.e. the build doing its job. Its only
+remaining effect was to cast doubt on perfectly good artifacts.
 """
 
 from __future__ import annotations
@@ -159,7 +170,6 @@ def main() -> int:
     args = ap.parse_args()
 
     commit = git(args.repo_root, "rev-parse", "HEAD")
-    status = git(args.repo_root, "status", "--porcelain")
 
     archs = [a for a in args.architectures.replace(",", ";").split(";") if a]
 
@@ -170,11 +180,13 @@ def main() -> int:
         "platform": args.platform,
         "architectures": archs or ([args.target_processor] if args.target_processor else []),
         "built_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        # Still an object with one key: what identifies a build may grow (a tag,
+        # a branch), and `source.commit` is the name the gate's error messages
+        # and the README already use.
         "source": {
+            # null when git is unavailable, so "unknown" stays distinguishable
+            # from a real SHA -- the same reason the audit refuses to skip checks.
             "commit": commit,
-            # null when git is unavailable, so "unknown" is distinguishable
-            # from "clean" -- the same reason the audit refuses to skip checks.
-            "dirty": None if status is None else bool(status),
         },
         "upstream": read_pins(args.lock),
         "toolchain": {
@@ -195,9 +207,8 @@ def main() -> int:
     out.write_text(json.dumps(info, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
                    encoding="utf-8", newline="\n")
     where = "CI" if info["ci"] else "local"
-    dirty = " (dirty worktree)" if info["source"]["dirty"] else ""
     print(f"build-info: {args.platform} {'/'.join(info['architectures'])} "
-          f"abi={info['abi_version']} commit={(commit or 'unknown')[:9]}{dirty} [{where}] "
+          f"abi={info['abi_version']} commit={(commit or 'unknown')[:9]} [{where}] "
           f"-> {out.name}")
     return 0
 
