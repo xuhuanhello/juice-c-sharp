@@ -34,6 +34,7 @@ jobs:
             os: macos-26
             platform: darwin
             artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib
+            build_info_path: Packages/datachannel-unity/Plugins/macOS/build-info.json
           - name: Windows x64
             # 钉 windows-2022 而不是 windows-latest：后者现已指向 Windows Server
             # 2025 + **VS 2026**（别名 windows-2025-vs2026），"Visual Studio 17 2022"
@@ -43,6 +44,7 @@ jobs:
             os: windows-2022
             platform: windows
             artifact_path: Packages/datachannel-unity/Plugins/Windows/x86_64/datachannel_unity.dll
+            build_info_path: Packages/datachannel-unity/Plugins/Windows/x86_64/build-info.json
           - name: Linux x64
             # 现存最老的 ubuntu 标签（ubuntu-20.04 已下架）。它决定本包的 glibc
             # 下限 = 2.35，比 Unity 2022.3 声明的 Ubuntu 20.04（2.31）高一档 ——
@@ -50,6 +52,7 @@ jobs:
             os: ubuntu-22.04
             platform: linux
             artifact_path: Packages/datachannel-unity/Plugins/Linux/x86_64/libdatachannel_unity.so
+            build_info_path: Packages/datachannel-unity/Plugins/Linux/x86_64/build-info.json
     defaults:
       run:
         # Windows runner 的默认 shell 是 pwsh。不写这行，下面的 bash 语法会直接
@@ -117,10 +120,16 @@ jobs:
             --platform ${{ matrix.platform }} \
             --expected native/exports/expected-symbols.txt
 
+      # 产物**与它的 build-info.json 一起**上传。只传二进制的话，维护者下载后
+      # 手里没有溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py 的
+      # 门禁（正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
       - uses: actions/upload-artifact@v4
         with:
           name: datachannel_unity-${{ matrix.platform }}
-          path: ${{ matrix.artifact_path }}
+          path: |
+            ${{ matrix.artifact_path }}
+            ${{ matrix.build_info_path }}
+          if-no-files-found: error
 
   static-checks:
     name: Script syntax and generated files
