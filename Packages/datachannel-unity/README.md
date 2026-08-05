@@ -18,6 +18,31 @@ Not shipped yet: Android arm64-v8a, iOS arm64. Building for those targets stops 
 
 <!-- END supported-platforms -->
 
+## Reporting a bug against a binary
+
+Every shipped binary has a provenance file recording the commit, the CI run, the
+compiler, and the pinned upstream versions it was built from. **Attach the one
+for your platform to the bug report** — without it there is no way to tell which
+build you have.
+
+They live in `Report~/`, alongside `Plugins/` inside the package:
+
+| Platform | File |
+|---|---|
+| Windows x86_64 | `Report~/Windows-x86_64.json` |
+| macOS universal | `Report~/macOS.json` |
+| Linux x86_64 | `Report~/Linux-x86_64.json` |
+
+Where that directory is on disk depends on how the package was installed:
+
+- **git URL** — `Library/PackageCache/com.xuhuanhello.datachannel@<hash>/Report~/`
+- **local (`file:`)** — `Packages/datachannel-unity/Report~/`
+
+The `~` suffix means Unity's asset database ignores the directory (the same
+mechanism as `Samples~`), so the files ship with the package but never appear in
+the Project window, and they are not readable at runtime. Open them with any
+text editor.
+
 ## Install
 
 Add to `Packages/manifest.json`:

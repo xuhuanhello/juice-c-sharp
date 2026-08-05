@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
-"""Emit build-info.json next to a staged plugin artifact (decision #54).
+"""Emit a staged plugin's provenance file into `Report~/` (decisions #54, #65).
 
 Why this file exists
 --------------------
-An adopter reports a bug against a binary that shipped inside a UPM package.
-They have no git history, no CI logs, and no way to tell which build they have.
-`build-info.json` travels *with* the artifact and answers: which commit, which
-CI run, which upstream pins, which compiler.
+A maintainer receives a bug report against a binary that shipped inside a UPM
+package. Neither side has the CI logs to hand, and the adopter has no git
+history at all. This file ships *inside the package* and answers: which commit,
+which CI run, which upstream pins, which compiler -- the maintainer says "paste
+me the file at this path" and gets a definitive answer.
+
+Where it lands (#65, overriding #54's "beside the binary")
+----------------------------------------------------------
+`Packages/datachannel-unity/Report~/<flattened platform>.json`, e.g.
+`Report~/Windows-x86_64.json`. The `~` suffix makes Unity ignore the directory
+outright, so a pure build record needs no `.meta` and no minted GUID -- it is
+not an asset and nothing will ever reference it. `Plugins/` is thereby kept to
+binaries and their `.meta`, which is the rule that survives this one file.
+
+The flattened name comes from `gen_plugin_meta.report_name`, the single place
+that derives it; see there for why it is not computed at each call site.
+
+Nothing reads this at runtime: `Report~` content cannot be built into a Player
+(#65 also ruled out an Editor-side "copy build info" convenience -- it would
+serve a use case already judged not to exist).
 
 Deliberately NOT a `dcu_build_info()` export (#54): that would change the ABI
 (new symbol in expected-symbols.txt, DCU_ABI_VERSION bump) and would make the
@@ -38,6 +54,9 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gen_plugin_meta import report_name  # noqa: E402  单一拍平名推导，不在这里重复一份
 
 
 def _force_utf8_output() -> None:
@@ -120,8 +139,12 @@ def ci_block() -> dict | None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Emit build-info.json for a staged plugin")
-    ap.add_argument("--out", required=True, type=Path, help="path of the build-info.json to write")
+    ap = argparse.ArgumentParser(description="Emit a staged plugin's provenance file")
+    ap.add_argument("--report-root", required=True, type=Path,
+                    help="Packages/datachannel-unity/Report~")
+    ap.add_argument("--rel", required=True,
+                    help="the plugin directory relative to Plugins/, e.g. macOS or Windows/x86_64; "
+                         "the file name is derived from it (gen_plugin_meta.report_name)")
     ap.add_argument("--repo-root", required=True, type=Path)
     ap.add_argument("--header", required=True, type=Path, help="native/dcu/include/dcu.h")
     ap.add_argument("--lock", required=True, type=Path, help="native/versions.lock")
@@ -164,16 +187,18 @@ def main() -> int:
         "ci": ci_block(),
     }
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
+    out = args.report_root / report_name(args.rel)
+    out.parent.mkdir(parents=True, exist_ok=True)
     # newline="\n": on Windows, text mode would translate "\n" to "\r\n", so the
     # artifact and the repo copy would differ byte-for-byte (git normalises on
     # commit, hiding it). Landing the desktop batch is where that showed up.
-    args.out.write_text(json.dumps(info, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-                        encoding="utf-8", newline="\n")
+    out.write_text(json.dumps(info, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+                   encoding="utf-8", newline="\n")
     where = "CI" if info["ci"] else "local"
     dirty = " (dirty worktree)" if info["source"]["dirty"] else ""
     print(f"build-info: {args.platform} {'/'.join(info['architectures'])} "
-          f"abi={info['abi_version']} commit={(commit or 'unknown')[:9]}{dirty} [{where}]")
+          f"abi={info['abi_version']} commit={(commit or 'unknown')[:9]}{dirty} [{where}] "
+          f"-> {out.name}")
     return 0
 
 
