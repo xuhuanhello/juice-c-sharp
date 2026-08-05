@@ -155,7 +155,9 @@ The Windows side has its own asymmetry worth stating, because the shape invites 
 | `dcu_*` or public C# break | major |
 | Docs/samples only | patch or docs-only |
 
-Maintainers only bump pins into `main` with rebuild + tests + CHANGELOG (old/new tags). External PRs that only change pins without rebuild evidence are rejected.
+Maintainers only bump pins into `main` with rebuild + tests + an entry in **`Packages/datachannel-unity/CHANGELOG.md`** naming the old and new tags. External PRs that only change pins without rebuild evidence are rejected.
+
+Releases are **git tags** (`v<version>`), because that is what a UPM git-URL install pins to; the tag and `package.json`'s `version` must agree.
 
 ---
 
@@ -1238,6 +1240,7 @@ libdatachannel is **MPL-2.0** (use ≥ 0.18; avoid historical LGPL lines). datac
   Packages/
     datachannel-unity/      ← UPM package
       package.json
+      CHANGELOG.md          ← release history; §3's pin-bump gate names it
       Runtime/
       Editor/               ← build-time platform guard (§10)
       Plugins/              ← LFS binaries + their .meta, nothing else (§8)
