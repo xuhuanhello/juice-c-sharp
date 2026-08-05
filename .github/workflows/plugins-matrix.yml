@@ -32,7 +32,7 @@ jobs:
         include:
           - name: macOS universal
             platform: darwin
-            artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle
+            artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib
     steps:
       - uses: actions/checkout@v4
 

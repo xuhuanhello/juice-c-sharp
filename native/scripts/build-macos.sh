@@ -20,10 +20,10 @@ cmake -S "$ROOT" -B "$BUILD" \
 
 cmake --build "$BUILD" --parallel "$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
-BUNDLE="$ROOT/../Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle"
+PLUGIN="$ROOT/../Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib"
 echo "==> audit"
 python3 "$ROOT/scripts/audit_plugin.py" \
-  --binary "$BUNDLE" --platform darwin \
+  --binary "$PLUGIN" --platform darwin \
   --expected "$ROOT/exports/expected-symbols.txt"
 
-echo "Done → $BUNDLE"
+echo "Done → $PLUGIN"

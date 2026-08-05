@@ -54,7 +54,7 @@ END = "<!-- END supported-platforms -->"
 # silently missing table row.
 DISPLAY = {
     "Windows/x86_64/datachannel_unity.dll": ("Windows", "x86_64", "Editor + Player"),
-    "macOS/datachannel_unity.bundle": ("macOS", "universal (arm64 + x86_64)", "Editor + Player"),
+    "macOS/datachannel_unity.dylib": ("macOS", "universal (arm64 + x86_64)", "Editor + Player"),
     "Linux/x86_64/libdatachannel_unity.so": ("Linux", "x86_64", "Editor + Player"),
     "Android/arm64-v8a/libdatachannel_unity.so": ("Android", "arm64-v8a", "Player only"),
     "iOS/libdatachannel_unity.a": ("iOS", "arm64", "Player only"),
@@ -84,11 +84,13 @@ def tracked_files(repo_root: Path, plugin_root: Path) -> set[str]:
 def is_landed(rel: str, tracked: set[str]) -> bool:
     """Is this platform's artifact tracked by git?
 
-    macOS ships a `.bundle`, which is a **directory**: git tracks the files
-    inside it (`…/Contents/MacOS/datachannel_unity`), never the directory
-    itself. Comparing the platform key against tracked paths for equality
-    therefore silently reported "not landed" for macOS forever -- caught by
-    staging a real bundle and watching the table still say 0 platforms.
+    Every artifact is a single file today, so plain equality would do. The
+    prefix branch stays because it once did not: macOS shipped a `.bundle`,
+    a **directory**, and git tracks the files inside it rather than the
+    directory itself -- exact matching silently reported "not landed" for
+    macOS forever. The bundle is gone (see stage_plugin.py), but a directory
+    artifact can come back (an iOS `.framework`, say), and this branch costs
+    one line.
     """
     return rel in tracked or any(t.startswith(rel + "/") for t in tracked)
 

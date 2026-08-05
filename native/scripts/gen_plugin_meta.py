@@ -82,11 +82,12 @@ PLATFORMS: dict[str, dict] = {
             "CPU": "x86_64", "DefaultValueInitialized": "true", "OS": "Windows"}},
         "Standalone": {"target": "Win64", "enabled": 1, "settings": {"CPU": "x86_64"}},
     },
-    # macOS 是**单一 universal bundle**，没有架构子目录（见 native/CMakeLists.txt
-    # 开头的理由）。因此 CPU 是 AnyCPU —— 而「两份同名 bundle 必须靠 CPU 字段
-    # 区分」正是 #49 查出的 CheckFileCollisions 冲突与 reimport 刷 error 的根源，
-    # 这里从根上不存在。
-    "macOS/datachannel_unity.bundle": {
+    # macOS 是**单个 universal .dylib**：没有架构子目录，也不是 .bundle 目录
+    # （两条都推翻了 #10 的原始决议，理由分别见 native/CMakeLists.txt 开头与
+    # stage_plugin.py 的 darwin 分支）。因此 CPU 是 AnyCPU —— 而「两份同名产物
+    # 必须靠 CPU 字段区分」正是 #49 查出的 CheckFileCollisions 冲突与 reimport
+    # 刷 error 的根源，这里从根上不存在。
+    "macOS/datachannel_unity.dylib": {
         "Any": {"enabled": 0, "settings": {}},
         "Editor": {"enabled": 1, "settings": {
             "CPU": "AnyCPU", "DefaultValueInitialized": "true", "OS": "OSX"}},

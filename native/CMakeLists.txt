@@ -231,7 +231,7 @@ if(DCU_STAGE_PLUGIN)
   add_custom_command(TARGET datachannel_unity POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"
             "${NATIVE_ROOT}/scripts/audit_plugin.py"
-            --binary   "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/$<IF:$<BOOL:${APPLE}>,datachannel_unity.bundle,$<IF:$<BOOL:${WIN32}>,datachannel_unity.dll,libdatachannel_unity.so>>"
+            --binary   "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/$<IF:$<BOOL:${APPLE}>,datachannel_unity.dylib,$<IF:$<BOOL:${WIN32}>,datachannel_unity.dll,libdatachannel_unity.so>>"
             --platform "$<IF:$<BOOL:${APPLE}>,darwin,$<IF:$<BOOL:${WIN32}>,windows,linux>>"
             --expected "${DCU_EXPECTED_SYMBOLS}"
             --nm       "${CMAKE_NM}"

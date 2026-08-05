@@ -45,7 +45,7 @@ meson compile -C build/macos-arm64
 ```
 
 - **Meson is the product entry** (local = CI). Crypto + libdatachannel are built from **`subprojects/`**, not linked from brew.
-- **Single product per mac arch:** `datachannel_unity.bundle` only.
+- **Single product per mac arch:** `datachannel_unity.dylib` only.
 - **Self-contained:** static MbedTLS 3.6 (with DTLS-SRTP user config) into the plugin; `otool -L` must not show Homebrew openssl/mbedtls.
 - **Exports:** only `dcu_*` (`native/exports/`).
 - **CI:** matrix in GitHub Actions; maintainers merge LFS (see `docs/SPEC.md` §9–§10).

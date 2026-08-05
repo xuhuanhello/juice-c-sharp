@@ -365,11 +365,6 @@ def main() -> int:
     args = ap.parse_args()
 
     binary = args.binary
-    # macOS 传进来的可能是 .bundle 目录
-    if binary.is_dir():
-        inner = binary / "Contents" / "MacOS" / "datachannel_unity"
-        if inner.is_file():
-            binary = inner
     if not binary.is_file():
         raise AuditError(f"Artifact does not exist: {args.binary}")
 

@@ -33,7 +33,7 @@ jobs:
           - name: macOS universal
             os: macos-26
             platform: darwin
-            artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.bundle
+            artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib
           - name: Windows x64
             # 钉 windows-2022 而不是 windows-latest：后者现已指向 Windows Server
             # 2025 + **VS 2026**（别名 windows-2025-vs2026），"Visual Studio 17 2022"
