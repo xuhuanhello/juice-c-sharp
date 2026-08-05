@@ -60,7 +60,7 @@ jobs:
         # 「让缺席变成失败，而不是沉默」。见 #48。
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 钉死 Xcode 版本。托管 mac runner 拿不到「锁工具链」的等价好处（Xcode 装不进
       # Linux 容器），唯一的对策就是显式选版本 —— 用默认的话，GitHub 换镜像时我们的
@@ -123,7 +123,7 @@ jobs:
       # 产物**与它的 build-info.json 一起**上传。只传二进制的话，维护者下载后
       # 手里没有溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py 的
       # 门禁（正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: datachannel_unity-${{ matrix.platform }}
           path: |
@@ -135,7 +135,7 @@ jobs:
     name: Script syntax and generated files
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Shell syntax
         run: |
