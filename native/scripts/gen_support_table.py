@@ -111,11 +111,20 @@ def check_build_info(tracked: set[str], landed: list[str],
         except (OSError, json.JSONDecodeError) as exc:
             problems.append(f"  {sibling}: cannot be read as JSON ({exc})")
             continue
-        if not info.get("ci"):
+        ci = info.get("ci")
+        if not ci:
             problems.append(
                 f"  {sibling}: ci is null, so this came from a local build. "
                 "Land the CI-produced file instead -- a local one records a dirty "
                 "worktree and no run URL, so it has no provenance value.")
+            continue
+        if ci.get("event") == "pull_request":
+            problems.append(
+                f"  {sibling}: built by a `pull_request` run, so source.commit "
+                f"({info.get('source', {}).get('commit', '?')[:9]}) is GitHub's synthetic "
+                "merge ref -- that SHA stops existing once the PR is merged, and the "
+                "binary becomes untraceable. Land artifacts from a push-to-main run or "
+                "from plugins-matrix.yml (dispatch / schedule / release) instead.")
     return problems
 
 

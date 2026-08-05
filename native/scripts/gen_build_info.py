@@ -111,6 +111,11 @@ def ci_block() -> dict | None:
         "run_url": f"{server}/{repo}/actions/runs/{run_id}" if repo else None,
         "workflow": os.environ.get("GITHUB_WORKFLOW"),
         "ref": os.environ.get("GITHUB_REF"),
+        # The triggering event decides whether source.commit is a real commit.
+        # For `pull_request`, GitHub checks out a **synthetic merge ref** whose SHA
+        # stops existing once the PR is merged -- an artifact built there records a
+        # commit nobody can look up. gen_support_table.py refuses to land those.
+        "event": os.environ.get("GITHUB_EVENT_NAME"),
     }
 
 
