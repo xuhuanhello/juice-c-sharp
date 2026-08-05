@@ -75,9 +75,19 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake ninja
 
+      # 只从 Ubuntu 官方源更新索引：`sourceparts=/dev/null` 让 apt 跳过整个
+      # sources.list.d/，那里装着 runner 镜像预置的第三方源（microsoft、chrome
+      # 等）。v0.1.0 那次 release 跑就是被它们弄红的 —— packages.microsoft.com
+      # 返回 403，apt-get update 整体 exit 100，而我们一个包都不从那里取。
+      #
+      # 刻意**不写** `|| true`：那会把「Ubuntu 源也挂了」一起吞掉，正是
+      # CONTRIBUTING 第一条点名的病。这里是缩小读取范围，不是忽略失败 ——
+      # 官方源取不到索引，这一步照样红。
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+        run: |
+          sudo apt-get update -o Dir::Etc::sourceparts=/dev/null
+          sudo apt-get install -y cmake ninja-build
 
       # 刻意不做 `chmod +x`。但**也不查文件系统的 -x** —— 在 Windows 的 Git Bash 下
       # 那个位是从 shebang 伪造出来的（msys2 无 ACL 时的行为，见 #48），断言会

@@ -102,8 +102,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # 只从 Ubuntu 官方源更新索引，理由与 pr.yml 同一处注释：镜像预置的第三方源
+      # （microsoft / chrome）挂掉会让 apt-get update 整体 exit 100，而我们一个包
+      # 都不从那里取。v0.1.0 的 release 跑就是这么红的。不写 `|| true`。
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+        run: |
+          sudo apt-get update -o Dir::Etc::sourceparts=/dev/null
+          sudo apt-get install -y cmake ninja-build
 
       - name: Assert scripts are executable in git
         run: |
