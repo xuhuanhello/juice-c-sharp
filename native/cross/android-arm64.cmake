@@ -49,7 +49,7 @@ set(ANDROID_ABI "arm64-v8a" CACHE STRING "" FORCE)
 # 决议 #80 定为 23。**注意 Unity 2022.3 的默认 minSdk 是 22，比这里低一档** ——
 # 采用者不改设置的默认配置就是不匹配的。#85 会在构出件后查未定义符号里有没有
 # API 23 才引入的：有就在 PluginPlatformGuard 加构建期闸，一个都没有就调回 22。
-set(ANDROID_PLATFORM "android-23" CACHE STRING "" FORCE)
+set(ANDROID_PLATFORM "android-22" CACHE STRING "" FORCE)  # 实验：#85 B3
 
 # 静态 libc++：产物要自包含。符号可见性已是 hidden（CMakeLists 顶部），
 # 所以静态 STL 不会把 libc++ 的符号泄漏到导出表。
