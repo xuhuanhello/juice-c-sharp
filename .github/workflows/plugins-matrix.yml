@@ -35,7 +35,7 @@ jobs:
             artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib
             build_info_path: Packages/datachannel-unity/Plugins/macOS/build-info.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 显式钉版本，不用默认 —— 托管 mac runner 拿不到「锁工具链」的等价好处
       # （Xcode 装不进 Linux 容器），用默认的话 GitHub 换镜像时产物会悄悄变。
@@ -74,7 +74,7 @@ jobs:
       # 产物**与它的 build-info.json 一起**上传。只传二进制的话，维护者下载后
       # 手里没有溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py 的
       # 门禁（正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: datachannel_unity-${{ matrix.platform }}
           path: |
@@ -97,7 +97,7 @@ jobs:
             artifact_path: Packages/datachannel-unity/Plugins/Linux/x86_64/libdatachannel_unity.so
             build_info_path: Packages/datachannel-unity/Plugins/Linux/x86_64/build-info.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
@@ -128,7 +128,7 @@ jobs:
       # 产物**与它的 build-info.json 一起**上传。只传二进制的话，维护者下载后
       # 手里没有溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py 的
       # 门禁（正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: datachannel_unity-${{ matrix.platform }}
           path: |
@@ -152,7 +152,7 @@ jobs:
             artifact_path: Packages/datachannel-unity/Plugins/Windows/x86_64/datachannel_unity.dll
             build_info_path: Packages/datachannel-unity/Plugins/Windows/x86_64/build-info.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Assert scripts are executable in git
         run: |
@@ -182,7 +182,7 @@ jobs:
       # 产物**与它的 build-info.json 一起**上传。只传二进制的话，维护者下载后
       # 手里没有溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py 的
       # 门禁（正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: datachannel_unity-${{ matrix.platform }}
           path: |
