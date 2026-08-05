@@ -161,9 +161,9 @@ jobs:
 
       # 支持表由 git 跟踪的产物导出（#53），所以它不可能撒谎、也不可能被忘记更新。
       # 同一步还断言：每个已入库的二进制在 Report~/ 里都有一份**来自 CI** 的溯源
-      # 文件（#54 立的门禁，#65 只改了它去哪找）—— 本机产的那份 ci=null、
-      # dirty=true，没有溯源价值。期望的文件名由二进制自己的路径算出，没有人工
-      # 清单可以撒谎。
+      # 文件（#54 立的门禁，#65 只改了它去哪找）—— 本机产的那份 ci=null，没有 run
+      # URL，commit 描述的是 checkout 而不是被编译的东西，没有溯源价值。期望的
+      # 文件名由二进制自己的路径算出，没有人工清单可以撒谎。
       - name: Support table is derived from the shipped binaries
         run: |
           python3 native/scripts/gen_support_table.py \
