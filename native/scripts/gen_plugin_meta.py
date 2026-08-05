@@ -120,6 +120,22 @@ PLATFORMS: dict[str, dict] = {
 }
 
 
+def report_name(plugin_rel: str) -> str:
+    """插件目录 → 溯源文件名：`Windows/x86_64` → `Windows-x86_64.json`（#65）。
+
+    build-info.json 不再与二进制同目录，而是拍平编名住进 `Report~/`（`~` 后缀
+    让 AssetDatabase 完全忽略它，与本包 `Samples~` 同一手法）。
+
+    **住在这里，而不是各调用点各算一份**：它连接的是 `Plugins/<平台>` 与
+    `Report~/<名>`，而「平台有哪些」的唯一权威源就是上面的 PLATFORMS。
+    gen_build_info.py 用它决定写到哪，gen_support_table.py 用它决定去哪找 ——
+    两边必须逐字节算出同一个名字，否则门禁要么去找一份永远不存在的文件、
+    要么放过一个没有溯源的二进制。#65 明确否掉了镜像子树的形态，正是因为
+    拍平同样只需要一行推导，且推导自同一份 PLATFORMS，没有第二张表要对齐。
+    """
+    return plugin_rel.replace("\\", "/").strip("/").replace("/", "-") + ".json"
+
+
 class MetaError(Exception):
     pass
 

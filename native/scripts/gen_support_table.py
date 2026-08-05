@@ -17,11 +17,19 @@ Nobody maintains a list by hand, so nobody can forget to update one (#53).
 
 Also enforced here, because this script already walks the landed artifacts:
 
-    every landed binary must sit next to a build-info.json that came from CI.
+    every landed binary must have a CI-produced provenance file in `Report~/`.
 
-A build-info.json with `ci: null` was produced by someone's local build; it
+A build-info file with `ci: null` was produced by someone's local build; it
 records a dirty worktree and no run URL, so it has no provenance value at all
 (#54). Landing one would leave a binary nobody can trace.
+
+#65 moved those files out of `Plugins/` and into `Report~/<flattened>.json`,
+which changes only where this gate looks -- **not what it can prove**. The
+point of #54's "beside the binary" was never convenience; it was that
+"binary landed, provenance did not" must have nowhere to hide. That survives
+intact, because the expected file name is still computed from the binary's own
+path (`gen_plugin_meta.report_name`). There is no hand-maintained mapping here
+that could be quietly edited to make a missing file look present.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gen_plugin_meta import PLATFORMS  # noqa: E402  单一平台清单，不在这里重复一份
+from gen_plugin_meta import PLATFORMS, report_name  # noqa: E402  单一平台清单与拍平名推导
 
 
 def _force_utf8_output() -> None:
@@ -65,13 +73,21 @@ class SupportTableError(Exception):
     pass
 
 
-def tracked_files(repo_root: Path, plugin_root: Path) -> set[str]:
-    rel = plugin_root.resolve().relative_to(repo_root.resolve())
+def tracked_files(repo_root: Path, directory: Path) -> set[str]:
+    """Paths git tracks under `directory`, relative to it.
+
+    Called twice: once for `Plugins/` (which binaries shipped) and once for
+    `Report~/` (which provenance files shipped). An untracked-but-present file
+    counts as absent in both, which is the point -- what git tracks is exactly
+    what an adopter receives.
+    """
+    rel = directory.resolve().relative_to(repo_root.resolve())
     proc = subprocess.run(["git", "-C", str(repo_root), "ls-files", str(rel)],
                           capture_output=True, text=True)
     if proc.returncode != 0:
         raise SupportTableError(
-            "git ls-files failed, so the set of shipped binaries cannot be determined.\n"
+            f"git ls-files failed for {rel}, so what this package ships cannot be "
+            "determined.\n"
             f"  {proc.stderr.strip()}\n"
             "  This script keys off what git tracks on purpose; guessing from the\n"
             "  filesystem would make the table differ between a built worktree and a\n"
@@ -95,32 +111,33 @@ def is_landed(rel: str, tracked: set[str]) -> bool:
     return rel in tracked or any(t.startswith(rel + "/") for t in tracked)
 
 
-def check_build_info(tracked: set[str], landed: list[str],
-                     plugin_root: Path) -> list[str]:
-    """Every landed binary needs a CI-produced build-info.json beside it."""
+def check_build_info(tracked_reports: set[str], landed: list[str],
+                     report_root: Path) -> list[str]:
+    """Every landed binary needs a CI-produced provenance file in `Report~/`."""
     problems = []
     for rel in landed:
-        sibling = str(Path(rel).parent / "build-info.json").replace("\\", "/")
-        if sibling not in tracked:
-            problems.append(f"  {rel}: no build-info.json is tracked beside it "
-                            f"(expected {sibling})")
+        # Derived from the binary's own path, so no list exists that could lie.
+        name = report_name(Path(rel).parent.as_posix())
+        if name not in tracked_reports:
+            problems.append(f"  {rel}: no provenance file is tracked for it "
+                            f"(expected {report_root.name}/{name})")
             continue
-        path = plugin_root / sibling
+        path = report_root / name
         try:
             info = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            problems.append(f"  {sibling}: cannot be read as JSON ({exc})")
+            problems.append(f"  {name}: cannot be read as JSON ({exc})")
             continue
         ci = info.get("ci")
         if not ci:
             problems.append(
-                f"  {sibling}: ci is null, so this came from a local build. "
+                f"  {name}: ci is null, so this came from a local build. "
                 "Land the CI-produced file instead -- a local one records a dirty "
                 "worktree and no run URL, so it has no provenance value.")
             continue
         if ci.get("event") == "pull_request":
             problems.append(
-                f"  {sibling}: built by a `pull_request` run, so source.commit "
+                f"  {name}: built by a `pull_request` run, so source.commit "
                 f"({info.get('source', {}).get('commit', '?')[:9]}) is GitHub's synthetic "
                 "merge ref -- that SHA stops existing once the PR is merged, and the "
                 "binary becomes untraceable. Land artifacts from a push-to-main run or "
@@ -128,7 +145,14 @@ def check_build_info(tracked: set[str], landed: list[str],
     return problems
 
 
-def render(landed: list[str]) -> str:
+def render(landed: list[str], report_dirname: str) -> str:
+    """The table also names each platform's provenance file, for the same reason
+    the platform rows are generated at all (#53): a hand-written "where is the
+    build record for my platform" list is one more thing that goes stale the day
+    a platform lands and nobody remembers to edit the README. The file name comes
+    from the same `report_name` the gate uses, so the column cannot point at a
+    file that is not the one being checked.
+    """
     lines = [BEGIN, ""]
     if not landed:
         lines += [
@@ -140,12 +164,13 @@ def render(landed: list[str]) -> str:
         ]
     else:
         lines += [
-            "| Platform | Architecture | Loaded by |",
-            "|---|---|---|",
+            "| Platform | Architecture | Loaded by | Build record |",
+            "|---|---|---|---|",
         ]
         for rel in landed:
             name, arch, where = DISPLAY[rel]
-            lines.append(f"| {name} | {arch} | {where} |")
+            record = report_name(Path(rel).parent.as_posix())
+            lines.append(f"| {name} | {arch} | {where} | `{report_dirname}/{record}` |")
         missing = [r for r in PLATFORMS if r not in landed]
         if missing:
             lines += ["", "Not shipped yet: "
@@ -159,6 +184,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Generate the supported-platforms table")
     ap.add_argument("--repo-root", required=True, type=Path)
     ap.add_argument("--plugin-root", required=True, type=Path)
+    ap.add_argument("--report-root", required=True, type=Path,
+                    help="Packages/datachannel-unity/Report~ -- where the provenance "
+                         "files live since #65")
     ap.add_argument("--readme", required=True, type=Path)
     ap.add_argument("--check", action="store_true",
                     help="check only, never write; exit non-zero on any difference (for CI)")
@@ -174,7 +202,8 @@ def main() -> int:
     tracked = tracked_files(args.repo_root, args.plugin_root)
     landed = [rel for rel in PLATFORMS if is_landed(rel, tracked)]
 
-    problems = check_build_info(tracked, landed, args.plugin_root)
+    problems = check_build_info(tracked_files(args.repo_root, args.report_root),
+                                landed, args.report_root)
     if problems:
         raise SupportTableError(
             "Landed binaries without usable provenance (#54):\n" + "\n".join(problems))
@@ -189,7 +218,7 @@ def main() -> int:
 
     head, _, rest = text.partition(BEGIN)
     _, _, tail = rest.partition(END)
-    updated = head + render(landed) + tail
+    updated = head + render(landed, args.report_root.name) + tail
 
     if updated == text:
         print(f"OK: the support table lists {len(landed)}/{len(PLATFORMS)} platform(s) "

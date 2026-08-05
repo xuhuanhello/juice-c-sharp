@@ -52,6 +52,11 @@ set(EXPORTS_DIR      "${NATIVE_ROOT}/exports")
 option(DCU_STAGE_PLUGIN "构建后把产物暂存进 UPM Plugins 布局" ON)
 set(DCU_PLUGIN_ROOT "${NATIVE_ROOT}/../Packages/datachannel-unity/Plugins"
     CACHE PATH "Packages/datachannel-unity/Plugins 的路径")
+# 溯源文件的落点，与 Plugins/ **同级而非其子目录**（#65）：`~` 后缀让 Unity 的
+# AssetDatabase 完全忽略这一层（与本包 Samples~ 同一手法），于是一份纯构建记录
+# 不必铸 GUID、不必带 .meta。规矩是「Plugins/ 里只放二进制和它的 .meta」。
+set(DCU_REPORT_ROOT "${NATIVE_ROOT}/../Packages/datachannel-unity/Report~"
+    CACHE PATH "Packages/datachannel-unity/Report~ 的路径")
 
 # ---------- 前置检查 ----------
 # 上游 checkout：缺失时 fetch-deps.sh 能补
@@ -198,14 +203,20 @@ if(DCU_STAGE_PLUGIN)
     VERBATIM
   )
 
-  # 溯源信息：与二进制同目录，随它一起入库（#54）。
-  # 采用者手里只有一个包目录，没有 git 历史也没有 CI 日志 —— 报 bug 时要能反查
-  # 这份二进制的来历，靠的就是它。刻意不做成 dcu_build_info() 导出：那会动 ABI，
-  # 且让二进制内容每次构建都变，毁掉 #27 赖以验证 Meson→CMake 迁移的字节可复现性。
+  # 溯源信息：写进 Report~/，文件名由平台目录拍平而来（#65 推翻 #54 的「同目录」）。
+  # 报 bug 时要能反查这份二进制的来历，靠的就是它 —— 但反查是维护者指路、对方照路径
+  # 取文件，所以文件在不在 Unity 的资产树里无关紧要，README 里写着它在哪才要紧。
+  # 刻意不做成 dcu_build_info() 导出：那会动 ABI，且让二进制内容每次构建都变，
+  # 毁掉 #27 赖以验证 Meson→CMake 迁移的字节可复现性。
+  #
+  # 只传目录 rel，不传拼好的路径：拍平名由 gen_plugin_meta.report_name 一处算出，
+  # 门禁（gen_support_table.py）算的是同一个函数。两边各拼一份就是在制造一个
+  # 「门禁去找的文件」和「构建写出的文件」可以悄悄错开的缝。
   add_custom_command(TARGET datachannel_unity POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"
             "${NATIVE_ROOT}/scripts/gen_build_info.py"
-            --out       "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/build-info.json"
+            --report-root "${DCU_REPORT_ROOT}"
+            --rel         "${DCU_PLUGIN_REL}"
             --repo-root "${NATIVE_ROOT}/.."
             --header    "${DCU_SRC}/include/dcu.h"
             --lock      "${NATIVE_ROOT}/versions.lock"
@@ -217,7 +228,7 @@ if(DCU_STAGE_PLUGIN)
             --compiler-version  "${CMAKE_CXX_COMPILER_VERSION}"
             --deployment-target "${CMAKE_OSX_DEPLOYMENT_TARGET}"
             --cmake-version     "${CMAKE_VERSION}"
-    COMMENT "Writing build-info.json"
+    COMMENT "Writing provenance → Report~/"
     VERBATIM
   )
 
