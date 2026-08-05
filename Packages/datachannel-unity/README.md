@@ -55,20 +55,22 @@ Or use a git URL once published:
 Pinned versions live in `native/versions.lock` (libdatachannel **v0.24.5**, datachannel-wasm **v0.4.0**, MbedTLS).
 
 ```bash
-# tools: meson, cmake, ninja, clang++, git — local mac by default
-cd native
-./scripts/fetch-deps.sh    # fills subprojects/mbedtls + libdatachannel
-meson setup build/macos-arm64 --buildtype=release
-meson compile -C build/macos-arm64
+# tools: cmake, ninja, a C++ toolchain, git — local mac by default
+./native/scripts/fetch-deps.sh    # fills subprojects/mbedtls + libdatachannel
+cmake -S native -B native/build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build native/build/macos
 # same thing via thin wrapper:
-./scripts/build-macos.sh
+./native/scripts/build-macos.sh
 ```
 
-- **Meson is the product entry** (local = CI). Crypto + libdatachannel are built from **`subprojects/`**, not linked from brew.
-- **Single product per mac arch:** `datachannel_unity.dylib` only.
+- **CMake is the only product entry** (local = CI). Crypto + libdatachannel are built from **`subprojects/`**, not linked from brew. Meson was the entry once and is not any more — see `docs/SPEC.md` §9 for why.
+- **One macOS product, and it is universal:** a single `datachannel_unity.dylib` covering arm64 + x86_64 — no per-arch copies, no `.bundle`.
 - **Self-contained:** static MbedTLS 3.6 (with DTLS-SRTP user config) into the plugin; `otool -L` must not show Homebrew openssl/mbedtls.
-- **Exports:** only `dcu_*` (`native/exports/`).
-- **CI:** matrix in GitHub Actions; maintainers merge LFS (see `docs/SPEC.md` §9–§10).
+- **Exports:** only `dcu_*`. `native/exports/expected-symbols.txt` is the one hand-written list; the per-platform link-time files are generated from it and not committed.
+- **Windows/Linux** build the same way (Windows uses CMake's Visual Studio generator instead of Ninja); nothing cross-compiles today.
+- **CI:** three jobs, one per toolchain shape, on every PR; the full matrix runs on a schedule and uploads artifacts, and a maintainer commits them to LFS (see `docs/SPEC.md` §9–§10).
+
+**Linux support floor: Ubuntu 22.04 / glibc 2.35** — one notch above what Unity 2022.3 itself declares. This is a declared floor, not a measured one: the binary is built on that image and no compatibility below it is claimed.
 
 ## Minimal usage
 
