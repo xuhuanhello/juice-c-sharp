@@ -46,10 +46,26 @@ set(ANDROID_ABI "arm64-v8a" CACHE STRING "" FORCE)
 # 编得比采用者高，`.so` 可能引用采用者最老设备上不存在的符号，dlopen 时
 # `cannot locate symbol` 当场崩；编得低则永远安全（老符号一直在）。
 #
-# 决议 #80 定为 23。**注意 Unity 2022.3 的默认 minSdk 是 22，比这里低一档** ——
-# 采用者不改设置的默认配置就是不匹配的。#85 会在构出件后查未定义符号里有没有
-# API 23 才引入的：有就在 PluginPlatformGuard 加构建期闸，一个都没有就调回 22。
-set(ANDROID_PLATFORM "android-22" CACHE STRING "" FORCE)  # 实验：#85 B3
+# **22 是实测的结果，不是保守的默认值。**
+#
+# 决议 #80 先定 23，同时定下「先测再定」：Unity 2022.3 的默认 minSdk 是 22，比 23
+# 低一档，于是采用者不改设置的默认配置就与我们的二进制不匹配 —— 而这个不匹配
+# **要么完全无害，要么在最老的设备上 dlopen 崩**，分界线是「树里到底有没有东西
+# 用到 API 23 才引入的符号」。
+#
+# 测法不是比对头文件，是**让链接器回答**：NDK 的 sysroot 按 API 级别分目录存 stub
+# 库，降到 22 重链，只要有一个符号在 22 上不存在就会链接失败。#85 B3 实跑（PR #86，
+# NDK 27.3.13750724）：**android-22 链接通过，导出集与依赖集不变**。
+#
+# 结论：没东西需要 23，那就不背这个与 Unity 默认值的不匹配 —— 按 #80 预先拍板的
+# 两条分支取「调回 22」那条。`PluginPlatformGuard` 因此**不需要**加 minSdk 闸：
+# 那道闸会拦一个不存在的故障，正是 CONTRIBUTING「before adding a defensive
+# mechanism」点名的形状。
+#
+# 22 同时是 Unity 2022.3 允许的**最低** minSdk，所以这个值不挡任何一个 2022.3
+# 能支持的采用者，也不多背一格没有消费者的兼容性（NDK r27 本身支持到 21，但
+# Unity 2022.3 的 Player 不支持 21）。
+set(ANDROID_PLATFORM "android-22" CACHE STRING "" FORCE)
 
 # 静态 libc++：产物要自包含。符号可见性已是 hidden（CMakeLists 顶部），
 # 所以静态 STL 不会把 libc++ 的符号泄漏到导出表。
