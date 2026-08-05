@@ -86,14 +86,21 @@ LINUX_ALLOWED_NAMES = {
 # Android：Bionic 的 DT_NEEDED **不带版本后缀**（libc.so，不是 libc.so.6），
 # 所以 glibc 那份名字集合一条都套不上 —— 平台键必须独立（决议 #79）。
 #
-# **这个集合故意是空的。** 决议 #85 C 节：具体条目等第一次 CI 实跑把真实的
-# DT_NEEDED 打出来，照实填，不预先猜。check_deps 在报错前会逐行打印实际依赖
-# （见 main() 里的 "==> dependencies"），所以第一次跑虽然是红的，但红的内容
-# 就是要填进来的清单本身。
-#
-# 先填一份「看起来对」的猜测更糟：万一上游多带了一个我们没想到的库，猜的那份
-# 会恰好把它放过去，而这道门禁存在的全部意义就是发现「产物依赖了不该依赖的东西」。
-ANDROID_ALLOWED_NAMES: set[str] = set()
+# 这份清单**来自第一次 CI 实跑打出来的真实 DT_NEEDED**（PR #86，NDK 27.3.13750724），
+# 不是照着 Bionic 文档猜的 —— 决议 #85 C 节要求的就是这个顺序。首跑因空集而红，
+# 红的内容正是这四条。
+ANDROID_ALLOWED_NAMES = {
+    # Bionic 的 libc/libm/libdl。注意**不带版本后缀**（libc.so，不是 glibc 的
+    # libc.so.6）—— 这正是 LINUX_ALLOWED_NAMES 一条都套不上、平台键必须独立的原因。
+    "libc.so", "libm.so", "libdl.so",
+    # Android 的系统日志库。由 libdatachannel 的 Android 分支链入（链接行上的
+    # -llog），不是我们加的。它是 NDK 的稳定 API 之一（自 API 3 起），与
+    # 「crypto 必须静态链接」无关。
+    "liblog.so",
+}
+# 这里**没有** libc++_shared.so —— native/cross/android-arm64.cmake 设了
+# ANDROID_STL=c++_static，实测生效。哪天它冒出来，说明 STL 悄悄换成了共享版，
+# 产物不再自包含，届时该红。
 
 # Windows：PE 导入表只有 DLL 名。
 # bcrypt/crypt32 是 **Windows 自带的系统 crypto API**，不是我们捆绑的 crypto 库
