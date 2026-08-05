@@ -129,10 +129,17 @@ native/build/
 # （项目自有的构建定义在 native/CMakeLists.txt，不在这里。）
 native/subprojects/
 
-Packages/datachannel-unity/Plugins/**/*.dll
-Packages/datachannel-unity/Plugins/**/*.so
-Packages/datachannel-unity/Plugins/**/*.a
-Packages/datachannel-unity/Plugins/**/*.bundle/
-Packages/datachannel-unity/Plugins/**/*.dylib
-Packages/datachannel-unity/Plugins/**/*.jslib
+# 插件二进制**现在入库**（走 LFS，规则见 .gitattributes）。
+#
+# 这里原本无差别忽略它们，来自 #35「全矩阵补齐前一个二进制都不提交」的时代。
+# #53 已把入库改为**分批**：每个平台过了 CI 门禁与一次真机 smoke 就可以入库，
+# 配套是构建期守卫（缺平台时终止构建）与由产物导出的支持表 —— 两者都已落地。
+#
+# 尚未入库的平台（Android / iOS）保持忽略，避免有人把本机随手构建的产物提交上来：
+# 它们的 build-info.json 会是 ci=null，gen_support_table.py 那条门禁本就会拒，
+# 但在 .gitignore 这一层先挡一道更省事。
+Packages/datachannel-unity/Plugins/Android/**/*.so
+Packages/datachannel-unity/Plugins/iOS/**/*.a
+Packages/datachannel-unity/Plugins/WebGL/**
+!Packages/datachannel-unity/Plugins/WebGL/.gitkeep
 !Packages/datachannel-unity/Plugins/**/.gitkeep
