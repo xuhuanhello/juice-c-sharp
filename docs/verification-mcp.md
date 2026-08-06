@@ -207,11 +207,16 @@ The artifact separates the failure modes rather than just saying "not zero": a c
 
 **Build the existing suite into a Player. Do not write a device-specific probe** — that would be a second thing to keep in step with the contracts.
 
+**The command line is the only route that produces the artifact.** ~~Test Runner → PlayMode → *Run all tests (`<target platform>`)*, **or** headless~~ — that "or" was wrong, and wrong in the way that costs a whole run: a Test Runner **UI** run writes **no result file at all**. The class that serialises the XML (`ResultsSavingCallbacks`) lives in the package's `CommandLineTest` namespace and is registered in exactly one place, `CommandLineTest/Executer.cs` — the `-runTests` path. A UI run goes through `WindowResultUpdater`, which only repaints the window. (Verified against `com.unity.test-framework@1.1.33`, the version this project pins. The two `"Export"` strings in `PlayModeTestListGUI.cs` are the *build* button's caption when the target exports an Android Studio / Xcode project — nothing to do with results.)
+
 | Step | |
 |------|--|
-| 1 | Test Runner → PlayMode → **Run all tests (`<target platform>`)**, or headless: `Unity -runTests -testPlatform <Android\|iOS\|StandaloneWindows64\|StandaloneLinux64\|StandaloneOSX> -batchmode -projectPath . -testResults /tmp/smoke-<platform>.xml` |
+| 0 | **Close the GUI Editor.** Batchmode cannot open a project another Editor already has open (`Multiple Unity instances cannot open the same project`) |
+| 1 | `Unity -runTests -testPlatform <Android\|iOS\|StandaloneWindows64\|StandaloneLinux64\|StandaloneOSX> -batchmode -projectPath . -testResults <host path>/smoke-<platform>.xml` |
 | 2 | Let it run **on the device**, not in the Editor |
-| 3 | Retrieve the NUnit result XML and attach it to that platform's ticket |
+| 3 | Attach the NUnit result XML to that platform's ticket |
+
+**The XML is written on the host, not on the device** — the Editor process drives the run over adb/USB and serialises the result itself, so there is nothing to `adb pull`. `-testResults` is optional; without it the file lands at `<project>/TestResults-<ticks>.xml` (`ResultsSavingCallbacks.GetDefaultResultFilePath`). Both option names are spelled without the leading dash in `CommandLineTest/SettingsBuilder.cs` (`testPlatform`, `testResults`), i.e. pass them as `-testPlatform` / `-testResults`.
 
 **Expect:** every test passed, and — just as importantly — **a non-zero test count**. Zero tests run is a failure: it means the plugin did not load, which is the whole reason this step exists.
 
