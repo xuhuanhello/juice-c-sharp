@@ -93,8 +93,14 @@ PLATFORMS: dict[str, dict] = {
             "CPU": "AnyCPU", "DefaultValueInitialized": "true", "OS": "OSX"}},
         "Standalone": {"target": "OSXUniversal", "enabled": 1, "settings": {"CPU": "AnyCPU"}},
     },
-    # `.so` 对 Android 也是候选，Unity 导入时会写一条默认关闭的 Android 条目。
-    # 手写时省略它行为一致，但目标是与 Unity 产出逐字节一致，所以必须在。
+    # `Is16KbAligned` 是 Unity **从二进制自己量出来的**，不是调用方设的开关：探针只设
+    # SetCompatibleWithPlatform / CPU，这一位由导入器读 `PT_LOAD` 的 Align 填。所以它的
+    # 正确取值随产物而变，两条 `.so` 因此**必须不同**（实测 2022.3.62f3）：
+    #
+    #   Linux x86_64 —— Align `0x1000`（4 KB）  → false
+    #   Android arm64 —— Align `0x4000`（16 KB） → true
+    #
+    # 上面这条 Linux 的 `false` 是对的，别顺手一起改。
     "Linux/x86_64/libdatachannel_unity.so": {
         "Android": {"enabled": 0, "settings": {"Is16KbAligned": "false"}},
         "Any": {"enabled": 0, "settings": {}},
@@ -102,8 +108,19 @@ PLATFORMS: dict[str, dict] = {
             "CPU": "x86_64", "DefaultValueInitialized": "true", "OS": "Linux"}},
         "Standalone": {"target": "Linux64", "enabled": 1, "settings": {"CPU": "x86_64"}},
     },
+    # `Is16KbAligned: true` —— **不是乐观假设，是有门禁兜着的声明**：Android 那份
+    # `native/platforms/Android.cmake` 显式传 `-Wl,-z,max-page-size=16384`，且
+    # audit 按 `DCU_REQUIRE_PAGE_ALIGN` 断言 `PT_LOAD` 的 Align ≥ `0x4000`（#81）。
+    # 对齐掉了 CI 先红，轮不到这里撒谎。
+    #
+    # 它原为 `false`，而 CI 早已实测产物是 `0x4000` —— 元数据与产物事实脱节。成因是
+    # 黄金样本当初用**占位资产**采集（CONTRIBUTING 的重采步骤第 1 步），占位文件不是
+    # 16 KB 对齐的，Unity 如实量出 `false`，那个值就被抄进了生成器。**对这个字段，
+    # 占位法本身是错的** —— 必须拿真产物采。重采已随本次修复完成。
+    #
+    # 后果不是「小瑕疵」：`false` 会让采用者的 16 KB 设备上这份插件被当成未对齐处理。
     "Android/arm64-v8a/libdatachannel_unity.so": {
-        "Android": {"enabled": 1, "settings": {"CPU": "ARM64", "Is16KbAligned": "false"}},
+        "Android": {"enabled": 1, "settings": {"CPU": "ARM64", "Is16KbAligned": "true"}},
         "Any": {"enabled": 0, "settings": {}},
         "Editor": {"enabled": 0, "settings": {"DefaultValueInitialized": "true"}},
     },
