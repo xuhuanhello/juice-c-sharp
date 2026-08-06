@@ -1,11 +1,22 @@
 # PR 门禁（map #46 / 决议 #51）。
 #
-# 跑**三种工具链形状的代表**，不是所有平台：
-#   macOS（Mach-O / clang / nm+otool）、Windows x64（PE / MSVC / dumpbin）、
-#   Linux x64（ELF / gcc / readelf）。
-# 判据是**新信息量**而不是平台数：三种目标格式、三条 audit 路径全覆盖。
-# Android 与 Linux 同为 ELF，iOS 与 macOS 同为 Mach-O —— 它们在 PR 上提供的
-# 新信息接近零，留给 plugins-matrix.yml。
+# 跑**工具链形状的代表**，不是所有平台。判据是**新信息量**而不是平台数。
+#
+#   macOS universal   Mach-O / clang    / nm+otool  / 本机构建
+#   Windows x64       PE     / MSVC     / dumpbin   / 本机构建
+#   Linux x64         ELF    / gcc      / readelf   / 本机构建
+#   Android arm64-v8a ELF    / NDK clang/ readelf   / **交叉编译**
+#
+# **Android 在这里不是因为它是 ELF，而是因为它是唯一的交叉编译代表**（决议 #79）。
+# 早先这里写着「Android 与 Linux 同为 ELF，新信息接近零」—— 那句话只比了「目标
+# 格式」一条轴，而 `-DCMAKE_TOOLCHAIN_FILE=` 这条路径本仓库在 Android 之前**从未
+# 走过**（SPEC §9）。按同一个判据重算，结论相反。
+#
+# 另一条同样来自本文件的论证：下面那段说「PR 只跑 mac」被推翻，是因为完整矩阵每周
+# 一才跑、最坏坏七天且已攒一堆提交。Android 一旦入库就是已交付平台，它坏七天与
+# Linux 坏七天没有区别。
+#
+# iOS 与 macOS 同为 Mach-O 且**尚未产出任何产物**，仍留给 plugins-matrix.yml。
 #
 # 这推翻了 SPEC §10 的「PR 至少一个 mac 构建 + audit」（原为只跑 mac）：改
 # CMakeLists 或 dcu.h 完全可能 mac 绿而 Windows/Linux 红，而完整矩阵每周一才跑，
@@ -53,6 +64,13 @@ jobs:
             platform: linux
             artifact_path: Packages/datachannel-unity/Plugins/Linux/x86_64/libdatachannel_unity.so
             build_info_path: Packages/datachannel-unity/Report~/Linux-x86_64.json
+          - name: Android arm64-v8a
+            # 与 Linux x64 同宿主，但走 NDK 的 toolchain file 交叉编译 ——
+            # 本仓库第一条真正使用 -DCMAKE_TOOLCHAIN_FILE= 的路径（决议 #79）。
+            os: ubuntu-22.04
+            platform: android
+            artifact_path: Packages/datachannel-unity/Plugins/Android/arm64-v8a/libdatachannel_unity.so
+            build_info_path: Packages/datachannel-unity/Report~/Android-arm64-v8a.json
     defaults:
       run:
         # Windows runner 的默认 shell 是 pwsh。不写这行，下面的 bash 语法会直接
@@ -104,6 +122,27 @@ jobs:
           done < <(git ls-files -s native/scripts/)
           exit $fail
 
+      # NDK 钉 **r27 大版本**，小版本取镜像上最新的（决议 #79）。
+      #
+      # 不用 $ANDROID_NDK_HOME / $ANDROID_NDK_LATEST_HOME —— 它们指向哪一版会
+      # 随镜像更新漂移，而 Android 是唯一一个产物**完全由工具链决定**的平台
+      # （其余三个至少有宿主 runner 标签兜着）。理由与上面 Pin Xcode 那步一字不差。
+      #
+      # 找不到 27.* 就直接红，不回落到默认 NDK：回落会让「钉住了」和「没钉住」
+      # 长得一样，而产物会因此悄悄换一个工具链 —— CONTRIBUTING 的第一原则。
+      - name: Pin Android NDK (r27, highest minor)
+        if: matrix.platform == 'android'
+        run: |
+          set -euo pipefail
+          ndk_root=$(ls -d "$ANDROID_SDK_ROOT"/ndk/27.* 2>/dev/null | sort -V | tail -1 || true)
+          if [[ -z "$ndk_root" || ! -d "$ndk_root" ]]; then
+            echo "::error::No NDK 27.* under $ANDROID_SDK_ROOT/ndk (decision #79 pins the r27 major)"
+            ls -1 "$ANDROID_SDK_ROOT/ndk" 2>/dev/null || echo "(no ndk directory at all)"
+            exit 1
+          fi
+          echo "ANDROID_NDK_ROOT=$ndk_root" >> "$GITHUB_ENV"
+          echo "Pinned NDK: $ndk_root"
+
       - name: Fetch pinned upstream deps
         run: ./native/scripts/fetch-deps.sh
 
@@ -111,18 +150,32 @@ jobs:
       # Windows 用 CMake 自带的 Visual Studio 生成器：CMake 自己就能定位 MSVC，
       # 不需要预先 vcvars，也就不需要引入第三方 action 去设置它。
       # 其余平台用 Ninja。
+      #
+      # Android 只多一个 -DCMAKE_TOOLCHAIN_FILE=：**平台配置是按 CMAKE_SYSTEM_NAME
+      # 自动选取的**（native/platforms/Android.cmake），workflow 这边不需要、也不该
+      # 再声明一遍产物名或落点（决议 #81）。用绝对路径传 toolchain file —— 相对路径
+      # 在部分 CMake 版本里是相对**构建目录**解析的。
       - name: Build plugin (CMake)
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cmake -S native -B native/build/ci -G "Visual Studio 17 2022" -A x64
             cmake --build native/build/ci --config Release
+          elif [[ "${{ matrix.platform }}" == "android" ]]; then
+            cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$PWD/native/cross/android-arm64.cmake"
+            cmake --build native/build/ci
           else
             cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
             cmake --build native/build/ci
           fi
 
-      # audit 已在 POST_BUILD 跑过一次；这里再显式跑一次，是为了在 CI 日志里
-      # 成为独立可定位的一步。
+      # audit 已在 POST_BUILD 跑过一次（那才是**门禁** —— 它跑不过，构建就失败）；
+      # 这里再显式跑一次，只为在 CI 日志里成为独立可定位的一步。
+      #
+      # 刻意**不**在这里重复 --require-page-align：那个要求由
+      # native/platforms/Android.cmake 声明、由 POST_BUILD 那次执行。在 workflow
+      # 里再写一遍就是第二个真相源，而两处迟早会错开。这一步因此是门禁的**子集**，
+      # 不是门禁本身。
       - name: Audit plugin (exports + dependencies)
         run: |
           python3 native/scripts/audit_plugin.py \
