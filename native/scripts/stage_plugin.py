@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import pathlib
 import shutil
 import subprocess
@@ -40,7 +39,7 @@ def main() -> int:
     # 迟早会与另一份错开 —— 那正是 audit 去找的文件与构建写出的文件可以悄悄不同
     # 的那种缝（#65 在溯源文件名上已经踩过同一形状）。
     ap.add_argument("--platform", required=True,
-                    choices=["darwin", "windows", "linux", "android"])
+                    choices=["darwin", "windows", "linux", "android", "ios"])
     ap.add_argument("--artifact-name", required=True,
                     help="e.g. datachannel_unity.dylib / libdatachannel_unity.so")
     ap.add_argument("--plugin-root", required=True)
@@ -92,6 +91,15 @@ def main() -> int:
             ["install_name_tool", "-id", f"@loader_path/{args.artifact_name}", str(dest)],
             check=True,
         )
+    elif args.platform == "ios":
+        # 静态 .a：无 install_name_tool，无动态链接语义。
+        # 符号收窄由 narrow_ios_archive.py 在本步骤之前完成（CMakeLists.txt 里
+        # POST_BUILD 的顺序保证），stage 只负责把收窄后的 .a 确认到位。
+        # narrow_ios_archive.py 的 --out 直接写入 DCU_PLUGIN_ROOT/DCU_PLUGIN_REL/，
+        # 与本脚本的 dest 相同路径 —— 所以 ios 分支这里什么都不用做，shutil.copy2
+        # 会在 narrow 之后覆盖（如果 narrow 写了同路径，它已经在那了）。
+        # 为了保持显式：不需要额外操作。
+        pass
 
     print(f"Installed {dest}")
     return 0

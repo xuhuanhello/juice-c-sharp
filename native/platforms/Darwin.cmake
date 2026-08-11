@@ -7,6 +7,15 @@ set(DCU_PLATFORM_KEY  "darwin")
 set(DCU_PLUGIN_REL    "macOS")          # 无架构子目录：universal 只有一份产物
 set(DCU_ARTIFACT_NAME "datachannel_unity.dylib")
 
+# macOS universal 默认（#55）。
+# 原本在 CMakeLists.txt 顶部的 if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES) 块，
+# 现在移到这里（决议 #92 §B）：iOS toolchain file 在本文件被包含之前已把
+# CMAKE_OSX_ARCHITECTURES 设成 arm64，NOT 守卫自然阻止 macOS 默认触发。
+# 这消灭了 CMakeLists.txt 里最后一处 APPLE 平台分支（#81 的规矩）。
+if(NOT CMAKE_OSX_ARCHITECTURES)
+  set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS universal" FORCE)
+endif()
+
 set(DCU_EXPORT_FILE "${DCU_GEN_EXPORTS_DIR}/macos-exported-symbols.txt")
 set(DCU_EXPORT_LINK_OPTIONS
   "LINKER:-exported_symbols_list,${DCU_EXPORT_FILE}"

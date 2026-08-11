@@ -160,7 +160,7 @@ def main() -> int:
     ap.add_argument("--header", required=True, type=Path, help="native/dcu/include/dcu.h")
     ap.add_argument("--lock", required=True, type=Path, help="native/versions.lock")
     ap.add_argument("--platform", required=True,
-                    choices=["darwin", "linux", "windows", "android"])
+                    choices=["darwin", "linux", "windows", "android", "ios"])
     ap.add_argument("--architectures", default="", help="semicolon-separated; CMAKE_OSX_ARCHITECTURES")
     ap.add_argument("--target-system", default="")
     ap.add_argument("--target-processor", default="")

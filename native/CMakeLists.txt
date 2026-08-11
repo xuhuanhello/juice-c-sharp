@@ -22,18 +22,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(datachannel_unity LANGUAGES C CXX)
 
-# macOS 产物是**单一 universal bundle**，不是每架构一份 thin。
-# 这推翻了 #10 的「明确不做（v1）：macOS universal lipo」—— 那一行没有记任何理由，
-# 与当年 Meson 被推翻时同类（决定存在、论证不存在）。改的理由见 #55：
-#   - 一条命令出两个架构，不需要额外的 job 或 toolchain file（实测）
-#   - LFS 成本基本相同（universal 5.0 MB vs 两份 thin 合计 4.8 MB）
-#   - `.meta` 从两份必须靠 CPU 字段区分，变成一份 CPU: AnyCPU —— 而「两份同名
-#     bundle」正是 #49 查出的 CheckFileCollisions 冲突与 reimport 刷 error 的根源，
-#     走 universal 之后这个问题从根上不存在
-# 代价：采用者的 App 多带另一半（约 2.4 MB）；audit 必须逐架构检查（已实现）。
-if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
-  set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS universal" FORCE)
-endif()
+# macOS universal 默认已移入 platforms/Darwin.cmake（决议 #92 §B）。
+# iOS toolchain file 在平台文件包含之前设好 CMAKE_OSX_ARCHITECTURES=arm64，
+# macOS 的 universal 默认不触发 —— 这消灭了此处最后一处 APPLE 平台分支（#81）。
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -181,7 +172,13 @@ list(APPEND CMAKE_MODULE_PATH "${LIBDC_SRC}/cmake/Modules")
 add_subdirectory("${LIBDC_SRC}" "${CMAKE_BINARY_DIR}/libdatachannel")
 
 # ---------- datachannel_unity 插件 ----------
-add_library(datachannel_unity SHARED "${DCU_SRC}/src/dcu_impl.cpp")
+# ---------- 库类型：平台文件声明，静态 vs 共享 ----------
+# iOS 是 STATIC（.a），其他平台是 SHARED（.dylib/.so/.dll）。
+# 由 DCU_LIBRARY_TYPE 控制；不声明则默认 SHARED（向后兼容）。
+if(NOT DEFINED DCU_LIBRARY_TYPE)
+  set(DCU_LIBRARY_TYPE "SHARED")
+endif()
+add_library(datachannel_unity ${DCU_LIBRARY_TYPE} "${DCU_SRC}/src/dcu_impl.cpp")
 
 target_include_directories(datachannel_unity PRIVATE
   "${DCU_SRC}/include"
@@ -213,17 +210,48 @@ set_target_properties(datachannel_unity PROPERTIES LINK_DEPENDS "${DCU_EXPORT_FI
 # ---------- 暂存进 UPM Plugins 布局 ----------
 # 落点、产物名、平台键全部来自平台文件（上面 include 的那份），这里不再推导。
 if(DCU_STAGE_PLUGIN)
-  add_custom_command(TARGET datachannel_unity POST_BUILD
-    COMMAND "${Python3_EXECUTABLE}"
-            "${NATIVE_ROOT}/scripts/stage_plugin.py"
-            --binary        "$<TARGET_FILE:datachannel_unity>"
-            --platform      "${DCU_PLATFORM_KEY}"
-            --artifact-name "${DCU_ARTIFACT_NAME}"
-            --plugin-root   "${DCU_PLUGIN_ROOT}"
-            --rel           "${DCU_PLUGIN_REL}"
-    COMMENT "Staging plugin → ${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}"
-    VERBATIM
-  )
+  # iOS 静态归档：先收窄（ld -r），再暂存。动态库跳过收窄直接暂存。
+  # 收窄在暂存之前，因为 stage_plugin.py 从 TARGET_FILE 取文件路径，
+  # narrow_ios_archive.py 的 --out 就写进同一个路径，stage 拿到的已经是收窄后的。
+  if(DCU_PLATFORM_KEY STREQUAL "ios")
+    # SDK 版本在构建时用 xcrun 实时查，不硬编码（决议 #93）
+    execute_process(
+      COMMAND xcrun --sdk iphoneos --show-sdk-version
+      OUTPUT_VARIABLE DCU_IOS_SDK_VERSION
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    if(NOT DCU_IOS_SDK_VERSION)
+      message(FATAL_ERROR
+        "Cannot determine iPhoneOS SDK version (xcrun --sdk iphoneos --show-sdk-version failed).\n"
+        "  Make sure Xcode is installed and 'xcode-select -p' points to a valid Xcode app.")
+    endif()
+    add_custom_command(TARGET datachannel_unity POST_BUILD
+      COMMAND "${Python3_EXECUTABLE}"
+              "${NATIVE_ROOT}/scripts/narrow_ios_archive.py"
+              --archive      "$<TARGET_FILE:datachannel_unity>"
+              --out          "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}"
+              --symbols-list "${DCU_EXPORT_FILE}"
+              --arch         "arm64"
+              --deployment-target "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+              --sdk-version  "${DCU_IOS_SDK_VERSION}"
+              --tmp-dir      "${CMAKE_BINARY_DIR}/ios-narrow-tmp"
+      COMMENT "Narrowing iOS archive with ld -r (ld -r -exported_symbols_list)"
+      VERBATIM
+    )
+  else()
+    add_custom_command(TARGET datachannel_unity POST_BUILD
+      COMMAND "${Python3_EXECUTABLE}"
+              "${NATIVE_ROOT}/scripts/stage_plugin.py"
+              --binary        "$<TARGET_FILE:datachannel_unity>"
+              --platform      "${DCU_PLATFORM_KEY}"
+              --artifact-name "${DCU_ARTIFACT_NAME}"
+              --plugin-root   "${DCU_PLUGIN_ROOT}"
+              --rel           "${DCU_PLUGIN_REL}"
+      COMMENT "Staging plugin → ${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}"
+      VERBATIM
+    )
+  endif()
 
   # 溯源信息：写进 Report~/，文件名由平台目录拍平而来（#65 推翻 #54 的「同目录」）。
   # 报 bug 时要能反查这份二进制的来历，靠的就是它 —— 但反查是维护者指路、对方照路径
