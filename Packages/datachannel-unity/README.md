@@ -42,7 +42,7 @@ text editor.
 Add to `Packages/manifest.json` — **pin a tag**:
 
 ```json
-"com.xuhuanhello.datachannel": "https://github.com/xuhuanhello/juice-c-sharp.git?path=Packages/datachannel-unity#v0.1.1"
+"com.xuhuanhello.datachannel": "https://github.com/xuhuanhello/juice-c-sharp.git?path=Packages/datachannel-unity#v0.2.0"
 ```
 
 Without the `#v0.1.1` suffix, UPM tracks the default branch: the package can change under you between two `Library/` resolves, and the binary you tested against is not necessarily the one that ships. Pin, and bump deliberately — see [`CHANGELOG.md`](./CHANGELOG.md).
@@ -74,6 +74,17 @@ cmake --build native/build/macos
 - **CI:** three jobs, one per toolchain shape, on every PR; the full matrix runs on a schedule and uploads artifacts, and a maintainer commits them (plain git — deliberately **not** Git LFS, see `docs/SPEC.md` §10).
 
 **Linux support floor: Ubuntu 22.04 / glibc 2.35** — one notch above what Unity 2022.3 itself declares. This is a declared floor, not a measured one: the binary is built on that image and no compatibility below it is claimed.
+
+**Android 16 KB page alignment — what this package guarantees and does not guarantee:**
+
+The native library's `PT_LOAD` segments are aligned to 16 KB at link time (`-Wl,-z,max-page-size=16384`), and CI asserts this on every build. That is the only layer this package controls.
+
+*What this package does not control* is how Unity packages the `.so` into an APK or AAB:
+
+- **APK:** Unity 2022.3 uses AGP 7.4.2 (`2022.3.38f1+`), which defaults to compressing the `.so` when `minSdk < 23`. The default project `minSdk` is 22, so the library is compressed — the 16 KB zip-alignment requirement does not apply to compressed entries.
+- **AAB:** `useLegacyPackagingFromBundle` is always `false` in AGP 7.4.2, and Unity's generated `gradle.properties` does not set `android.bundle.enableUncompressedNativeLibs`, so the default `true` takes effect — the `.so` is stored uncompressed in the bundle. AGP 7.4.2 hard-codes the zip page-alignment constant to 4096 (no `16384` anywhere in the tree); Google requires AGP 8.5.1+ for 16 KB zip alignment, and Unity 2022.3 never reaches it.
+
+**Practical implication:** for APK distribution the compressed path sidesteps the zip-alignment requirement, and the binary's internal alignment is sufficient. For AAB (Google Play's required upload format), the `.so` is uncompressed but zip-aligned to 4 KB — on a 16 KB device, Android 15+ will load it but a future enforcement change could break it. Adopters targeting a fully Play-compliant 16 KB build should upgrade to Unity 2022.3.56f1+ (the minimum that carries Unity's own 16 KB support) and verify their final APK/AAB with `zipalign -c -P 16`. The full research is in [`docs/research/android-packaging-alignment.md`](../../docs/research/android-packaging-alignment.md).
 
 ## Minimal usage
 

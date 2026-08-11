@@ -5,7 +5,47 @@ All notable changes to this package are documented here. The format follows
 in [`docs/SPEC.md`](../../docs/SPEC.md) §3 — upstream patch → patch, upstream minor
 or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
-## [0.1.1] — 2026-08-05
+# Changelog
+
+All notable changes to this package are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the versioning policy is
+in [`docs/SPEC.md`](../../docs/SPEC.md) §3 — upstream patch → patch, upstream minor
+or behaviour change → minor, `dcu_*` or public C# break → **major**.
+
+## [0.2.0] — 2026-08-11
+
+### Added
+
+- **Android arm64-v8a prebuilt binary.** Self-contained: libdatachannel, libjuice,
+  MbedTLS and usrsctp are statically linked; only `dcu_*` is exported. The `PT_LOAD`
+  segments are 16 KB page-aligned (`-Wl,-z,max-page-size=16384`), and CI asserts
+  `min align >= 0x4000` on every build. The plugin loads in a Unity Player (Editor
+  does not load Android plugins) and the `Is16KbAligned` PluginImporter flag is set
+  to `true`. Smoke-tested on a real 16 KB-page device (Samsung Galaxy A56 / SM-A566B,
+  Android 16, `PAGE_SIZE=16384`): dual-peer, 2/2 passed, AAB install path. Build
+  record at `Report~/Android-arm64-v8a.json`.
+- **`PluginPlatformGuard` checks both platform and ABI.** Previously a build targeting
+  Android arm64-v8a would pass the guard even if only an ARMv7-only binary was present
+  (wrong ABI — the guard checked the platform label but not the subdirectory). The
+  guard now enumerates actual plugin subdirectories and fails explicitly when the ABI
+  is missing.
+
+### Notes on 16 KB and Google Play distribution
+
+This package guarantees that its `.so` is 16 KB-aligned internally. It does **not**
+control how Unity packages the binary into an APK or AAB:
+
+- **APK:** Unity 2022.3 + AGP 7.4.2 compresses the `.so` when `minSdk < 23` (default
+  22). Compressed entries are exempt from the zip page-alignment requirement.
+- **AAB:** the `.so` is stored uncompressed by default. AGP 7.4.2 zip-aligns to 4 KB;
+  Google requires AGP 8.5.1+ for 16 KB zip alignment, which Unity 2022.3 never
+  reaches. Adopters targeting a fully Play-compliant 16 KB AAB should upgrade to
+  **Unity 2022.3.56f1+** (Unity's minimum for its own 16 KB support declaration) and
+  verify the final artifact with `zipalign -c -P 16`. See README for the full
+  breakdown, and `docs/research/android-packaging-alignment.md` for the source
+  research.
+
+
 
 ### Fixed
 
@@ -71,5 +111,6 @@ has since been removed from the schema (it was constant across everything the la
 gate reads, and therefore carried no information); it disappears on the next binary
 refresh rather than being edited by hand, because CI artifacts are not hand-edited.
 
+[0.2.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.1.0

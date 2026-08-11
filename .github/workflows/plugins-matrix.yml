@@ -245,7 +245,7 @@ jobs:
 # windows-exports.def 就是那样烂掉的（带着四个已删符号，缺六个现存符号）。
 #
 # （**Android arm64-v8a 已启用**，见上面 ubuntu job 的 matrix：决议 #79/#80/#81，
-# 施工 #85。它的 16 KB 页对齐要求声明在 native/platforms/Android.cmake。）
+# 已落地（PR #86）。16 KB 页对齐要求声明在 native/platforms/Android.cmake。）
 #
 # **iOS arm64** —— 加一行 matrix 不够，`native/` 先要改：
 #   - `add_library(datachannel_unity SHARED ...)` 是硬编码的，iOS 要 STATIC

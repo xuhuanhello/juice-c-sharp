@@ -928,7 +928,16 @@ The consequence worth keeping: after narrowing, `nm -g` on the archive really do
 
 ### Phased platforms
 
-**Android arm64-v8a has landed alongside the desktop batch:** it is CI cross-compiled with NDK r27, its `PT_LOAD` segments are audited at `>= 0x4000`, its generated PluginImporter metadata declares `Is16KbAligned: true`, and the package ships CI provenance at `Report~/Android-arm64-v8a.json`. The remaining targets are:
+**Android arm64-v8a has landed alongside the desktop batch:** it is CI cross-compiled with NDK r27, its `PT_LOAD` segments are audited at `>= 0x4000`, its generated PluginImporter metadata declares `Is16KbAligned: true`, and the package ships CI provenance at `Report~/Android-arm64-v8a.json`.
+
+**16 KB boundary — what this package owns and what adopters own.** This package guarantees only the first layer: the `.so`'s `PT_LOAD` segments are 16 KB-aligned at link time. The second and third layers (APK/AAB storage form and zip alignment) are the adopter's build-system concern:
+
+- **APK path:** Unity 2022.3 + AGP 7.4.2 compresses the `.so` when `minSdk < 23` (the default is 22). Compressed entries are exempt from the zip page-alignment requirement, so the binary's internal alignment is sufficient for this path.
+- **AAB path:** AGP 7.4.2's `useLegacyPackagingFromBundle` is always `false`, and Unity's generated `gradle.properties` omits `android.bundle.enableUncompressedNativeLibs`, so the default `true` applies — the `.so` is stored uncompressed. AGP 7.4.2 hard-codes zip page-alignment to 4096; Google's 16 KB zip-alignment requirement needs AGP 8.5.1+, which Unity 2022.3 never reaches. Adopters targeting a fully Play-compliant 16 KB AAB should use Unity **2022.3.56f1+** (Unity's own minimum for 16 KB support) and verify the final artifact with `zipalign -c -P 16`.
+
+The full research is in [`docs/research/android-packaging-alignment.md`](./research/android-packaging-alignment.md).
+
+The remaining targets are:
 
 | Remaining | Why it is where it is |
 |-----------|-----------------------|
