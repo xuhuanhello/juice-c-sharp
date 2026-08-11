@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using UnityEditor;
@@ -67,10 +68,20 @@ namespace DataChannelUnity.Editor
                 .Where(p => p != null && p.isNativePlugin && IsOurs(p))
                 .ToArray();
 
-            if (ours.Any(p => p.GetCompatibleWithPlatform(target)))
-                return;
+            if (!ours.Any(p => p.GetCompatibleWithPlatform(target)))
+            {
+                ReportMissingPlatform(target, ours);
+            }
 
-            var landed = ours
+            if (target == BuildTarget.Android)
+            {
+                CheckAndroidArchitectureCompatibility(ours);
+            }
+        }
+
+        private void ReportMissingPlatform(BuildTarget target, PluginImporter[] plugins)
+        {
+            var landed = plugins
                 .Select(p => p.assetPath.Replace('\\', '/'))
                 .OrderBy(p => p)
                 .ToArray();
@@ -92,11 +103,53 @@ namespace DataChannelUnity.Editor
             else
             {
                 message.Append("Platforms this package currently ships:\n");
-                foreach (var p in landed) message.Append("  - ").Append(p).Append('\n');
+                foreach (var path in landed) message.Append("  - ").Append(path).Append('\n');
                 message.Append("\nSee the support table in the package README.\n");
             }
 
             throw new BuildFailedException(message.ToString());
+        }
+
+        private void CheckAndroidArchitectureCompatibility(PluginImporter[] plugins)
+        {
+            var requiredAbis = GetRequiredAndroidAbis(PlayerSettings.Android.targetArchitectures);
+            foreach (var abi in requiredAbis)
+            {
+                if (plugins.Any(p =>
+                    p.GetCompatibleWithPlatform(BuildTarget.Android) &&
+                    p.assetPath.Replace('\\', '/').Contains("Plugins/Android/" + abi + "/")))
+                    continue;
+
+                var message = new StringBuilder();
+                message.Append("com.xuhuanhello.datachannel is missing native plugin for Android ABI '")
+                       .Append(abi)
+                       .Append("' which is required by the current build settings.\n\n")
+                       .Append("The build is stopped here on purpose to prevent runtime failures.\n\n")
+                       .Append("Ensure the following paths contain valid plugins:\n");
+
+                foreach (var requiredAbi in requiredAbis)
+                {
+                    message.Append("  - Plugins/Android/")
+                           .Append(requiredAbi)
+                           .Append("/libdatachannel_unity.so\n");
+                }
+
+                throw new BuildFailedException(message.ToString());
+            }
+        }
+
+        private static string[] GetRequiredAndroidAbis(AndroidArchitecture architectures)
+        {
+            var required = new List<string>();
+            if ((architectures & AndroidArchitecture.ARM64) != 0)
+                required.Add("arm64-v8a");
+            if ((architectures & AndroidArchitecture.ARMv7) != 0)
+                required.Add("armeabi-v7a");
+            if ((architectures & AndroidArchitecture.X86_64) != 0)
+                required.Add("x86_64");
+            if ((architectures & AndroidArchitecture.X86) != 0)
+                required.Add("x86");
+            return required.ToArray();
         }
     }
 }
