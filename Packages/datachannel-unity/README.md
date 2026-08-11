@@ -13,8 +13,9 @@ WebRTC **DataChannel** bindings for Unity: stable C ABI (`dcu_*`) over [libdatac
 | Windows | x86_64 | Editor + Player | `Report~/Windows-x86_64.json` |
 | macOS | universal (arm64 + x86_64) | Editor + Player | `Report~/macOS.json` |
 | Linux | x86_64 | Editor + Player | `Report~/Linux-x86_64.json` |
+| Android | arm64-v8a | Player only | `Report~/Android-arm64-v8a.json` |
 
-Not shipped yet: Android arm64-v8a, iOS arm64. Building for those targets stops with an explicit error.
+Not shipped yet: iOS arm64. Building for those targets stops with an explicit error.
 
 <!-- END supported-platforms -->
 

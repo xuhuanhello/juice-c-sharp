@@ -56,22 +56,6 @@ jobs:
           done < <(git ls-files -s native/scripts/)
           exit $fail
 
-      # NDK 钉 **r27 大版本**，小版本取镜像上最新的（决议 #79）。理由与 macos job
-      # 的 Pin Xcode 一字不差：$ANDROID_NDK_HOME 指向哪一版会随镜像漂，而 Android
-      # 的产物完全由工具链决定。找不到 27.* 就直接红，不回落到默认 NDK。
-      - name: Pin Android NDK (r27, highest minor)
-        if: matrix.platform == 'android'
-        run: |
-          set -euo pipefail
-          ndk_root=$(ls -d "$ANDROID_SDK_ROOT"/ndk/27.* 2>/dev/null | sort -V | tail -1 || true)
-          if [[ -z "$ndk_root" || ! -d "$ndk_root" ]]; then
-            echo "::error::No NDK 27.* under $ANDROID_SDK_ROOT/ndk (decision #79 pins the r27 major)"
-            ls -1 "$ANDROID_SDK_ROOT/ndk" 2>/dev/null || echo "(no ndk directory at all)"
-            exit 1
-          fi
-          echo "ANDROID_NDK_ROOT=$ndk_root" >> "$GITHUB_ENV"
-          echo "Pinned NDK: $ndk_root"
-
       - name: Fetch pinned upstream deps
         run: ./native/scripts/fetch-deps.sh
 
@@ -147,12 +131,34 @@ jobs:
           done < <(git ls-files -s native/scripts/)
           exit $fail
 
+      # Android 与 Linux 共用 Ubuntu host，但只有 Android 是交叉编译：NDK r27
+      # 必须在这个 job 钉住并把 toolchain file 传给 configure。此前这段误放在 macOS job，
+      # 该条件永远不成立，导致 Android matrix 行实际构出了 Linux 插件，随后 audit 正确地
+      # 在预期的 Android 路径找不到产物而失败。
+      - name: Pin Android NDK (r27, highest minor)
+        if: matrix.platform == 'android'
+        run: |
+          set -euo pipefail
+          ndk_root=$(ls -d "$ANDROID_SDK_ROOT"/ndk/27.* 2>/dev/null | sort -V | tail -1 || true)
+          if [[ -z "$ndk_root" || ! -d "$ndk_root" ]]; then
+            echo "::error::No NDK 27.* under $ANDROID_SDK_ROOT/ndk (decision #79 pins the r27 major)"
+            ls -1 "$ANDROID_SDK_ROOT/ndk" 2>/dev/null || echo "(no ndk directory at all)"
+            exit 1
+          fi
+          echo "ANDROID_NDK_ROOT=$ndk_root" >> "$GITHUB_ENV"
+          echo "Pinned NDK: $ndk_root"
+
       - name: Fetch pinned upstream deps
         run: ./native/scripts/fetch-deps.sh
 
       - name: Build plugin (CMake)
         run: |
-          cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if [[ "${{ matrix.platform }}" == "android" ]]; then
+            cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$PWD/native/cross/android-arm64.cmake"
+          else
+            cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+          fi
           cmake --build native/build/ci
 
       - name: Audit plugin
