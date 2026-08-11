@@ -65,6 +65,16 @@ CRYPTO_DENY = re.compile(
     re.IGNORECASE,
 )
 
+# iOS 静态归档专用：exported-defined 符号集里不许有 crypto 实现名。
+# 与 CRYPTO_DENY 不同：CRYPTO_DENY 匹配依赖名（libssl、libmbedtls 等），
+# 这里匹配的是符号名（_mbedtls_ssl_setup、_psa_cipher_encrypt_setup 等）。
+# ld -r 收窄后 mbedtls 符号应当是 local（不出现在 nm -Uj 里）；
+# 若它仍是 exported-defined，说明收窄未生效或 find_package 找到了系统 crypto。
+IOS_CRYPTO_EXPORTED_RE = re.compile(
+    r"^_?(mbedtls_|psa_|ssl_|libssl|libcrypto|gnutls_|wolfssl_)",
+    re.IGNORECASE,
+)
+
 # macOS：依赖是完整路径，用前缀规则 —— 上游合法新增系统库时无需改动此表。
 MACOS_ALLOWED_PREFIXES = (
     "/System/Library/Frameworks/",
@@ -227,6 +237,55 @@ def exports_linux(binary: Path, nm: str) -> set[str]:
         if len(parts) >= 3 and parts[1] in ("T", "W", "D", "B", "R"):
             names.add(parts[2])
     return names
+
+
+def exports_ios(binary: Path, nm: str) -> set[str]:
+    """从静态归档里读 exported-defined 符号（nm -g，只留 type T/W/D/B，剥前导 _）。
+
+    静态归档的 nm -g 输出里每个成员前有一行「member.o:」前缀，需要跳过。
+    空归档（无成员）视为硬失败：「没有符号」和「没有跑过」形状相同，不能通过。
+    """
+    out = run([nm, "-g", str(binary)])
+    names = set()
+    for line in out.splitlines():
+        # 跳过成员名行（格式：「Archive.a(foo.o):」或「foo.o:」）
+        stripped = line.strip()
+        if not stripped or stripped.endswith(":"):
+            continue
+        parts = stripped.split()
+        # nm -g 格式：[addr] type name   （undefined: "         U _name"）
+        if len(parts) >= 2 and parts[-2] in ("T", "W", "D", "B"):
+            names.add(parts[-1].lstrip("_"))
+    if not names:
+        raise AuditError(
+            f"nm -g produced no exported-defined symbols from {binary.name}.\n"
+            "  An empty result means either the archive is empty or the narrowing step\n"
+            "  removed everything — treating as failure so 'never ran' and 'passed' are\n"
+            "  distinguishable.")
+    return names
+
+
+def check_ios_crypto(binary: Path, nm: str) -> None:
+    """断言收窄后的 .a 的 exported-defined 符号集里不含 crypto 实现名（决议 #94 §B）。
+
+    ld -r 收窄后 mbedtls 符号应当是 local，不出现在 nm -Uj 里。
+    若仍是 exported-defined，说明收窄未生效或 find_package 找到了系统 crypto。
+
+    nm -U：只输出 defined symbols（排除 undefined）。
+    """
+    out = run([nm, "-Uj", str(binary)])
+    bad = [s for s in out.splitlines() if s.strip() and IOS_CRYPTO_EXPORTED_RE.search(s.strip())]
+    if bad:
+        raise AuditError(
+            "The iOS archive exports crypto symbols — ld -r narrowing did not take effect,\n"
+            "or find_package resolved a dynamic crypto library:\n"
+            + "".join(f"    {s}\n" for s in sorted(set(bad)))
+            + "\n  These symbols should be local after narrowing (not exported-defined).\n"
+              "  Re-run narrow_ios_archive.py, or check that USE_MBEDTLS=ON and\n"
+              "  USE_GNUTLS=OFF / USE_NICE=OFF are in effect."
+        )
+    # nm -Uj が全空でも正常（exported-defined が dcu_* だけになった状態）
+    print("==> iOS crypto check: no crypto symbols exported (narrowing effective)")
 
 
 def exports_windows(binary: Path, dumpbin: str) -> set[str]:
@@ -430,7 +489,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Offline gate for the native plugin")
     ap.add_argument("--binary", required=True, type=Path)
     ap.add_argument("--platform", required=True,
-                    choices=["darwin", "linux", "windows", "android"])
+                    choices=["darwin", "linux", "windows", "android", "ios"])
     ap.add_argument("--expected", required=True, type=Path)
     ap.add_argument("--nm", default=None, help="CMAKE_NM")
     ap.add_argument("--readelf", default=None, help="CMAKE_READELF")
@@ -478,6 +537,18 @@ def main() -> int:
                     f"    only in {arch}: {sorted(arch_exports - actual)}")
             actual, deps = arch_exports, arch_deps
         print(f"OK: exports and dependencies passed for all {len(archs)} architecture(s)")
+        return 0
+    elif args.platform == "ios":
+        # iOS 静态归档：导出集 + crypto 断言（无依赖门禁 —— .a 没有依赖表，见 SPEC §11）。
+        # 决议 #94 §B：nm -Uj（exported-defined）里不许有 crypto 名，
+        # 这条断言改掉 SPEC §11 原有的「iOS 不建依赖门禁」——
+        # 那个判断否掉的是维护 322 条允许列表，不是这一条简单的 crypto 正则。
+        nm = resolve_tool(args.nm, "nm", "reads exported symbols")
+        check_ios_crypto(binary, nm)
+        actual = exports_ios(binary, nm)
+        count = check_exports(actual, args.expected)
+        print(f"OK: {count} dcu_* exports match {args.expected.name}; "
+              "no crypto symbols exported (narrowing effective)")
         return 0
     elif args.platform in ("linux", "android"):
         # Android 与 Linux 同为 ELF，**共用实现，不共用身份**（决议 #79）：

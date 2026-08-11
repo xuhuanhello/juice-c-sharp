@@ -118,7 +118,7 @@ Four steps, all machine-checkable:
 
 ## Working with decisions
 
-Decisions live as closed issues on four wayfinder maps ([#1](https://github.com/xuhuanhello/juice-c-sharp/issues/1), [#16](https://github.com/xuhuanhello/juice-c-sharp/issues/16), [#26](https://github.com/xuhuanhello/juice-c-sharp/issues/26), [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46)); SPEC §15 indexes all of them with the section each one landed in.
+Decisions live as closed issues on wayfinder maps ([#1](https://github.com/xuhuanhello/juice-c-sharp/issues/1), [#16](https://github.com/xuhuanhello/juice-c-sharp/issues/16), [#26](https://github.com/xuhuanhello/juice-c-sharp/issues/26), [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46), [#76](https://github.com/xuhuanhello/juice-c-sharp/issues/76), [#90](https://github.com/xuhuanhello/juice-c-sharp/issues/90)); SPEC §15 indexes all of them with the section each one landed in.
 
 **Read the spec, not the tickets.** The tickets carry the arguments; the spec carries the conclusions, and it is written so that you should not need to go back to them. If you do need to, that is a defect in the spec worth reporting.
 

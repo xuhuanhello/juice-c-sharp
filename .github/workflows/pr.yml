@@ -6,8 +6,13 @@
 #   Windows x64       PE     / MSVC     / dumpbin   / 本机构建
 #   Linux x64         ELF    / gcc      / readelf   / 本机构建
 #   Android arm64-v8a ELF    / NDK clang/ readelf   / **交叉编译**
+#   iOS arm64         Mach-O / clang    / nm        / **交叉编译 + ld -r 收窄**
 #
-# **Android 在这里不是因为它是 ELF，而是因为它是唯一的交叉编译代表**（决议 #79）。
+# **iOS 在这里不是因为它是 Mach-O（macOS 已代表），而是因为 ld -r 符号收窄是
+# 本仓库任何平台都没有的全新构建阶段**（决议 #90 §6）。原注「iOS 尚未产出任何
+# 产物，仍留给 plugins-matrix.yml」在本图收尾时已不成立，同时改掉。
+#
+# **Android 在这里不是因为它是 ELF，而是因为它是第一条交叉编译代表**（决议 #79）。
 # 早先这里写着「Android 与 Linux 同为 ELF，新信息接近零」—— 那句话只比了「目标
 # 格式」一条轴，而 `-DCMAKE_TOOLCHAIN_FILE=` 这条路径本仓库在 Android 之前**从未
 # 走过**（SPEC §9）。按同一个判据重算，结论相反。
@@ -15,8 +20,6 @@
 # 另一条同样来自本文件的论证：下面那段说「PR 只跑 mac」被推翻，是因为完整矩阵每周
 # 一才跑、最坏坏七天且已攒一堆提交。Android 一旦入库就是已交付平台，它坏七天与
 # Linux 坏七天没有区别。
-#
-# iOS 与 macOS 同为 Mach-O 且**尚未产出任何产物**，仍留给 plugins-matrix.yml。
 #
 # 这推翻了 SPEC §10 的「PR 至少一个 mac 构建 + audit」（原为只跑 mac）：改
 # CMakeLists 或 dcu.h 完全可能 mac 绿而 Windows/Linux 红，而完整矩阵每周一才跑，
@@ -71,6 +74,13 @@ jobs:
             platform: android
             artifact_path: Packages/datachannel-unity/Plugins/Android/arm64-v8a/libdatachannel_unity.so
             build_info_path: Packages/datachannel-unity/Report~/Android-arm64-v8a.json
+          - name: iOS arm64
+            # macOS 宿主 + iOS toolchain file 交叉编译 ——
+            # ld -r 符号收窄是本仓库任何平台都没有的全新构建阶段（决议 #90 §6）。
+            os: macos-26
+            platform: ios
+            artifact_path: Packages/datachannel-unity/Plugins/iOS/libdatachannel_unity.a
+            build_info_path: Packages/datachannel-unity/Report~/iOS.json
     defaults:
       run:
         # Windows runner 的默认 shell 是 pwsh。不写这行，下面的 bash 语法会直接
@@ -163,6 +173,10 @@ jobs:
           elif [[ "${{ matrix.platform }}" == "android" ]]; then
             cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_TOOLCHAIN_FILE="$PWD/native/cross/android-arm64.cmake"
+            cmake --build native/build/ci
+          elif [[ "${{ matrix.platform }}" == "ios" ]]; then
+            cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$PWD/native/cross/ios-arm64.cmake"
             cmake --build native/build/ci
           else
             cmake -S native -B native/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release
