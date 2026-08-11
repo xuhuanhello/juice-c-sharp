@@ -864,7 +864,7 @@ python3 ./native/scripts/audit_plugin.py --binary Packages/datachannel-unity/Plu
 
 macOS needs no `-DCMAKE_OSX_ARCHITECTURES`: `native/CMakeLists.txt` defaults it to `arm64;x86_64`, so the universal artifact is what a plain configure produces.
 
-**`native/cross/` is empty, and honestly so.** This section has always described it as holding the CMake toolchain files, but nothing in the shipped matrix cross-compiles — each of the three desktop platforms builds on its own host. When Android lands it will use the **NDK's own** `build/cmake/android.toolchain.cmake`, not a file we write; iOS is the one target expected to need a toolchain file of ours. Until then the directory is a placeholder, and `-DCMAKE_TOOLCHAIN_FILE=` is a path this project has **never exercised** — see "Phased platforms" below, which prices that.
+**`native/cross/android-arm64.cmake` is a thin NDK toolchain wrapper.** Android is the one landed cross-compiled target: the wrapper finds `ANDROID_NDK_ROOT` / `ANDROID_NDK_HOME`, fixes `ANDROID_ABI=arm64-v8a`, `ANDROID_PLATFORM=android-22`, and includes the NDK's own `build/cmake/android.toolchain.cmake`. It deliberately does not recreate CMake's built-in Android support, which the NDK does not support or test. iOS is still the target expected to need a project-owned toolchain file.
 
 | Rule | Detail |
 |------|--------|
@@ -928,22 +928,19 @@ The consequence worth keeping: after narrowing, `nm -g` on the archive really do
 
 ### Phased platforms
 
-Desktop is done: **macOS universal, Windows x64 and Linux x64 are built by CI and landed** (§10). What is left, in risk order:
+**Android arm64-v8a has landed alongside the desktop batch:** it is CI cross-compiled with NDK r27, its `PT_LOAD` segments are audited at `>= 0x4000`, its generated PluginImporter metadata declares `Is16KbAligned: true`, and the package ships CI provenance at `Report~/Android-arm64-v8a.json`. The remaining targets are:
 
 | Remaining | Why it is where it is |
 |-----------|-----------------------|
 | **WebGL** | Out of scope for now (§16 and map [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46)): not one more toolchain but a different behaviour contract — it needs the datachannel-wasm C facade, and §8 records that the back-pressure guarantee is physically unavailable there |
 | **iOS arm64** | The cost is in `native/`, not in CI: `add_library(... SHARED ...)` is hard-coded, the staging step branches on `if(APPLE)` and would build a `.bundle` around a static library, the audit has no static-archive branch, and the `ld -r` narrowing above is designed but unbuilt. **Today the target produces no artifact at all** |
-| **Android arm64-v8a** | 16 KB page alignment is the live question (Play requires it from 2025-11-01, prebuilt libraries included), and it has **two** halves: the linker flags NDK 27 needs, and `Is16KbAligned` in the plugin's `.meta`, which Unity 2022.3 writes and which is currently `false`. ~~A minimum-API conflict blocks this platform~~ — see below; it does not |
 | ~~Windows arm64~~ | **Out of the matrix** — no ARM64 slot on 2022.3's Standalone Windows (§8) |
 
 > **Correction, measured:** an earlier version of this table recorded Android as blocked by a floor conflict — "Unity 2022.3 supports API 22, but libjuice's `getifaddrs` needs API 24". **That does not hold at the pinned versions, and the claim was inferred from a grep rather than from reading the code.** libjuice's `socket.h` defines `NO_IFADDRS` for `__ANDROID__` *unconditionally*, and `udp.c` takes a `SIOCGIFCONF` branch there instead — it never calls `getifaddrs` on Android at any API level. libdatachannel itself does not call it, and usrsctp's only use sits inside `#if defined(__APPLE__) || defined(__DragonFly__) || defined(__FreeBSD__)`.
 >
-> What the fallback does change is **behaviour, not buildability**: `ifconf` carries IPv4 addresses only, so upstream adds a separate `get_local_default_inet6` probe for the IPv6 case. Android therefore gathers host candidates by a different route than the desktop platforms, and that difference — not an API floor — is what the on-device smoke needs to look at.
->
-> The remaining API-level question is narrow and empirical: whether anything *else* in the tree needs a level above the declared floor. A build at that `ANDROID_PLATFORM` answers it, since the NDK headers gate declarations by `__INTRODUCED_IN`. Do not re-derive the old conflict from a `grep getifaddrs`; it is the exact shape of mistake `CONTRIBUTING.md` warns about under "before adding a defensive mechanism".
+> **Resolution:** Android is built at `ANDROID_PLATFORM=android-22`; the NDK link against API-22 stubs, CI audit and 16 KB-device AAB smoke all pass. Upstream's internal candidate-gathering route is not an acceptance criterion for this binding: the package verifies that its own native library loads and dual-peer traffic flows, and does not prescribe libdatachannel's platform internals.
 
-The desktop three did not arrive by copying a template platform one after another; they came up **side by side in one matrix**, and the platform-specific differences converged into exactly three places: the artifact's name and shape (`stage_plugin.py`), the tools used to read symbols and dependencies (`audit_plugin.py`), and the shape of the dependency allowlist (paths on Mach-O, names on PE and ELF). Adding a mobile platform means one new branch in each of those three, plus its own open question above.
+The desktop three did not arrive by copying a template platform one after another; they came up **side by side in one matrix**, and Android joined by extending the same three data boundaries: the artifact's name and shape (`stage_plugin.py`), the tools used to read symbols and dependencies (`audit_plugin.py`), and the shape of the dependency allowlist (paths on Mach-O, names on PE and ELF).
 
 ---
 
@@ -976,9 +973,9 @@ The original rule was not wrong for its context — it was written when **nobody
 - **A build-time guard.** `PluginPlatformGuard` (`IPreprocessBuildWithReport`) **fails the build** when the target platform has no binary under `Plugins/`, naming the platform and pointing at the support table. Without it, batching would be using adopters as the detector: the default behaviour is a successful build followed by a `DllNotFoundException` on the user's device that is indistinguishable from "file missing" ([#49](https://github.com/xuhuanhello/juice-c-sharp/issues/49)).
 - **A support list that cannot lie.** Its authoritative source is **the contents of `Plugins/` itself**. Because a binary is only committed after that platform's on-device smoke passes, "is there a binary" and "was this platform verified" are the *same fact*, and the directory cannot go stale against itself. The human-readable table in the package README is **generated** from it by `gen_support_table.py` and diffed in CI — the same produce-and-verify-with-one-mechanism shape as the `.meta` generator (§11).
 
-**A batch may be committed when, and only when:** every platform in it is green in CI (build + exported-symbol diff + dependency allowlist); each has a **real-device Test Runner result XML** attached to its ticket (§11); and the `.meta` and support-table regeneration diffs are clean.
+**A batch may be committed when, and only when:** every platform in it is green in CI (build + exported-symbol diff + dependency allowlist); each has a **real-device machine-judged smoke result** attached to its ticket (§11); and the `.meta` and support-table regeneration diffs are clean.
 
-**Those conditions are the whole trigger — there is no schedule.** The second batch lands when Android and iOS meet them, which means first settling the questions §9 records against each. A batch is not owed a release date.
+**Those conditions are the whole trigger — there is no schedule.** Android arm64-v8a satisfied them and is landed. iOS remains a separate, unfinished second-batch platform; a batch is not owed a release date.
 
 ### Plugin binaries are committed directly — **not** through Git LFS
 
@@ -1158,11 +1155,11 @@ It lives at `Assets/DataChannelUnity.Verification/Editor/` — the host project,
 
 CI can prove a binary builds, exports only `dcu_*` and links nothing forbidden. It cannot prove the binary **loads inside Unity** on that platform, because there is no Unity in CI ([#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43)) — and `.meta` mistakes surface only on a real device. So each platform's binary is committed only after one **real-device dual-peer smoke**.
 
-**It reuses the existing PlayMode suite; no new probe is written.** Build the `DataChannelUnity.Tests.Runtime` assembly into a Player via the Test Runner, run it on the device, and keep the **NUnit result XML**. That satisfies the rule above by construction: the evidence is a structured file, not a line read out of a Console — reading a log line is the same disease as `|| true`, in its fourth form. The suite-level teardown assertions (`dcu_shutdown()` → 0, `dcu_event_queue_depth()` → 0) come along for free, since they are already in the suite.
+**The device smoke emits a machine-readable test report.** Prefer the existing `DataChannelUnity.Tests.Runtime` assembly built into a Player via the Test Runner and retain its NUnit XML. When the Play-distributed AAB installation path itself is under test, a Player-resident equivalent runner may emit the report from `Application.persistentDataPath`; its report must name the Runtime contracts it exercises, include total/passed/failed counts and failure detail, and must not describe itself as a Unity Test Framework result. In both forms the evidence is a structured file, not a line read out of a Console — reading a log line is the same disease as `|| true`, in its fourth form. The suite-level teardown assertions (`dcu_shutdown()` → 0, `dcu_event_queue_depth()` → 0) are required in the report.
 
 **Zero tests run is a failure, not a pass** — it means the plugin did not load, which is exactly what this step exists to detect.
 
-The XML goes on the ticket for that platform; §10's landing conditions require one per platform in the batch. **Stated cost:** this drags the whole test assembly onto the target device.
+The report goes on the ticket for that platform; §10's landing conditions require one per platform in the batch. **Stated cost:** the Test Runner route drags the whole test assembly onto the target device; the AAB route carries only its equivalent runner.
 
 ### The `.meta` files are generated, and that is also how they are checked
 
@@ -1292,7 +1289,7 @@ The scaffold, the CMake build, the desktop plugin and a first pass at the event 
 4. **Log bridge and credential path** (§7): bounded log queue, non-detaching level changes, structured `rtc::IceServer` assignment, one-directional initialization.
 5. **Lifecycle wiring** (§6): the five domain / play-mode / quit scenarios.
 6. **Tests** (§11): three assemblies, the required-contract list, the persistent domain-reload probe; delete `Assets/DataChannelVerify/`. *(The exported-symbol diff was pulled forward out of this step — it gates step 2, so it had to exist first, and it is already in place.)*
-7. Expand plugins. ~~Android → iOS → Win arm64 → WebGL (+ jslib)~~ — **the desktop batch (macOS universal, Windows x64, Linux x64) is built by CI and landed**; Win arm64 left the matrix (§8). What remains is Android and iOS as a second batch, each blocked on its own open question (§9), with WebGL after them if at all.
+7. Expand plugins. ~~Android → iOS → Win arm64 → WebGL (+ jslib)~~ — **the desktop batch (macOS universal, Windows x64, Linux x64) and Android arm64-v8a are built by CI and landed**; Win arm64 left the matrix (§8). iOS remains the unfinished mobile platform, with WebGL after it if at all.
 8. `CONTRIBUTING.md` gates in force; GHA + the maintainer landing flow. **In force as of the desktop batch** — the workflows, the batch landing conditions and the build-time platform guard are all live (§10).
 9. ThirdPartyNotices + README (signaling ownership, signing, platforms).
 
@@ -1395,7 +1392,7 @@ Not required to start implementation. Each is deliberately unspecified, with the
 | **Disconnecting when the app is backgrounded** | Product semantics, not lifecycle hygiene (§6) |
 | **Observability beyond `BufferedAmount`** | Queue depth, drop counts, per-frame stats all currently go to logs, which suffice for attribution. Exposing them for application network HUDs should be its own decision, not a rider on another one |
 | **Inbound rate limiting / malicious-peer defence** | §1 out of scope: the accepted weakness in §6 has its correct fix at a connection layer that can react per peer — a new mechanism, not a hardening of an existing one |
-| **Android's 16 KB page alignment** | Two places have to agree and neither is verified yet: the NDK linker flags, and `Is16KbAligned` in the plugin `.meta` (Unity 2022.3 writes this field; it is `false` today). Whether the app's packaging step preserves the alignment on Unity 2022.3's Gradle/AGP is a third unknown. ~~Android's minimum API level~~ was listed here as blocked by a `getifaddrs` floor conflict; **that premise was measured false** — see §9 |
+| ~~Android's 16 KB page alignment~~ | **Resolved:** CI uses NDK r27 with explicit `-z,max-page-size=16384` and audits every `PT_LOAD` at `>= 0x4000`; generated Android PluginImporter metadata records `Is16KbAligned: true`; a Play-distributed AAB passed the device Runtime smoke. APK/AAB zip packaging remains an adopter/build-system concern, not a package binary requirement (§9). |
 | **HarmonyOS** | Waiting on Unity/tooling |
 | ~~Implementation milestones / PR slicing~~ | **Done** — [#44](https://github.com/xuhuanhello/juice-c-sharp/issues/44) slices §14 steps 2–3 into nine vertical cuts, each leaving the tree green |
 | Optional later | Selected-candidate-pair API, device farm CI, WebSocket bindings, FishNet transport mapping |

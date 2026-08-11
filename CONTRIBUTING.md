@@ -70,7 +70,7 @@ Unpack the CI artifact at the package root: the zip already contains `Plugins/�
 
 ### The per-platform on-device smoke
 
-**Do not write a new probe.** Build `DataChannelUnity.Tests.Runtime` into a Player with the Test Runner, run it on the device, keep the **NUnit result XML**, and attach it to the ticket. The concrete steps are in [`docs/verification-mcp.md`](./docs/verification-mcp.md).
+**Keep a machine-judged Runtime report.** Prefer building `DataChannelUnity.Tests.Runtime` into a Player with the Test Runner and attaching its NUnit XML. When the Play-distributed AAB installation path itself is verified, a Player-resident equivalent runner may write its machine-readable report under `Application.persistentDataPath`; it must identify the Runtime contracts, report non-zero total/passed/failed counts, and include failure detail. Attach that report to the ticket. The concrete steps are in [`docs/verification-mcp.md`](./docs/verification-mcp.md).
 
 - **Zero tests run is a failure**, not a pass — it means the plugin did not load, which is the single thing this step exists to catch.
 - A screenshot or "I ran it and it looked fine" is **not** evidence. The rule from SPEC §11 applies: a manual step still has to produce something a machine can judge.

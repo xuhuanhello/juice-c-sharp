@@ -148,6 +148,10 @@ Packages/packages-lock.json linguist-generated
 *.pdb                   lfs
 *.so                    lfs
 
+# Landed UPM native plugins are ordinary Git blobs, never LFS pointers.
+# `binary` alone does not unset the filter supplied by `*.so lfs` above.
+Packages/datachannel-unity/Plugins/**/*.so -filter binary
+
 # Fonts
 *.otf                   lfs
 *.ttf                   lfs
