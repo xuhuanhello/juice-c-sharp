@@ -209,9 +209,16 @@ The artifact separates the failure modes rather than just saying "not zero": a c
 
 **The command line is the only Test Runner route that produces the artifact.** ~~Test Runner → PlayMode → *Run all tests (`<target platform>`)*, **or** headless~~ — that "or" was wrong, and wrong in the way that costs a whole run: a Test Runner **UI** run writes **no result file at all**. The class that serialises the XML (`ResultsSavingCallbacks`) lives in the package's `CommandLineTest` namespace and is registered in exactly one place, `CommandLineTest/Executer.cs` — the `-runTests` path. A UI run goes through `WindowResultUpdater`, which only repaints the window. (Verified against `com.unity.test-framework@1.1.33`, the version this project pins. The two `"Export"` strings in `PlayModeTestListGUI.cs` are the *build* button's caption when the target exports an Android Studio / Xcode project — nothing to do with results.)
 
+**iOS-specific prerequisites (decision #96):**
+
+- In `ProjectSettings`, set `appleEnableAutomaticSigning: 1` and `appleDeveloperTeamID` to your team ID **locally** — do **not** commit these values. The Team ID exposes the maintainer's identity and would force all contributors into automatic signing for a team they do not belong to.
+- Unity uses `xcodebuild -scheme Unity-iPhone -destination "platform=iOS,id=<udid>" test -allowProvisioningUpdates`, so a paid Apple Developer account and a connected + trusted device are required. A personal (free) team works but needs one manual trust tap on the device on the first run.
+- Device UDID: `xcrun devicectl list devices` or Xcode → Window → Devices and Simulators.
+
 | Step | |
 |------|--|
 | 0 | **Close the GUI Editor.** Batchmode cannot open a project another Editor already has open (`Multiple Unity instances cannot open the same project`) |
+| 0a | **(iOS only)** Set Team ID locally in PlayerSettings (do not commit), confirm device is awake (`xcrun devicectl list devices` shows `available (paired)`) |
 | 1 | `Unity -runTests -testPlatform <Android\|iOS\|StandaloneWindows64\|StandaloneLinux64\|StandaloneOSX> -batchmode -projectPath . -testResults <host path>/smoke-<platform>.xml` |
 | 2 | Let it run **on the device**, not in the Editor |
 | 3 | Attach the NUnit result XML to that platform's ticket |
