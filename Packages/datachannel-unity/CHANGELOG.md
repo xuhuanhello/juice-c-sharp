@@ -5,12 +5,56 @@ All notable changes to this package are documented here. The format follows
 in [`docs/SPEC.md`](../../docs/SPEC.md) §3 — upstream patch → patch, upstream minor
 or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
-# Changelog
+## [0.3.0] — 2026-08-12
 
-All notable changes to this package are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the versioning policy is
-in [`docs/SPEC.md`](../../docs/SPEC.md) §3 — upstream patch → patch, upstream minor
-or behaviour change → minor, `dcu_*` or public C# break → **major**.
+### Added
+
+- **iOS arm64 prebuilt binary** (`Plugins/iOS/libdatachannel_unity.a`). A static
+  archive, so it is absorbed into the adopter's executable at final link; there is no
+  runtime library to load. Self-contained: libdatachannel, libjuice, usrsctp and
+  MbedTLS are merged in with `libtool -static`, then narrowed with
+  `ld -r -exported_symbols_list -all_load` so the **external defined set is exactly
+  the 20 `dcu_*`** — no crypto name is exported, and the dependency implementations
+  are present rather than left unresolved. Built by CI (`Report~/iOS.json` carries the
+  run URL and commit) and smoke-tested on a real device: iPhone SE 3rd gen
+  (`iPhone14,6`), iOS 27.0, Unity 2022.3.62f3, **3/3 passed**. Deployment target 12.0.
+  Device only — no simulator slice (SPEC §8).
+
+### Fixed
+
+- **The iOS archive is no longer missing its dependencies.** A `STATIC` target has no
+  link step, so `target_link_libraries` recorded the dependencies without copying any
+  code in; the archive held only the wrapper and carried 89 unresolved references, 32
+  of them `rtc::`. Anyone building for iOS hit `symbol(s) not found for architecture
+  arm64` when Xcode linked `UnityFramework`. This shape never reached a release — it
+  existed on `main` between the v0.2.0 tag and this one.
+- **Common symbols no longer escape the export gate.** `-fno-common` is now a global
+  convention for `native/` C code, so C tentative definitions get a section and the
+  existing narrowing step localises them. Eleven external `C` symbols used to survive
+  — ten from usrsctp plus MbedTLS's `mbedtls_cipher_supported`, including an orphan
+  `foo` — and a common merges *silently* with a same-named common in the adopter's
+  final link, sharing one storage location with no error or warning. Desktop binaries
+  are unaffected: the macOS export and dependency sets are byte-identical across the
+  change.
+
+### Changed
+
+- **The offline plugin audit asks three independent questions on a static archive**
+  (SPEC §11): are the intended symbols exported (`nm -g`, now including type `C`), are
+  the unintended ones hidden (`nm -Ujg`), and **is the implementation actually there**
+  (`nm -u`). The third is new; the first two both score full marks on a wrapper-only
+  archive, which is why the missing-dependency bug shipped past them.
+
+### Notes for iOS adopters
+
+- **Device SDK only.** Building against the Simulator SDK fails at link time — the
+  archive has no simulator slice. The build-time platform guard reports this rather
+  than letting the linker do it.
+- **Size trade-off, disclosed.** Narrowing localises the C++ runtime along with
+  everything else (852 vtable/typeinfo symbols, 1495 `std::` members become
+  archive-local). Since the ABI boundary is pure C, no C++ type crosses it, so this
+  costs size rather than correctness: an app that also links libc++ elsewhere may
+  carry a second static copy of the parts used here.
 
 ## [0.2.0] — 2026-08-11
 

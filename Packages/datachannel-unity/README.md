@@ -41,10 +41,10 @@ text editor.
 Add to `Packages/manifest.json` — **pin a tag**:
 
 ```json
-"com.xuhuanhello.datachannel": "https://github.com/xuhuanhello/juice-c-sharp.git?path=Packages/datachannel-unity#v0.2.0"
+"com.xuhuanhello.datachannel": "https://github.com/xuhuanhello/juice-c-sharp.git?path=Packages/datachannel-unity#v0.3.0"
 ```
 
-Without the `#v0.1.1` suffix, UPM tracks the default branch: the package can change under you between two `Library/` resolves, and the binary you tested against is not necessarily the one that ships. Pin, and bump deliberately — see [`CHANGELOG.md`](./CHANGELOG.md).
+Without the `#v0.3.0` suffix, UPM tracks the default branch: the package can change under you between two `Library/` resolves, and the binary you tested against is not necessarily the one that ships. Pin, and bump deliberately — see [`CHANGELOG.md`](./CHANGELOG.md).
 
 For local development against a checkout of this repository:
 
