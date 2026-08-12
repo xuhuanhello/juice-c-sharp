@@ -3,20 +3,20 @@
   "architectures": [
     "arm64"
   ],
-  "built_at": "2026-08-12T11:53:58+00:00",
+  "built_at": "2026-08-12T14:16:39+00:00",
   "ci": {
     "event": "workflow_dispatch",
     "ref": "refs/heads/main",
     "run_attempt": "1",
-    "run_id": "31593778877",
-    "run_url": "https://github.com/xuhuanhello/juice-c-sharp/actions/runs/31593778877",
+    "run_id": "31605717407",
+    "run_url": "https://github.com/xuhuanhello/juice-c-sharp/actions/runs/31605717407",
     "workflow": "Plugins matrix"
   },
   "platform": "ios",
   "plugin": "datachannel_unity",
   "schema": 1,
   "source": {
-    "commit": "228858bbd877123662f713b9935402a1bd209766"
+    "commit": "a900dbb841951b1507fe0dc2c6abccac1e5a4a6f"
   },
   "toolchain": {
     "cmake": "4.4.0",
