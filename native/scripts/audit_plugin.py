@@ -75,6 +75,12 @@ IOS_CRYPTO_EXPORTED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 打包后仍未解析 = 某个依赖没被合进来（#97）。只匹配**实现库**的命名空间/前缀，
+# 不匹配 C++ 运行时与 libSystem（__ZNSt…、__Unwind_Resume、_memcpy 等）——
+# 那些由 Xcode 在下游链接 UnityFramework 时提供，本来就该是未解析的。
+# 与 narrow_ios_archive.py 里的同名常量保持一致：那里是构建期自检，这里是入库门禁。
+IOS_IMPLEMENTATION_RE = re.compile(r"(?:^|_)(?:_ZN3rtc|_ZNK3rtc|juice_|mbedtls_|usrsctp_|srtp_)")
+
 # macOS：依赖是完整路径，用前缀规则 —— 上游合法新增系统库时无需改动此表。
 MACOS_ALLOWED_PREFIXES = (
     "/System/Library/Frameworks/",
@@ -265,16 +271,66 @@ def exports_ios(binary: Path, nm: str) -> set[str]:
     return names
 
 
-def check_ios_crypto(binary: Path, nm: str) -> None:
-    """断言收窄后的 .a 的 exported-defined 符号集里不含 crypto 实现名（决议 #94 §B）。
+def check_ios_implementation_present(binary: Path, nm: str) -> None:
+    """断言归档里带着实现，而不只是 wrapper（#97）。
 
-    ld -r 收窄后 mbedtls 符号应当是 local，不出现在 nm -Uj 里。
-    若仍是 exported-defined，说明收窄未生效或 find_package 找到了系统 crypto。
+    为什么这条门禁必须存在：
+        iOS 是 STATIC，没有链接期，依赖不会被自动拉进产物。依赖漏合时，
+        入库的 .a 只有 107 KB、只含 wrapper、带 89 个未解析引用，而**所有
+        既有门禁都是绿的** —— dcu_* 二十个一个不少（导出集对得上），crypto
+        一个不露（mbedtls 压根没进来）。故障要到下游 Xcode 链接 UnityFramework
+        时才现形，报「symbol(s) not found for architecture arm64」。
 
-    nm -U：只输出 defined symbols（排除 undefined）。
+        导出集门禁问的是「该露的露了吗」，crypto 门禁问的是「不该露的藏住了吗」。
+        两条都不问「实现在不在」。这条补的就是那一问。
     """
-    out = run([nm, "-Uj", str(binary)])
+    out = run([nm, "-u", str(binary)])
+    missing = sorted({
+        line.strip().split()[-1]
+        for line in out.splitlines()
+        if line.strip() and not line.strip().endswith(":")
+        and IOS_IMPLEMENTATION_RE.search(line.strip().split()[-1])
+    })
+    if missing:
+        raise AuditError(
+            "The iOS archive has undefined implementation symbols — a dependency was not\n"
+            "merged into it:\n"
+            + "".join(f"    {s}\n" for s in missing[:12])
+            + (f"    … and {len(missing) - 12} more\n" if len(missing) > 12 else "")
+            + "\n  A STATIC target has no link step: target_link_libraries records the\n"
+              "  dependency but never copies its code in. Every dependency must be passed\n"
+              "  to narrow_ios_archive.py with --extra-archive (see DCU_IOS_DEP_TARGETS in\n"
+              "  native/CMakeLists.txt).\n"
+              "  The export gate cannot catch this: an archive holding only the wrapper\n"
+              "  still exports all of dcu_*."
+        )
+    print("==> iOS implementation check: no undefined implementation symbols")
+
+
+def check_ios_crypto(binary: Path, nm: str) -> None:
+    """断言收窄后的 .a **对外可见**的符号里不含 crypto 实现名（决议 #94 §B）。
+
+    收窄后 mbedtls 符号应当是 local（nm 的小写 t/d/b），**不是**从归档里消失 ——
+    实现必须还在，只是不再对外可见。
+
+    必须同时给 -U 和 -g（#97）：
+        -U 只排除 undefined，**不排除 local**；-j 只是「只打名字」。
+        单用 nm -Uj 会把 1188 个已经 local 化的 mbedtls 符号一并列出来，
+        于是一份**正确**的归档反而报红。
+        这个错在此前一直没暴露，是因为当时入库的 .a 里压根没有 mbedtls ——
+        依赖就没被合进来（同 #97）。两个 bug 互相遮蔽：错的判据配上错的产物，
+        结果是绿的。
+    """
+    out = run([nm, "-Ujg", str(binary)])
     bad = [s for s in out.splitlines() if s.strip() and IOS_CRYPTO_EXPORTED_RE.search(s.strip())]
+
+    # common 符号（nm 的 "C"）没有节，ld -r -exported_symbols_list 降不了它们，
+    # 于是它们在 -g 下仍然可见。这不是收窄失效：common 是**未初始化的定义**，
+    # 不含实现，也不构成「导出了一份 crypto」。逐个列出而不是按类放行 ——
+    # 新冒出来的那个必须撞线，由人来判断。
+    known_common = {"_mbedtls_cipher_supported"}
+    bad = [s for s in bad if s.strip() not in known_common]
+
     if bad:
         raise AuditError(
             "The iOS archive exports crypto symbols — ld -r narrowing did not take effect,\n"
@@ -284,7 +340,6 @@ def check_ios_crypto(binary: Path, nm: str) -> None:
               "  Re-run narrow_ios_archive.py, or check that USE_MBEDTLS=ON and\n"
               "  USE_GNUTLS=OFF / USE_NICE=OFF are in effect."
         )
-    # nm -Uj が全空でも正常（exported-defined が dcu_* だけになった状態）
     print("==> iOS crypto check: no crypto symbols exported (narrowing effective)")
 
 
@@ -544,11 +599,12 @@ def main() -> int:
         # 这条断言改掉 SPEC §11 原有的「iOS 不建依赖门禁」——
         # 那个判断否掉的是维护 322 条允许列表，不是这一条简单的 crypto 正则。
         nm = resolve_tool(args.nm, "nm", "reads exported symbols")
+        check_ios_implementation_present(binary, nm)
         check_ios_crypto(binary, nm)
         actual = exports_ios(binary, nm)
         count = check_exports(actual, args.expected)
         print(f"OK: {count} dcu_* exports match {args.expected.name}; "
-              "no crypto symbols exported (narrowing effective)")
+              "implementation merged in; no crypto symbols exported (narrowing effective)")
         return 0
     elif args.platform in ("linux", "android"):
         # Android 与 Linux 同为 ELF，**共用实现，不共用身份**（决议 #79）：

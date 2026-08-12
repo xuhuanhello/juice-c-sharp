@@ -226,17 +226,45 @@ if(DCU_STAGE_PLUGIN)
         "Cannot determine iPhoneOS SDK version (xcrun --sdk iphoneos --show-sdk-version failed).\n"
         "  Make sure Xcode is installed and 'xcode-select -p' points to a valid Xcode app.")
     endif()
+    # 静态库没有链接期：target_link_libraries(datachannel_unity PRIVATE
+    # datachannel-static) 只记录依赖关系，**不会**把依赖的代码搬进产物（#97）。
+    # 所以这里必须把每个依赖的归档显式喂给合并步骤，否则入库的 .a 只含 wrapper
+    # 而实现全缺 —— 且导出门禁看不出来（dcu_* 依然齐全）。
+    # 用 $<TARGET_FILE:> 而不是写死路径：落点由各子项目自己决定，写死会在
+    # 上游改布局时静默地指向一个不存在的文件。
+    set(DCU_IOS_DEP_TARGETS
+      datachannel-static
+      juice-static
+      usrsctp
+      mbedtls
+      mbedx509
+      mbedcrypto
+    )
+    set(DCU_IOS_MERGE_ARGS "")
+    foreach(dep IN LISTS DCU_IOS_DEP_TARGETS)
+      if(NOT TARGET ${dep})
+        message(FATAL_ERROR
+          "iOS dependency target '${dep}' does not exist.\n"
+          "  Every dependency must be merged into the shipped static archive by name;\n"
+          "  a missing one produces an archive that passes the export gate and then\n"
+          "  fails to link in Xcode (#97). Update DCU_IOS_DEP_TARGETS if the upstream\n"
+          "  target was renamed.")
+      endif()
+      list(APPEND DCU_IOS_MERGE_ARGS --extra-archive "$<TARGET_FILE:${dep}>")
+    endforeach()
+
     add_custom_command(TARGET datachannel_unity POST_BUILD
       COMMAND "${Python3_EXECUTABLE}"
               "${NATIVE_ROOT}/scripts/narrow_ios_archive.py"
               --archive      "$<TARGET_FILE:datachannel_unity>"
+              ${DCU_IOS_MERGE_ARGS}
               --out          "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}"
               --symbols-list "${DCU_EXPORT_FILE}"
               --arch         "arm64"
               --deployment-target "${CMAKE_OSX_DEPLOYMENT_TARGET}"
               --sdk-version  "${DCU_IOS_SDK_VERSION}"
               --tmp-dir      "${CMAKE_BINARY_DIR}/ios-narrow-tmp"
-      COMMENT "Narrowing iOS archive with ld -r (ld -r -exported_symbols_list)"
+      COMMENT "Merging iOS dependency archives and narrowing with ld -r"
       VERBATIM
     )
   else()
