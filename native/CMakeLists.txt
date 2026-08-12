@@ -33,6 +33,36 @@ set(CMAKE_C_VISIBILITY_PRESET hidden)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
+# C 的 tentative definition 必须编成有节的定义，不留 common（决议 #104 / #108）。
+#
+# 为什么这是全局约定而不是 iOS 分支：visibility preset 上面那三行同理 —— 它描述的是
+# 「本工程的 C 代码怎么编」，与目标平台无关。iOS 只是**唯一会暴露**它的平台：那里
+# 产物是静态归档，符号原样交给采用者的最终链接；动态库平台的 common 在自己的链接期
+# 就被解析掉了，外部看不见。为一个只在某平台可见的**通用**约定加平台分支，就是 #81
+# 要消灭的那种分支。
+#
+# 它挡的是什么：common 符号（nm 的 `C`）在最终链接期会与采用者的同名 common
+# **静默合并成同一块内存** —— 不报错、不警告。收窄前的归档里有 11 个，其中一个叫
+# `_foo`（usrsctp `user_recv_thread.c:1564` 的孤立遗留变量），撞上采用者任何一个
+# `int foo;` 就是这个后果。
+#
+# 为什么加了这行就够：`-fno-common` 把 tentative definition 编成 `S`（有节），
+# 于是既有的 `ld -r -exported_symbols_list` 能把它降成 local `s` —— common 没有节，
+# 降不了，这才是它此前逃过收窄的原因。实测链：`C _foo → S _foo → s _foo`，
+# 同一次 ld -r 里 `_dcu_keep` 仍是 `T`。
+#
+# 为什么不需要给上游打补丁：那 11 个都是**单一翻译单元的 tentative 定义 + 头文件
+# extern** 的正常形态（10 个来自 usrsctp，1 个是 mbedtls 的
+# `_mbedtls_cipher_supported`），不依赖 common 的跨 TU 合并语义，所以不会产生
+# duplicate definition。Apple clang 的 C 默认实测就是 `-fcommon`；不必去找
+# 「哪里显式开了它」，那个地方不存在。
+#
+# 限定编译器而不是 if(NOT MSVC)：MSVC 没有 tentative definition 合并这个概念，
+# 也不认这个 flag。列出认识它的三家，比排除法更说明「为什么只有它们需要」。
+# GCC 10 / Clang 11 起本来就默认 -fno-common，对它们这行是**冗余但无害**的显式声明；
+# 显式写出来，是为了让这条约定不依赖某个编译器版本的默认值。
+add_compile_options($<$<COMPILE_LANG_AND_ID:C,AppleClang,Clang,GNU>:-fno-common>)
+
 # 本工程只暂存 Unity 插件，跳过嵌套的 install/export 规则
 # （libdatachannel 的 install(EXPORT) 在 MbedTLS 不同属一个 export set 时会失败）
 set(CMAKE_SKIP_INSTALL_RULES ON)
