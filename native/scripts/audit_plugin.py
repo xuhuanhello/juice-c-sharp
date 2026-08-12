@@ -253,10 +253,23 @@ def exports_linux(binary: Path, nm: str) -> set[str]:
 
 
 def exports_ios(binary: Path, nm: str) -> set[str]:
-    """从静态归档里读 exported-defined 符号（nm -g，只留 type T/W/D/B，剥前导 _）。
+    """从静态归档里读 external-defined 符号（nm -g，type T/W/D/B/C，剥前导 _）。
 
     静态归档的 nm -g 输出里每个成员前有一行「member.o:」前缀，需要跳过。
     空归档（无成员）视为硬失败：「没有符号」和「没有跑过」形状相同，不能通过。
+
+    **`C`（common）也是 external defined，必须计入（决议 #104 / #108）。**
+    漏掉它曾让 11 个符号绕过下游那条「导出集必须逐字等于 expected-symbols.txt」的
+    严格比对 —— 10 个来自 usrsctp、1 个是 mbedtls 的 `_mbedtls_cipher_supported`，
+    其中一个叫 `_foo`。它们对采用者是实打实可见的：common 在最终链接期与同名 common
+    静默合并成同一块内存，不报错也不警告。
+    这条门禁的规则本来就是对的（「external defined 只许是那 20 个 dcu_*」），
+    错的是它没看全 external defined 的全部形态，于是规则被绕过而门禁照绿。
+
+    修的是判据，不是规则：真正让 common 消失的是 `native/CMakeLists.txt` 里那条
+    全局 `-fno-common`（把 tentative definition 编成有节的 `S`，`ld -r` 随即降为
+    local `s`）。这里认 `C`，是为了**万一它再出现就撞线** —— 判据看得见，
+    比依赖某个编译器默认值可靠。
     """
     out = run([nm, "-g", str(binary)])
     names = set()
@@ -267,7 +280,8 @@ def exports_ios(binary: Path, nm: str) -> set[str]:
             continue
         parts = stripped.split()
         # nm -g 格式：[addr] type name   （undefined: "         U _name"）
-        if len(parts) >= 2 and parts[-2] in ("T", "W", "D", "B"):
+        # common 与 T 同形（3 列，parts[-2] 是类型），所以只需多认一个类型。
+        if len(parts) >= 2 and parts[-2] in ("T", "W", "D", "B", "C"):
             names.add(parts[-1].lstrip("_"))
     if not names:
         raise AuditError(
@@ -331,12 +345,11 @@ def check_ios_crypto(binary: Path, nm: str) -> None:
     out = run([nm, "-Ujg", str(binary)])
     bad = [s for s in out.splitlines() if s.strip() and IOS_CRYPTO_EXPORTED_RE.search(s.strip())]
 
-    # common 符号（nm 的 "C"）没有节，ld -r -exported_symbols_list 降不了它们，
-    # 于是它们在 -g 下仍然可见。这不是收窄失效：common 是**未初始化的定义**，
-    # 不含实现，也不构成「导出了一份 crypto」。逐个列出而不是按类放行 ——
-    # 新冒出来的那个必须撞线，由人来判断。
-    known_common = {"_mbedtls_cipher_supported"}
-    bad = [s for s in bad if s.strip() not in known_common]
+    # 这里曾经逐名豁免 `_mbedtls_cipher_supported`，因为 common 符号没有节、
+    # `ld -r -exported_symbols_list` 降不了它。**豁免已删（决议 #104 / #108）**：
+    # 全局 `-fno-common` 让 tentative definition 一开始就带节，收窄随即把它降成
+    # local，于是修好之后**不应再存在任何 external common**。留着那条豁免，就等于
+    # 给「common 又回来了」开了一个永久的静默通道。
 
     if bad:
         raise AuditError(
