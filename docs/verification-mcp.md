@@ -205,25 +205,35 @@ The artifact separates the failure modes rather than just saying "not zero": a c
 
 **Only needed when landing a new platform binary** (SPEC §10 / CONTRIBUTING). Everything above runs in the Editor on the development machine; this one runs the same PlayMode suite on the *target device*, because that is the only place a wrong `.meta` or a binary Unity refuses to load actually shows up.
 
-**Build the existing suite into a Player whenever the Test Runner route is used.** For a Play-distributed AAB, a Player-resident equivalent runner is also permitted when it writes a machine-readable report from the installed AAB path: the report must identify the Runtime contracts it exercises, include non-zero total/passed/failed counts and failure detail, and must not claim to be Unity Test Framework XML.
+**Build the existing suite into a Player whenever the Test Runner route is used.** For a Play-distributed AAB, a Player-resident equivalent runner is also permitted when it writes a machine-readable report from the installed AAB path: the report must identify the Runtime contracts it exercises, include non-zero total/passed/failed counts and failure detail, and must not claim to be Unity Test Framework XML. **iOS uses that same alternative**, for a different reason — the Test Runner route is structurally unavailable there (see the box below).
 
 **The command line is the only Test Runner route that produces the artifact.** ~~Test Runner → PlayMode → *Run all tests (`<target platform>`)*, **or** headless~~ — that "or" was wrong, and wrong in the way that costs a whole run: a Test Runner **UI** run writes **no result file at all**. The class that serialises the XML (`ResultsSavingCallbacks`) lives in the package's `CommandLineTest` namespace and is registered in exactly one place, `CommandLineTest/Executer.cs` — the `-runTests` path. A UI run goes through `WindowResultUpdater`, which only repaints the window. (Verified against `com.unity.test-framework@1.1.33`, the version this project pins. The two `"Export"` strings in `PlayModeTestListGUI.cs` are the *build* button's caption when the target exports an Android Studio / Xcode project — nothing to do with results.)
 
 **iOS-specific prerequisites (decision #96):**
 
 - In `ProjectSettings`, set `appleEnableAutomaticSigning: 1` and `appleDeveloperTeamID` to your team ID **locally** — do **not** commit these values. The Team ID exposes the maintainer's identity and would force all contributors into automatic signing for a team they do not belong to.
-- Unity uses `xcodebuild -scheme Unity-iPhone -destination "platform=iOS,id=<udid>" test -allowProvisioningUpdates`, so a paid Apple Developer account and a connected + trusted device are required. A personal (free) team works but needs one manual trust tap on the device on the first run.
+- ~~Unity uses `xcodebuild -scheme Unity-iPhone -destination "platform=iOS,id=<udid>" test -allowProvisioningUpdates`~~ — Unity *would* run exactly that, but **`-runTests` never reaches the code that runs it**; see the iOS box below. You still need an Apple Developer account and a paired device, because *you* now invoke `xcodebuild` yourself.
+- **On a paid account with `-allowProvisioningUpdates`, installing needs no human at the device** (measured, #97): `devicectl device install app` succeeded first try with **no trust prompt to tap**. That step is AFK. A personal (free) team is expected to need one manual trust tap on the first run — *expected, not measured here*.
 - Device UDID: `xcrun devicectl list devices` or Xcode → Window → Devices and Simulators.
+
+> **iOS: the Test Runner route does not work, and cannot be made to (#97).**
+>
+> `-runTests -testPlatform iOS -batchmode` builds the Xcode project, reports `Build Finished, Result: Success`, then **never invokes `xcodebuild`** and dies on the 600-second heartbeat timeout. This is structural, not a misconfiguration:
+>
+> Launch is performed by `iOStvOSCommonBuildWindowExtension.DoBuildAndRun()` — an extension of the **Build Settings window**, reachable only from the *Build And Run* button. `-runTests` goes through `PlayerLauncher` → `BuildPipeline.BuildPlayer`, which does not go through it. Batchmode has no window, therefore no caller.
+>
+> The decisive evidence is a **double absence in the log**: both branches of `DoBuildAndRun` open with a `Debug.Log` (`"Invoking xcodebuild: …"` / `"Invoking ios-deploy: …"`), and *neither* line ever appears. Do not spend another run on `appleBuildAndRunType`, on hunting for a `Unity-iPhone Tests` scheme (Unity generates no separate XCTest bundle), or on `EditorPrefs` — none of those are on the path.
+>
+> **Use the Player-resident route below instead.** Verified on Unity 2022.3.62f3.
 
 | Step | |
 |------|--|
 | 0 | **Close the GUI Editor.** Batchmode cannot open a project another Editor already has open (`Multiple Unity instances cannot open the same project`) |
-| 0a | **(iOS only)** Set Team ID locally in PlayerSettings (do not commit), confirm device is awake (`xcrun devicectl list devices` shows `available (paired)`) |
-| 1 | `Unity -runTests -testPlatform <Android\|iOS\|StandaloneWindows64\|StandaloneLinux64\|StandaloneOSX> -batchmode -projectPath . -testResults <host path>/smoke-<platform>.xml` |
+| 1 | `Unity -runTests -testPlatform <Android\|StandaloneWindows64\|StandaloneLinux64\|StandaloneOSX> -batchmode -projectPath . -testResults <host path>/smoke-<platform>.xml` — **`iOS` is not in that list on purpose**; see the box above and use §8b-iOS |
 | 2 | Let it run **on the device**, not in the Editor |
 | 3 | Attach the NUnit result XML to that platform's ticket |
 
-**The XML is written on the host, not on the device** — the Editor process drives the run over adb/USB and serialises the result itself, so there is nothing to `adb pull`. `-testResults` is optional; without it the file lands at `<project>/TestResults-<ticks>.xml` (`ResultsSavingCallbacks.GetDefaultResultFilePath`). Both option names are spelled without the leading dash in `CommandLineTest/SettingsBuilder.cs` (`testPlatform`, `testResults`), i.e. pass them as `-testPlatform` / `-testResults`.
+**The XML is written on the host, not on the device** — the Editor process drives the run over adb/USB and serialises the result itself, so there is nothing to `adb pull`. (This holds for the Test Runner route only. On the §8b-iOS route the XML is written **on the device** and has to be copied off — step 4 there.) `-testResults` is optional; without it the file lands at `<project>/TestResults-<ticks>.xml` (`ResultsSavingCallbacks.GetDefaultResultFilePath`). Both option names are spelled without the leading dash in `CommandLineTest/SettingsBuilder.cs` (`testPlatform`, `testResults`), i.e. pass them as `-testPlatform` / `-testResults`.
 
 **Expect:** every test passed, and — just as importantly — **a non-zero test count**. Zero tests run is a failure: it means the plugin did not load, which is the whole reason this step exists.
 
@@ -232,6 +242,37 @@ The suite-level teardown assertions (step 9) come along for free, since they are
 **What does not count as evidence:** a screenshot, a Console line, or a description of what you saw. The result XML is the artifact; a manual step still has to be machine-judged (SPEC §11).
 
 **Reading a failure.** A `DllNotFoundException` on the device with everything green in CI points at the `.meta`, not the binary — check that `gen_plugin_meta.py --check` is clean and that the platform's entry in `PLATFORMS` matches what a real Editor writes (`native/exports/plugin-meta-golden/`).
+
+### 8b-iOS. The Player-resident route
+
+`Assets/DataChannelUnity.Verification/` holds a runner that reproduces the three Runtime PlayMode contracts without referencing the Unity Test Framework, and writes NUnit-3-shaped XML to `Application.persistentDataPath`.
+
+| Step | |
+|------|--|
+| 0 | Close the GUI Editor; set Team ID locally (do not commit); `xcrun devicectl list devices` shows `available (paired)` |
+| 1 | `Unity -batchmode -quit -projectPath . -buildTarget iOS -executeMethod DataChannelUnity.Verification.Editor.BuildDeviceVerification.BuildIOS -deviceVerificationOutput <dir>` |
+| 2 | `xcodebuild -project <dir>/Unity-iPhone.xcodeproj -scheme Unity-iPhone -configuration Release -destination "platform=iOS,id=<udid>" -allowProvisioningUpdates DEVELOPMENT_TEAM=<team> build` |
+| 3 | `xcrun devicectl device install app --device <udid> <app path>` then `... process launch --device <udid> <bundle id>` |
+| 4 | `xcrun devicectl device copy from --device <udid> --domain-type appDataContainer --domain-identifier <bundle id> --source Documents/device-verification.xml --destination ./smoke-ios.xml` |
+| 5 | Attach `smoke-ios.xml` to the ticket |
+
+The same **non-zero count** rule applies: the report carries `total` / `passed` / `failed`, and zero cases is a failure.
+
+**Step 3 is the one step that needs a human, and only because the screen must be unlocked.** Installing is AFK; *launching* onto a locked device fails — and fails **loudly, within a second**, which is the good outcome:
+
+```
+The request to open "<bundle id>" failed. (FBSOpenApplicationServiceErrorDomain error 1)
+NSLocalizedFailureReason = … denied by service delegate (SBMainWorkspace) for reason: Locked
+    ("Unable to launch <bundle id> because the device was not, or could not be, unlocked")
+```
+
+**This is a different shape from Android's, and better.** Android's equivalent (map [#78](https://github.com/xuhuanhello/juice-c-sharp/issues/78)) is a *silent* run to the timeout when the device dozes — you learn nothing until the heartbeat gives up. iOS names the reason immediately. **The cost is that iOS has no `svc power stayon` equivalent**: there is no public command to unlock or keep the screen awake, so a person unlocks the phone. In practice, wrap step 3 in a retry loop and wait (two 15-second rounds sufficed in #97).
+
+**"Does Unity kill `xcodebuild` when it exits?" does not apply on this route.** On Android, Unity kills the adb server out from under a run. Here Unity emits the Xcode project and quits at step 1; `xcodebuild` and `devicectl` are invoked afterwards from outside the Editor, so there is no "Unity finished" moment that could interfere. **The risk was routed around, not verified away** — it comes back for anything that puts Unity back in the driving seat.
+
+The report's `framework` attribute says **`NOT Unity Test Framework`**, and must keep saying so. The alternative clause replaces the *tool* that produces the XML — not the "machine-judged, non-zero count" criterion. A report dressed up as UTF output would tell its reader the preferred route ran when it did not.
+
+`DeviceVerificationRunner` declares its `DllImport` target as `__Internal` under `UNITY_IOS && !UNITY_EDITOR`: on iOS the plugin is a static archive linked straight into the executable, so there is no library name to look up. Getting this wrong turns all three cases red with `DllNotFoundException` — the same symptom as a wrong `.meta`, from a different cause.
 
 ---
 

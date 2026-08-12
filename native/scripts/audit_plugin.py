@@ -31,8 +31,13 @@
     拿不到路径，只能退回名字允许列表。
     （#50 的结论里写的「Linux 同形用路径前缀」不成立，此处按事实实现。）
 
-静态库（iOS .a）不走本脚本：它没有依赖表，唯一代理是未定义符号集，会随编译器与
-优化级别漂移 —— 决议 #50 明确不建这条门禁，缺口写进 SPEC 而不是假装有。
+静态库（iOS .a）走本脚本的 `--platform ios` 分支，但**没有依赖门禁**：.a 没有依赖表。
+#50 否掉的是「维护一张 322 条未定义符号的允许列表」（随编译器与优化级别漂移），那条仍然
+不建。取而代之的是三条定额断言，各问一件事，前两条各自会在下一条能抓到的归档上判绿：
+    exports_ios（nm -g）                 —— 该露的露了吗
+    check_ios_crypto（nm -Ujg）          —— 不该露的藏住了吗
+    check_ios_implementation_present（nm -u）—— 实现在不在（#97）
+见 SPEC §11「The three iOS gates ask three different questions」。
 """
 
 from __future__ import annotations
@@ -68,8 +73,10 @@ CRYPTO_DENY = re.compile(
 # iOS 静态归档专用：exported-defined 符号集里不许有 crypto 实现名。
 # 与 CRYPTO_DENY 不同：CRYPTO_DENY 匹配依赖名（libssl、libmbedtls 等），
 # 这里匹配的是符号名（_mbedtls_ssl_setup、_psa_cipher_encrypt_setup 等）。
-# ld -r 收窄后 mbedtls 符号应当是 local（不出现在 nm -Uj 里）；
-# 若它仍是 exported-defined，说明收窄未生效或 find_package 找到了系统 crypto。
+# ld -r 收窄后 mbedtls 符号应当是 local —— 判据是 nm -Ujg（**必须带 -g**，
+# 见 check_ios_crypto 的 docstring：-U 不排除 local，单用 nm -Uj 会把一份
+# 正确的归档判红）。若它仍是 exported-defined，说明收窄未生效或
+# find_package 找到了系统 crypto。
 IOS_CRYPTO_EXPORTED_RE = re.compile(
     r"^_?(mbedtls_|psa_|ssl_|libssl|libcrypto|gnutls_|wolfssl_)",
     re.IGNORECASE,
@@ -594,10 +601,12 @@ def main() -> int:
         print(f"OK: exports and dependencies passed for all {len(archs)} architecture(s)")
         return 0
     elif args.platform == "ios":
-        # iOS 静态归档：导出集 + crypto 断言（无依赖门禁 —— .a 没有依赖表，见 SPEC §11）。
-        # 决议 #94 §B：nm -Uj（exported-defined）里不许有 crypto 名，
-        # 这条断言改掉 SPEC §11 原有的「iOS 不建依赖门禁」——
-        # 那个判断否掉的是维护 322 条允许列表，不是这一条简单的 crypto 正则。
+        # iOS 静态归档：三条断言，无依赖门禁（.a 没有依赖表）。
+        # 三条各问一件事，前两条都会在第三条能抓到的归档上判绿 ——
+        # 见 SPEC §11「The three iOS gates ask three different questions」。
+        # #50 否掉的是维护 322 条未定义符号允许列表，不是这三条定额断言；
+        # crypto 那条来自决议 #94 §B，判据是 nm -Ujg（**带 -g**，#97 更正）。
+        # 顺序有意为之：实现不在的话，另两条的「绿」没有意义，先报最根本的那条。
         nm = resolve_tool(args.nm, "nm", "reads exported symbols")
         check_ios_implementation_present(binary, nm)
         check_ios_crypto(binary, nm)

@@ -70,7 +70,16 @@ Unpack the CI artifact at the package root: the zip already contains `Plugins/�
 
 ### The per-platform on-device smoke
 
-**Keep a machine-judged Runtime report.** Prefer building `DataChannelUnity.Tests.Runtime` into a Player with the Test Runner and attaching its NUnit XML. When the Play-distributed AAB installation path itself is verified, a Player-resident equivalent runner may write its machine-readable report under `Application.persistentDataPath`; it must identify the Runtime contracts, report non-zero total/passed/failed counts, and include failure detail. Attach that report to the ticket. The concrete steps are in [`docs/verification-mcp.md`](./docs/verification-mcp.md).
+**Keep a machine-judged Runtime report.** Prefer building `DataChannelUnity.Tests.Runtime` into a Player with the Test Runner and attaching its NUnit XML. A **Player-resident equivalent runner** may write its machine-readable report under `Application.persistentDataPath` instead; it must identify the Runtime contracts, report non-zero total/passed/failed counts, and include failure detail. Attach that report to the ticket. The concrete steps are in [`docs/verification-mcp.md`](./docs/verification-mcp.md).
+
+Two platforms use that alternative, and **not for the same reason** (SPEC §11):
+
+| Platform | Why the alternative | Is it a choice? |
+|----------|--------------------|-----------------|
+| Android | The Play-distributed AAB installation path is itself what's under test, so the report must come from the installed AAB | Yes |
+| iOS | The Test Runner route is **structurally unavailable**: `-runTests -testPlatform iOS` builds the Xcode project, reports success, and never invokes `xcodebuild` — the caller lives on the Build Settings *window*, and batchmode has no window ([#97](https://github.com/xuhuanhello/juice-c-sharp/issues/97)) | **No** |
+
+Do not spend a run trying to configure iOS onto the Test Runner route; nothing configures it back on. Unity's job there ends at emitting the Xcode project, and you drive `xcodebuild` / `devicectl` yourself — steps in `docs/verification-mcp.md` §8b-iOS. **The alternative swaps the tool that writes the report, never the "machine-judged, non-zero counts" bar**; a report claiming to be Unity Test Framework XML when it is not would tell its reader the preferred route ran when it did not.
 
 - **Zero tests run is a failure**, not a pass — it means the plugin did not load, which is the single thing this step exists to catch.
 - A screenshot or "I ran it and it looked fine" is **not** evidence. The rule from SPEC §11 applies: a manual step still has to produce something a machine can judge.
