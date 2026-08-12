@@ -808,7 +808,7 @@ Packages/datachannel-unity/
 | macOS universal | **One** `.dylib`, arm64 + x86_64 | `datachannel_unity` | Yes | `nm` + `otool` + `lipo` | Path-prefix allowlist (`/System/Library/Frameworks/`, `/usr/lib/`, `@loader_path`) |
 | Linux x64 | `libdatachannel_unity.so` | `datachannel_unity` | Yes | `nm` + `readelf` | Name allowlist — `DT_NEEDED` carries only sonames |
 | Android arm64-v8a | `libdatachannel_unity.so` | `datachannel_unity` | No | `nm` + `readelf` | As Linux |
-| iOS arm64 | static `.a`, symbols narrowed by `ld -r` | `__Internal` | No (no simulator v1) | `nm -g` on the archive *(designed, not built — §9)* | **None** — see the gap in §11 |
+| iOS arm64 | static `.a`, symbols narrowed by `ld -r` | `__Internal` | No (no simulator v1) | `nm -g` (exports), `nm -Ujg` (crypto), `nm -u` (implementation present) | **No dependency table to read** — three symbol-set gates stand in for it (§11) |
 | WebGL | `.a` + `webrtc.jslib` | `__Internal` | No | — | — |
 
 **A crypto-name ban sits on top of the allowlist**, because macOS really does ship `/usr/lib/libssl.dylib` — a path-prefix rule alone would wave it through. It bans the bundled-crypto family (openssl, mbedtls, gnutls, wolfssl); Windows' `bcrypt.dll` / `crypt32.dll` are **allowed** and are not an exception to it — they are the OS's own crypto API, which libjuice and libdatachannel use for randomness and certificates, not a crypto library of ours that failed to link statically.
@@ -911,20 +911,31 @@ Two constraints that came out of the same investigation and still hold:
 
 **Declared Linux floor: Ubuntu 22.04 / glibc 2.35.** This is a **declaration, not a measurement** — there is no Docker build and no verified compatibility floor below it. It follows from `runs-on: ubuntu-22.04` being the oldest surviving Ubuntu label (`ubuntu-20.04` was retired), and it is **one notch above what Unity 2022.3 itself declares** (Ubuntu 20.04 / glibc 2.31), so adopters must be told rather than left to discover it on an old system. Carrying a whole Docker build path for a distribution that reached end of standard support in 2025-05 is not worth it; declaring the floor is the honest alternative.
 
-### iOS symbol narrowing (decided, not yet built)
+### iOS symbol narrowing (built — `narrow_ios_archive.py`)
 
-The static `.a` narrows its symbols in **one step**, `ld -r -exported_symbols_list`, not by renaming with a prefix:
+The static `.a` narrows its symbols in **one step**, `ld -r -exported_symbols_list`, not by renaming with a prefix. Narrowing is one step; it is preceded by a **merge**, because a `STATIC` target has no link step at all:
 
 ```
-ar x <archives>                    # explode to .o
-ld -r -arch <arch> -platform_version <plat> <min> <sdk> \
-   -exported_symbols_list <generated list> -o combined.o <all .o>
+libtool -static -o merged.a <wrapper .a> <every dependency .a>
+ld -r -arch <arch> -platform_version ios <min> <sdk> \
+   -exported_symbols_list <generated list> -all_load -o combined.o merged.a
 ar crs libdatachannel_unity.a combined.o
 ```
 
-Verified end-to-end on a real iPhoneOS SDK: non-allowlisted symbols go `T` → `t`, cross-object references stay intact (`nm -u` empty), the final link exits 0, and a second archive defining the same names links alongside without collision. Prefix renaming is deliberately **not** copied from the reference implementation that does it: that project exports `sqlite3_*`, which *must* collide with the system libsqlite3; we export `dcu_*`, which does not, and our upstream is ~195 sources plus MbedTLS's build-time code generation rather than a single-file amalgamation.
+**Both deviations from the obvious commands are load-bearing** ([#97](https://github.com/xuhuanhello/juice-c-sharp/issues/97), each found by shipping the obvious one first):
 
-The consequence worth keeping: after narrowing, `nm -g` on the archive really does show only `dcu_*`, so **the iOS export gate is not a vacuous assertion** — it is as strict as the other platforms'. One thing is left to measure when iOS actually produces an artifact: `ld -r` will also localise libc++'s weak symbols (vtables, typeinfo, template instantiations). Our boundary is pure C with no C++ types crossing it, so the expectation is a size cost rather than a correctness problem — expectation, not proof.
+- **`libtool -static`, not `ar x`.** An archive may hold **same-named members**, and `ar x` unpacks by filename, so duplicates silently overwrite each other. `libdatachannel-static.a` has 63 members under only 56 distinct names; of the two `peerconnection.cpp.o`, one defines `rtc::PeerConnection::onIceStateChange` and the other merely references it — unpacking keeps whichever lands last. The failure this produces is *worse* than a missing dependency, because it is partial: most of the implementation is present.
+- **`-all_load`.** Given an archive, `ld` pulls only the members something already references. The members it skips are the ones reached at *runtime*, so omitting the flag compiles just as quietly.
+
+Without the merge, the shipped `.a` is 107,912 bytes of wrapper carrying 87 unresolved references, 32 of them `rtc::` — and **every export-side gate is green**, because all 20 `dcu_*` are present and no crypto name leaks (mbedtls never arrived). That is the failure §11's third iOS gate exists to catch. Merged and narrowed, the same build is 3,664,032 bytes.
+
+Verified end-to-end on a real iPhoneOS SDK: non-allowlisted symbols go `T` → `t`, cross-object references stay intact, the final link exits 0, and a second archive defining the same names links alongside without collision. (In that synthetic check `nm -u` came out empty; on the real artifact it is **not** empty — 339 undefined names remain, every one of them C++ runtime or libSystem, which Xcode supplies when it links `UnityFramework`. This is why the gate filters `nm -u` by implementation-library prefixes instead of demanding an empty set.) Prefix renaming is deliberately **not** copied from the reference implementation that does it: that project exports `sqlite3_*`, which *must* collide with the system libsqlite3; we export `dcu_*`, which does not, and our upstream is ~195 sources plus MbedTLS's build-time code generation rather than a single-file amalgamation.
+
+The consequence worth keeping: after narrowing, `nm -g` on the archive shows only `dcu_*` text symbols, so **the iOS export gate is not a vacuous assertion** — it is as strict as the other platforms'.
+
+**The libc++ localisation cost is real, accepted, and disclosed** ([#104](https://github.com/xuhuanhello/juice-c-sharp/issues/104), measured on the landed artifact). `ld -r` localises the C++ runtime along with everything else: **852** vtable/typeinfo symbols and **1495** `std::` member functions become archive-local, and **zero** weak (`W`/`V`) symbols remain external. Because our boundary is pure C — no C++ type crosses it — this is a **size** trade-off, not an ABI or correctness one: an app that also links libc++ elsewhere may carry a second static copy of the parts we use. Adopters who care about final IPA size should know this; quantifying or shrinking it is separate work and did not block the landing.
+
+**Common symbols are the one thing narrowing cannot reach**, and that is a gate hole rather than a property to accept: `-exported_symbols_list` can only demote symbols that have a section, and a tentative definition compiled as common has none. Apple clang defaults C to `-fcommon`, so 11 of them survive as external `C` in the landed archive. [#108](https://github.com/xuhuanhello/juice-c-sharp/issues/108) makes `-fno-common` a global convention for `native/` C code, which gives those definitions a section and lets the existing `ld -r` step localise them — measured as `C _foo` → `S _foo` → `s _foo`.
 
 ### Phased platforms
 
@@ -942,7 +953,7 @@ The remaining targets are:
 | Remaining | Why it is where it is |
 |-----------|-----------------------|
 | **WebGL** | Out of scope for now (§16 and map [#46](https://github.com/xuhuanhello/juice-c-sharp/issues/46)): not one more toolchain but a different behaviour contract — it needs the datachannel-wasm C facade, and §8 records that the back-pressure guarantee is physically unavailable there |
-| **iOS arm64** | The cost is in `native/`, not in CI: `add_library(... SHARED ...)` is hard-coded, the staging step branches on `if(APPLE)` and would build a `.bundle` around a static library, the audit has no static-archive branch, and the `ld -r` narrowing above is designed but unbuilt. **Today the target produces no artifact at all** |
+| ~~**iOS arm64**~~ | **Landed** (map [#90](https://github.com/xuhuanhello/juice-c-sharp/issues/90)) — ~~the cost is in `native/`, not in CI … **today the target produces no artifact at all**~~. `native/platforms/iOS.cmake` declares the static target, `narrow_ios_archive.py` merges and narrows, `audit_plugin.py` has its static-archive branch, the CI-built `.a` is committed with provenance at `Report~/iOS.json`, and the device smoke passed 3/3 on an iPhone SE (3rd gen). One refinement is outstanding, not a gap in the landing: **11 external `C` (common) symbols** still escape the export gate, which reads only `T/W/D/B` — [#108](https://github.com/xuhuanhello/juice-c-sharp/issues/108) closes that with a global `-fno-common`, and the `.a` bytes change when it does |
 | ~~Windows arm64~~ | **Out of the matrix** — no ARM64 slot on 2022.3's Standalone Windows (§8) |
 
 > **Correction, measured:** an earlier version of this table recorded Android as blocked by a floor conflict — "Unity 2022.3 supports API 22, but libjuice's `getifaddrs` needs API 24". **That does not hold at the pinned versions, and the claim was inferred from a grep rather than from reading the code.** libjuice's `socket.h` defines `NO_IFADDRS` for `__ANDROID__` *unconditionally*, and `udp.c` takes a `SIOCGIFCONF` branch there instead — it never calls `getifaddrs` on Android at any API level. libdatachannel itself does not call it, and usrsctp's only use sits inside `#if defined(__APPLE__) || defined(__DragonFly__) || defined(__FreeBSD__)`.
@@ -1164,11 +1175,13 @@ It lives at `Assets/DataChannelUnity.Verification/Editor/` — the host project,
 
 CI can prove a binary builds, exports only `dcu_*` and links nothing forbidden. It cannot prove the binary **loads inside Unity** on that platform, because there is no Unity in CI ([#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43)) — and `.meta` mistakes surface only on a real device. So each platform's binary is committed only after one **real-device dual-peer smoke**.
 
-**The device smoke emits a machine-readable test report.** Prefer the existing `DataChannelUnity.Tests.Runtime` assembly built into a Player via the Test Runner and retain its NUnit XML. When the Play-distributed AAB installation path itself is under test, a Player-resident equivalent runner may emit the report from `Application.persistentDataPath`; its report must name the Runtime contracts it exercises, include total/passed/failed counts and failure detail, and must not describe itself as a Unity Test Framework result. In both forms the evidence is a structured file, not a line read out of a Console — reading a log line is the same disease as `|| true`, in its fourth form. The suite-level teardown assertions (`dcu_shutdown()` → 0, `dcu_event_queue_depth()` → 0) are required in the report.
+**The device smoke emits a machine-readable test report.** Prefer the existing `DataChannelUnity.Tests.Runtime` assembly built into a Player via the Test Runner and retain its NUnit XML. A **Player-resident equivalent runner** may emit the report from `Application.persistentDataPath` instead; its report must name the Runtime contracts it exercises, include total/passed/failed counts and failure detail, and must not describe itself as a Unity Test Framework result.
+
+**Two platforms take that alternative, for opposite reasons — and the difference is worth keeping visible.** On Android it is a *choice*: the Play-distributed AAB installation path is itself the thing under test, so the report has to come from the installed AAB. On **iOS it is not a choice** — the Test Runner route is structurally unavailable ([#97](https://github.com/xuhuanhello/juice-c-sharp/issues/97)): `-runTests -testPlatform iOS` builds the Xcode project, reports success, and never invokes `xcodebuild`, because the code that would invoke it hangs off the Build Settings **window** (`DoBuildAndRun`) and batchmode has no window. No configuration reaches it. So on iOS the alternative clause is the only available route, and Unity's role stops at emitting the Xcode project — `xcodebuild` and `devicectl` are driven from outside the Editor. **The alternative replaces the tool that writes the report, never the "machine-judged, non-zero counts" criterion.** In both forms the evidence is a structured file, not a line read out of a Console — reading a log line is the same disease as `|| true`, in its fourth form. The suite-level teardown assertions (`dcu_shutdown()` → 0, `dcu_event_queue_depth()` → 0) are required in the report.
 
 **Zero tests run is a failure, not a pass** — it means the plugin did not load, which is exactly what this step exists to detect.
 
-The report goes on the ticket for that platform; §10's landing conditions require one per platform in the batch. **Stated cost:** the Test Runner route drags the whole test assembly onto the target device; the AAB route carries only its equivalent runner.
+The report goes on the ticket for that platform; §10's landing conditions require one per platform in the batch. **Stated cost:** the Test Runner route drags the whole test assembly onto the target device; the Player-resident route carries only its equivalent runner, and its report has to be retrieved from the device's own storage.
 
 ### The `.meta` files are generated, and that is also how they are checked
 
@@ -1184,8 +1197,26 @@ GUIDs are read back from the existing file and preserved — a landed GUID canno
 
 Stated explicitly, in the same spirit as the enum-insertion gap below — a gap that is written down is a decision; a gap that is merely absent is an accident waiting to be rediscovered.
 
-- **No dependency gate on the iOS static library** ([#50](https://github.com/xuhuanhello/juice-c-sharp/issues/50)). The dependency check reads a dynamic artifact's dependency table against a path-prefix allowlist. A `.a` has no dependency table; the only proxy is its undefined-symbol set (322 of them, measured), which drifts with compiler and optimisation level. High maintenance, low catch rate — so the gate is **not built**, and iOS is covered on exports only.
+- ~~**No dependency gate on the iOS static library.** … iOS is covered on exports only.~~ **Superseded — iOS has three gates, none of them an allowlist** (see below). What [#50](https://github.com/xuhuanhello/juice-c-sharp/issues/50) rejected still stands and was never reinstated: maintaining an allowlist of the archive's 322 undefined symbols, which drifts with compiler and optimisation level. The three gates that replaced it are fixed-cost assertions, not lists.
 - **The `.meta` checker cannot cover everything, and the split is not arbitrary.** What it does cover is what plain text can express — and that happens to be the class Unity never validates, where a mistake is silently ineffective. What it cannot cover is anything only a real Editor decides. This is why the on-device smoke above is a landing condition rather than a nicety: it is the only thing standing behind the other class.
+
+### The three iOS gates ask three different questions
+
+A `.a` has no dependency table, so the dependency allowlist that covers the other four platforms has nothing to read. Three symbol-set assertions stand in for it. **The point is that they are not three readings of one fact** — each of the first two is green on an archive the next one catches:
+
+| Gate | Command | Question |
+|------|---------|----------|
+| Exports | `nm -g`, types `T`/`W`/`D`/`B` | Is what should be exported exported, **and nothing else**? 20 `dcu_*`, diffed against `expected-symbols.txt` — §4's 19 product symbols plus the `dcu_test_set_open_race_delay_ms` contract-test hook, which ships so that the tests exercise the binary that ships. **Type `C` is not read, which is a hole — see below** |
+| Crypto not exported | `nm -Ujg` | Is what should **not** be exported hidden? No name matching `mbedtls_` / `psa_` / `ssl_` / `libssl` / `libcrypto` / `gnutls_` / `wolfssl_` may be exported-defined |
+| Implementation present | `nm -u` | Is the implementation actually **in** there? No unresolved `rtc::` / `juice_` / `mbedtls_` / `usrsctp_` / `srtp_` reference |
+
+The implementation regex is **byte-identical in both places it runs** (`audit_plugin.py` and `narrow_ios_archive.py`), which is what makes the build-time self-check and the landing gate the same assertion rather than two similar ones.
+
+- **`nm -g` on an empty archive is a hard failure.** "No symbols" and "the narrowing step never ran" have the same shape, so an empty result cannot be allowed to pass.
+- **The crypto gate needs `-g`, and `nm -Uj` alone is wrong** ([#97](https://github.com/xuhuanhello/juice-c-sharp/issues/97)). `-U` excludes undefined symbols, **not local ones**, and `-j` only means "names only" — so `nm -Uj` lists the 1188 `mbedtls_` symbols that narrowing correctly localised, and reports a **correct** archive as red. The narrowing target is `T` → `t`: the implementation must still be *in* the archive, just no longer visible. That error stayed hidden for as long as it did because it was paired with an archive that had no mbedtls in it at all — a wrong criterion over a wrong artifact came out green.
+- **Common symbols (`nm` type `C`) currently slip through, and the fix is upstream of the gate.** They have no section, so `ld -r -exported_symbols_list` cannot demote them; they stay external, and `exports_ios` does not read type `C`, so the strict export-set diff never sees them. The landed archive has **11**: ten from usrsctp, one `_mbedtls_cipher_supported`, plus an orphan `_foo` in usrsctp's `user_recv_thread.c`. The crypto gate exempts that one mbedtls name explicitly today.
+  **The rule this gate enforces was never "only `dcu_*` text symbols" — it is "the external defined set equals `expected-symbols.txt`"** ([#104](https://github.com/xuhuanhello/juice-c-sharp/issues/104)). So the resolution is *not* a common allowlist and *not* a fourth gate: `-fno-common` becomes a global convention for `native/` C code, tentative definitions get a section, and the existing narrowing step localises them. Then `exports_ios` reads `C` too and the by-name crypto exemption goes away, because no external common should exist. [#108](https://github.com/xuhuanhello/juice-c-sharp/issues/108) carries that out; **it changes the `.a` bytes**, so the landing evidence is re-collected with it.
+- **The third gate is the one the other two structurally cannot replace.** An archive holding only the wrapper exports all 20 `dcu_*` and leaks no crypto name — full marks on both — while missing every dependency; the failure lands in the adopter's Xcode link, not in our CI. The same assertion also runs inside `narrow_ios_archive.py` at build time, because failing during the build is cheaper than failing at the landing gate.
 
 ### Upstream-upgrade gate
 

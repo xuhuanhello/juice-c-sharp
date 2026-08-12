@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """iOS 静态归档合并 + 符号收窄（决议 #50 / #93；合并部分见 #97）。
 
-管线：ar x <wrapper 归档 + 全部依赖归档> → ld -r -exported_symbols_list → ar crs <输出归档>
+管线：libtool -static <wrapper 归档 + 全部依赖归档>
+      → ld -r -exported_symbols_list -all_load → ar crs <输出归档> → nm -u 自检
+
+（**不是** `ar x`：归档内允许同名成员，按文件名解包会静默互相覆盖，见 step 1 的注释。）
 
 **这是产物的唯一来源**：CMakeLists 构出的 libdatachannel_unity.a 是未收窄的，
 本脚本输出的才是最终入库的 .a，也是 audit_plugin.py 要检查的那一份。
