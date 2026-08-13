@@ -58,10 +58,17 @@ namespace DataChannelUnity.Tests
         /// 连接尚未建立时返回 <c>false</c> —— 那是**正常态，不是错误**。
         /// </summary>
         /// <remarks>
+        /// <para>
         /// 这条容易被写成抛异常，或返回某个 <c>Unknown</c> 档。两者都错：调用方在
         /// 连接过程中读一次是完全正常的用法，做成异常路径会逼每个调用方包 try/catch；
         /// 而 <c>Unknown</c> 档会把「还没有答案」和「有答案但不知道是什么」混成一个
         /// 值 —— 后者在这条路上不可达（#114：连上之后候选对必然存在）。
+        /// </para>
+        /// <para>
+        /// 本条**确实穿越了 ABI**：状态门禁在原生侧，所以 <c>false</c> 是原生层给的
+        /// <c>NotAvailable</c>，不是托管侧短路的结果。早先的实现把门禁放在托管侧，那时
+        /// 这条测试对着一个**缺少该符号的旧二进制**也会绿 —— 一条自产的 false green。
+        /// </para>
         /// </remarks>
         [Test]
         public void BeforeConnected_ReturnsFalse()
@@ -114,6 +121,68 @@ namespace DataChannelUnity.Tests
                         "远端候选 SDP 必须带 a= 前缀，与 LocalCandidateGenerated 同形。实际：" + sdp);
                 }
             }
+        }
+
+        /// <summary>
+        /// 通道刚 open、而连接状态事件**还没派发**时就问，必须已经能答。
+        /// </summary>
+        /// <remarks>
+        /// 这条钉的是「状态门禁放原生侧而不是托管侧」这个决定。托管侧的
+        /// <c>ConnectionState</c> 是事件缓存，落后到下一次泵派发为止；而
+        /// <c>DataChannel.State</c> 是活查询，会**先**变 Open。所以「循环等到通道
+        /// open 就立刻问」是最自然的调用方写法，而它恰好落在缓存还没更新的那一瞬。
+        ///
+        /// 早先的实现把门禁放在托管侧，这条写法就会拿到 false —— 一个真正已连接的
+        /// 连接被自己的门禁拒掉。那个 bug 是用 MCP 实测撞出来的，不是推演出来的，
+        /// 所以它值得一条回归测试：注意本测试**故意不在取值前调 Pump()**。
+        /// </remarks>
+        [Test]
+        public void RightAfterChannelOpens_BeforeStateEventDispatched_CanStillAnswer()
+        {
+            // 那个「缓存还没更新」的时刻不是每次都出现：实测 10 轮里命中 9 次，
+            // 另一次两个事件同一帧到。所以**重试到抓住它为止** —— 否则本条有约
+            // 一成的概率在没验到任何东西的情况下变绿，正是本项目反复被咬的那种形态。
+            const int attempts = 8;
+            var observedLag = false;
+
+            for (var i = 0; i < attempts && !observedLag; i++)
+            {
+                using (var a = new PeerConnection(new PeerConnectionConfig()))
+                using (var b = new PeerConnection(new PeerConnectionConfig()))
+                {
+                    Connect(a, b, out var dc, "path-no-lag-" + i);
+
+                    // 等到通道 open —— 那是活查询，可能先于状态事件到达。
+                    PumpUntil(() => dc.State == DataChannelState.Open);
+                    Assert.AreEqual(DataChannelState.Open, dc.State, "前置不成立：通道没开。");
+
+                    // 关键：此后**不**再 Pump()。
+                    var cachedState = a.ConnectionState;
+                    var ok = a.TryGetConnectionPath(out var path, out var sdp);
+
+                    if (cachedState != ConnectionState.Connected)
+                    {
+                        // 抓到了：缓存落后，而调用仍必须成功。
+                        observedLag = true;
+                        Assert.IsTrue(ok,
+                            "通道已 open 就必须能答，与状态事件派发与否无关。缓存状态当时是：" + cachedState);
+                        Assert.AreEqual(ConnectionPath.Direct, path, "回环必须是直连。");
+                        Assert.IsNotNull(sdp, "能答时 SDP 不该是 null。");
+                    }
+                    else
+                    {
+                        // 没抓到（两个事件同一帧到）。这一轮不构成证据，但调用也该成功。
+                        Assert.IsTrue(ok, "已连接就必须能答。缓存状态：" + cachedState);
+                    }
+                }
+            }
+
+            // 抓不到不算过。要么是那个时序窗口真的消失了（那么本条已不再验证它宣称的
+            // 东西，该由人重新判断），要么是实现变了 —— 两种都该让人看见，而不是静默绿。
+            Assert.IsTrue(observedLag,
+                attempts + " 轮都没能观测到「通道已 open 而缓存状态未更新」这个时刻。"
+                + "本条测试因此没有验证到它宣称的东西 —— 请重新判断这个窗口是否还存在，"
+                + "而不是调高重试次数了事。");
         }
 
         /// <summary>

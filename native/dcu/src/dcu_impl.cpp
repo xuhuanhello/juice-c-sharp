@@ -471,8 +471,23 @@ int dcu_pc_connection_path(int pc, int *out_verdict, void *buf, int cap, int *ou
         return DCU_ERR_INVALID;
 
     return dcu_wrap([pc, out_verdict, buf, cap, out_len] {
+        auto conn = g_table.get_pc(pc);
+
+        // 状态门禁**在这里**，不在托管侧。上游的选中候选对从不被清空，所以失败或
+        // 断开之后 getSelectedCandidatePair 仍会返回 true 并带回上一次的对；不拦
+        // 就是把陈旧值当现状交出去。
+        //
+        // 放这一层而不是 C# 那一层，是实测出来的：`state` 是 std::atomic<State>
+        // 的一次原子读（peerconnection.cpp:52），**活的**；而 C# 的 ConnectionState
+        // 是事件缓存，落后到下一次 pump 派发为止。用缓存做门禁会拒掉一个真正已连接
+        // 的连接 —— 通道的 State 是活查询，会先变 Open，于是调用方在事件派发前问
+        // 就被自己的门禁挡住。（那个 conn_lock 的成本顾虑在 libjuice 那一层，与本
+        // 判断无关。）
+        if (conn->state() != rtc::PeerConnection::State::Connected)
+            return DCU_ERR_NOT_AVAIL;
+
         rtc::Candidate local, remote;
-        if (!g_table.get_pc(pc)->getSelectedCandidatePair(&local, &remote))
+        if (!conn->getSelectedCandidatePair(&local, &remote))
             return DCU_ERR_NOT_AVAIL;
 
         // 判据两端都要看：走中继时，靠 TURN 那一侧的 local 是 relay 而 remote

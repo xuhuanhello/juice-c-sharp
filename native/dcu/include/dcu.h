@@ -195,13 +195,20 @@ DCU_API int dcu_pc_create_data_channel(int pc, const char *label, int label_len,
  * 缓冲契约与 dcu_log_next 相同：不足时填**精确长度**、不消费，返回
  * DCU_ERR_TOO_SMALL，扩容重试幂等。
  *
- * 无选中候选对（尚未连上）时返回 DCU_ERR_NOT_AVAIL。
+ * 状态不是 Connected、或此刻没有选中候选对时，返回 DCU_ERR_NOT_AVAIL。
  *
- * **已知窗口，写在这里而不是让调用方猜**：上游的 agent->selected_pair 从不被
- * 清空（唯一写入点在 agent.c 提名成功处；三个失败路径清的是另一个字段
- * selected_entry，注释 disallow sending）。所以连接失败或断开之后，本函数
- * 仍会返回成功并带回**上一次**的判定。调用方必须自己用连接状态兜住这一点 ——
- * C# 侧的 TryGetConnectionPath 已经这么做了。 */
+ * **状态门禁在本函数内，调用方不必自己兜。** 上游的 agent->selected_pair 从不
+ * 被清空（唯一写入点在 agent.c 提名成功处；三个失败路径清的是另一个字段
+ * selected_entry，注释 disallow sending），所以上游那个 getter 在失败之后仍会
+ * 返回成功并带回上一次的对。本函数先查一次 rtc::PeerConnection::state() —— 那是
+ * std::atomic<State> 的一次原子读，活的、无锁 —— 状态不对就报「无」。
+ *
+ * 门禁**不放在托管侧**是实测的结论：C# 的 ConnectionState 是事件缓存，落后到下
+ * 一次泵派发为止，而通道的 State 是活查询、会先变 Open；拿缓存做门禁会拒掉一个
+ * 真正已连接的连接。
+ *
+ * 残留窗口一处，不改上游消不掉：读状态与取候选对是两步，其间连接可能在别的线程
+ * 上失败，那一瞬会读到上一次的对。微秒级，非帧级。 */
 DCU_API int dcu_pc_connection_path(int pc, int *out_verdict, void *buf, int cap, int *out_len);
 
 /* --- DataChannel --------------------------------------------------------- */
