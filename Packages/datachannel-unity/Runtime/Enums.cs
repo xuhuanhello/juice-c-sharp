@@ -42,6 +42,25 @@ namespace DataChannelUnity
         Closed = 2
     }
 
+    /// <summary>
+    /// 一条已建立的连接实际走的路。
+    /// </summary>
+    /// <remarks>
+    /// **两值，没有 Unknown 档。** 判定只在存在选中候选对时才有意义，而那等价于
+    /// 连接已建立；「还没有答案」由 <see cref="PeerConnection.TryGetConnectionPath"/>
+    /// 返回 <c>false</c> 表达。多一档 Unknown 就要多定义一套语义、多写一段规格、
+    /// 多测一遍，而它永远不可达 —— 同 <see cref="LeakDetectionMode"/> 砍掉中间档
+    /// 的取舍（SPEC #45 决议 3）。
+    /// </remarks>
+    public enum ConnectionPath
+    {
+        /// <summary>直连。候选对两端都不是中继 —— host、srflx、prflx 都算直连。</summary>
+        Direct = 0,
+
+        /// <summary>经 TURN 中继。候选对**任一端**是中继即为此值。</summary>
+        Relayed = 1
+    }
+
     public enum IceTransportPolicy
     {
         All = 0,

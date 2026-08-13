@@ -18,7 +18,7 @@ extern "C" {
 #  define DCU_API __attribute__((visibility("default")))
 #endif
 
-#define DCU_ABI_VERSION 2
+#define DCU_ABI_VERSION 3
 
 /*
  * 调用约定（SPEC §4）
@@ -78,6 +78,12 @@ extern "C" {
 /* 状态枚举越界时的取值。上游新增成员时映射到它，绝不抛、绝不丢事件、
  * 也绝不冒充某个既有成员。 */
 #define DCU_STATE_UNKNOWN -1
+
+/* 这条连接实际走的路。**两值，没有 Unknown 档** —— 判定只在有选中候选对时
+ * 才有意义，没有的时候由返回码 DCU_ERR_NOT_AVAIL 表达，而不是多一个枚举值
+ * 去混淆「没查到」与「查到了但不知道」。 */
+#define DCU_PATH_DIRECT 0
+#define DCU_PATH_RELAYED 1
 
 typedef enum dcu_event_type {
     DCU_EVENT_NONE = 0,
@@ -167,6 +173,36 @@ DCU_API int dcu_pc_add_remote_candidate(int pc, const char *cand, int cand_len,
                                         const char *mid, int mid_len);
 DCU_API int dcu_pc_create_data_channel(int pc, const char *label, int label_len,
                                        const dcu_dc_init *init, int *out_dc);
+
+/* 判定这条连接走的是直连还是中继，并带出**远端**候选的 SDP 原文。
+ *
+ * out_verdict 取 DCU_PATH_DIRECT / DCU_PATH_RELAYED。判定在此处合成 —— 与
+ * dcu_dc_state 同理，调用方不该自己拼判据，因为判据不直观：
+ *
+ *   local 是 relay || remote 是 relay
+ *
+ * **两端都要看，远端单独不够。** 走中继时，靠 TURN 那一侧看到的是「自己的
+ * local 是 relay、对面的 remote 是 host」；只判远端会把这一侧报成直连。
+ *
+ * **只带远端 SDP，不带本地。** 本地那条在非中继路径上不是真实路径 ——
+ * libjuice 只为本地中继候选建带 local 的候选对（agent.c 的
+ * agent_add_candidate_pairs_for_remote，上游注释：local non-relayed candidates
+ * are undifferentiated for sending），其余情况 pair->local 为 NULL，而
+ * agent_get_selected_candidate_pair 会回退到 local.candidates[0] —— 优先级排序
+ * 后的第一条，通常是 host。所以一条 srflx 路径的本地会被报成 host。判定内部
+ * 读它、且只在 == relay 这个方向上采信，是安全的；把它交给调用方不是。
+ *
+ * 缓冲契约与 dcu_log_next 相同：不足时填**精确长度**、不消费，返回
+ * DCU_ERR_TOO_SMALL，扩容重试幂等。
+ *
+ * 无选中候选对（尚未连上）时返回 DCU_ERR_NOT_AVAIL。
+ *
+ * **已知窗口，写在这里而不是让调用方猜**：上游的 agent->selected_pair 从不被
+ * 清空（唯一写入点在 agent.c 提名成功处；三个失败路径清的是另一个字段
+ * selected_entry，注释 disallow sending）。所以连接失败或断开之后，本函数
+ * 仍会返回成功并带回**上一次**的判定。调用方必须自己用连接状态兜住这一点 ——
+ * C# 侧的 TryGetConnectionPath 已经这么做了。 */
+DCU_API int dcu_pc_connection_path(int pc, int *out_verdict, void *buf, int cap, int *out_len);
 
 /* --- DataChannel --------------------------------------------------------- */
 

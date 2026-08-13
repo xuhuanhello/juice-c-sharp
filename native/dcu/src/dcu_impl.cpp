@@ -462,6 +462,50 @@ int dcu_pc_create_data_channel(int pc, const char *label, int label_len, const d
     });
 }
 
+int dcu_pc_connection_path(int pc, int *out_verdict, void *buf, int cap, int *out_len) {
+    if (!out_verdict || !out_len)
+        return DCU_ERR_INVALID;
+    *out_verdict = DCU_PATH_DIRECT;
+    *out_len = 0;
+    if (pc <= 0)
+        return DCU_ERR_INVALID;
+
+    return dcu_wrap([pc, out_verdict, buf, cap, out_len] {
+        rtc::Candidate local, remote;
+        if (!g_table.get_pc(pc)->getSelectedCandidatePair(&local, &remote))
+            return DCU_ERR_NOT_AVAIL;
+
+        // 判据两端都要看：走中继时，靠 TURN 那一侧的 local 是 relay 而 remote
+        // 是对面的 host —— 只判 remote 会把这一侧报成直连。见 dcu.h 的注释。
+        *out_verdict = (local.type() == rtc::Candidate::Type::Relayed ||
+                        remote.type() == rtc::Candidate::Type::Relayed)
+                           ? DCU_PATH_RELAYED
+                           : DCU_PATH_DIRECT;
+
+        // 只带远端。本地那条在非中继路径上是 local.candidates[0] 的替身而非真实
+        // 路径（dcu.h 有完整理由）—— 判定内部采信它、且只在 == relay 这个方向上
+        // 采信，与把它交给调用方是两件事。
+        //
+        // std::string(remote) 走 operator string()，带 "a=" 前缀，与
+        // DCU_EVENT_LOCAL_CANDIDATE 同形；Candidate::candidate() 是不带前缀的
+        // 那个，别混 —— 一个 API 面上两种形态会让调用方无从判断要不要自己拼。
+        const std::string sdp = std::string(remote);
+        const size_t size = sdp.size();
+        *out_len = static_cast<int>(size);
+
+        // 与 dcu_dc_receive / dcu_log_next 同款：长度先填精确值，再判容量。
+        // 判定已经写进 out_verdict —— 缓冲不足只影响 SDP 那一段，不影响判定，
+        // 但仍返回 TOO_SMALL，因为调用方要的两个出参没有都拿到。
+        if (!buf || cap < static_cast<int>(size))
+            return DCU_ERR_TOO_SMALL;
+
+        if (size > 0)
+            std::memcpy(buf, sdp.data(), size);
+
+        return DCU_OK;
+    });
+}
+
 int dcu_dc_send(int dc, const void *data, int len) {
     if (dc <= 0 || !data || len < 0)
         return DCU_ERR_INVALID;
