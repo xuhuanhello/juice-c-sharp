@@ -238,7 +238,9 @@ The same rule read on the control queue is stronger and cheaper: dropping a `DcC
 
 **WebGL cannot honour the back-pressure guarantee** — see §8.
 
-### Exported surface (19)
+### Exported surface
+
+> **The count lives in [`native/exports/expected-symbols.txt`](../native/exports/expected-symbols.txt), not here.** This heading used to carry a literal (`19`) and it had already drifted — the list held 20 before `dcu_pc_connection_path` and 21 after, while the heading still said 19 through both. A number in prose that nothing checks is the same defect `docs/verification-mcp.md` §33 bans, one file over. The tables below name the symbols; the audit script diffs them.
 
 **Global**
 
@@ -263,6 +265,7 @@ The same rule read on the control queue is stronger and cheaper: dropping a `DcC
 | `dcu_pc_set_remote_description(int pc, const char *sdp, int sdp_len, const char *type, int type_len)` | |
 | `dcu_pc_add_remote_candidate(int pc, const char *cand, int cand_len, const char *mid, int mid_len)` | `mid` optional |
 | `dcu_pc_create_data_channel(int pc, const char *label, int label_len, const dcu_dc_init *init, int *out_dc)` | Rejects labels > **65535** bytes (see *Label bound*) |
+| `dcu_pc_connection_path(int pc, int *out_verdict, void *buf, int cap, int *out_len)` | Direct-vs-relayed verdict, composed natively; carries the **remote** candidate SDP. See *Connection path* |
 
 **DataChannel**
 
@@ -296,6 +299,24 @@ The same rule read on the control queue is stronger and cheaper: dropping a `DcC
 **`DcClosed` may arrive with no preceding `DcOpen`.** If a channel opens and closes inside the race window, only `DcClosed` is delivered. This is forced, not chosen: `isOpen()` is `!mIsClosed && mIsOpen`, and the C++ surface does not expose `mIsOpen`, so "opened then closed" is indistinguishable from "never opened". Synthesising `DcOpen` would be fabrication.
 
 **Draining before close.** Before dispatching `DcClosed` for a channel, its receive queue must be drained; otherwise messages that arrived before the close are lost or reordered. The handle is still resolvable at that point.
+
+#### Connection path
+
+**Decision:** [#118](https://github.com/xuhuanhello/juice-c-sharp/issues/118), on the research in [#114](https://github.com/xuhuanhello/juice-c-sharp/issues/114); corrected during implementation in [#123](https://github.com/xuhuanhello/juice-c-sharp/issues/123).
+
+`dcu_pc_connection_path` answers one question — **is this connection direct or relayed** — and carries the remote candidate's SDP alongside. It exists because a consumer finally needed it: the acceptance line of the FishNet example map ([#113](https://github.com/xuhuanhello/juice-c-sharp/issues/113)) is two devices on different networks *plus* being able to read which path they took. Upstream has the same capability but only as a **test diagnostic** — its consumers are libdatachannel's own `connectivity` / `turn_connectivity` tests and the C API; none of the four reference bindings surveyed wrap it.
+
+**The verdict is composed natively, and the criterion is `local is relay || remote is relay`.** Both ends must be examined: on a relayed path, the peer sitting behind the TURN allocation sees *its own* local candidate as relayed while the remote is the other side's host candidate. Judging the remote alone reports that peer as direct.
+
+**The local candidate type is deliberately not exposed.** On any non-relayed path it is not the real path: libjuice only builds a candidate pair carrying a local end for *local relayed* candidates (upstream comment: `local non-relayed candidates are undifferentiated for sending`), and the getter substitutes `local.candidates[0]` — the priority-sorted first entry, normally a host candidate — otherwise. So an srflx path reports its local end as host. Reading it *inside* the verdict, and only in the `== relay` direction, is sound; handing it to callers is not.
+
+**No event, and no stats subsystem.** Upstream has no pair-changed callback, and ICE never re-nominates after nomination (RFC 8445 §8.1.1, implemented verbatim in libjuice). Synthesising an event would cost a background polling thread, which §7's "never poll in the background" forbids. All four reference bindings are pull-only; `com.unity.webrtc`, which *does* own a full stats subsystem and a candidate-pair Editor panel, polls it at 1 s.
+
+**The state gate belongs in `dcu`, not in managed code.** Upstream's selected pair is **never cleared** — one assignment site at nomination, while all three failure paths clear a *different* field — so its getter keeps returning the last pair after a failure. `dcu_pc_connection_path` therefore checks `rtc::PeerConnection::state()` first (an `std::atomic<State>` load: live, lock-free) and reports "none" unless `Connected`.
+
+> **[#118](https://github.com/xuhuanhello/juice-c-sharp/issues/118) originally put that gate in managed code, and measurement overturned it.** ~~C# checks `ConnectionState` before crossing the ABI~~ — `PeerConnection.ConnectionState` is **event-cached** while `DataChannel.State` is a **live query**, so a wait loop exits on `Open` while the `Connected` event is still queued, and the gate rejects a genuinely connected connection. Measured at **9 of 10 rounds**. The reason #118 chose managed was that `conn_lock`'s cost was unmeasured — but that lock lives in libjuice's pair getter, one layer below `state()`, so the concern never applied to the gate. Regression test: `RightAfterChannelOpens_BeforeStateEventDispatched_CanStillAnswer`, which deliberately omits a `Pump()` and **retries until it observes the lagging moment**, because that moment appears only ~9 times in 10 and the test would otherwise pass having verified nothing.
+
+One window remains and cannot be closed without changing upstream: reading the state and fetching the pair are two steps, and the connection can fail between them on another thread. Microseconds, not frames.
 
 #### Message semantics
 
@@ -695,7 +716,7 @@ The `#if NET_STANDARD_2_1 || UNITY_2021_2_OR_NEWER` guard around the `ReadOnlySp
 | C# | `DataChannelLog.Level` property; `MessageLogged` event |
 | Defaults | Editor or Development Player → **Info**; non-Development Player → **Warning** |
 | Secrets | **Redact** ICE URLs containing credentials in logs |
-| Stats v1 | `BufferedAmount` only; no selected-pair / RTT panel |
+| Stats v1 | `BufferedAmount`, plus the direct-vs-relayed verdict (*Connection path*); no RTT panel, no stats subsystem |
 
 ### The path a log line takes
 
@@ -1439,4 +1460,4 @@ Not required to start implementation. Each is deliberately unspecified, with the
 | ~~Android's 16 KB page alignment~~ | **Resolved:** CI uses NDK r27 with explicit `-z,max-page-size=16384` and audits every `PT_LOAD` at `>= 0x4000`; generated Android PluginImporter metadata records `Is16KbAligned: true`; a Play-distributed AAB passed the device Runtime smoke. APK/AAB zip packaging remains an adopter/build-system concern, not a package binary requirement (§9). |
 | **HarmonyOS** | Waiting on Unity/tooling |
 | ~~Implementation milestones / PR slicing~~ | **Done** — [#44](https://github.com/xuhuanhello/juice-c-sharp/issues/44) slices §14 steps 2–3 into nine vertical cuts, each leaving the tree green |
-| Optional later | Selected-candidate-pair API, device farm CI, WebSocket bindings, FishNet transport mapping |
+| Optional later | ~~Selected-candidate-pair API~~ (**landed** as `dcu_pc_connection_path`, [#118](https://github.com/xuhuanhello/juice-c-sharp/issues/118) / [#123](https://github.com/xuhuanhello/juice-c-sharp/issues/123); see *Connection path*), device farm CI, WebSocket bindings, FishNet transport mapping ([#113](https://github.com/xuhuanhello/juice-c-sharp/issues/113) is charting it) |
