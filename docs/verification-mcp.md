@@ -323,6 +323,7 @@ Recorded in [#42](https://github.com/xuhuanhello/juice-c-sharp/issues/42) as the
 | MCP `no_unity_session` / multi-instance | Connect MCP for **this** project; `set_active_instance` from `mcpforunity://instances` |
 | Dual peer timeout in step 5 | Ensure `DataChannelRuntime.Pump()` is called in the wait loop (`execute_code` is not the PlayerLoop) |
 | Dual peer timeout in step 7 | The opposite — the pump should be running by itself. Suspect pump registration or a third-party `SetPlayerLoop` overwrite |
+| PlayMode run stalls, a case reports **`Cancelled by user`** when nobody cancelled | The Editor window is **unfocused**. `get_test_job` says so in `blocked_reason: editor_unfocused` + `stuck_suspected: true`, but the per-case message names the wrong cause — read those two fields before believing it. PlayMode needs focus unless `PlayerSettings.runInBackground` is on, and it is **off** in this project. Focus the Editor and re-run; do **not** flip `runInBackground` to work around it — that setting also changes shipped Player behaviour, so it is a product decision, not a test fixture |
 
 ---
 
