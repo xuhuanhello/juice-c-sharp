@@ -6,7 +6,7 @@
 
 ## Native surface
 
-- **Stable C ABI (`dcu_*`)** — Project-owned C export layer consumed by P/Invoke. Does not re-export libdatachannel `rtc*`. Same surface on native and WebGL. Version 2; 19 exported symbols.
+- **Stable C ABI (`dcu_*`)** — Project-owned C export layer consumed by P/Invoke. Does not re-export libdatachannel `rtc*`. Same surface on native and WebGL. Its version is `DCU_ABI_VERSION` in `dcu.h` and its members are listed in `native/exports/expected-symbols.txt` — **neither number is repeated here**, because this entry carried `Version 2; 19 exported symbols` while the two files said 3 and 21.
 - **dcu layer** — The implementation behind that ABI. Built on libdatachannel's **C++ API** with its own handle table; the choice of upstream API is invisible above `dcu.h`.
 - **Handle** — Opaque `int32` allocated by the dcu handle table. Monotonic and **never reused**, which is what makes a stale event harmless: it necessarily misses lookup.
 - **Return code + out parameter** — The one calling convention. No `dcu_*` function's return value doubles as data; success is always `rc == DCU_OK`.
