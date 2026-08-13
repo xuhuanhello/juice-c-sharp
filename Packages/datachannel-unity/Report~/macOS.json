@@ -1,23 +1,23 @@
 {
-  "abi_version": 2,
+  "abi_version": 3,
   "architectures": [
     "arm64",
     "x86_64"
   ],
-  "built_at": "2026-08-11T18:39:25+00:00",
+  "built_at": "2026-08-13T19:34:13+00:00",
   "ci": {
     "event": "workflow_dispatch",
-    "ref": "refs/heads/main",
+    "ref": "refs/heads/feat/connection-path-abi3",
     "run_attempt": "1",
-    "run_id": "31523680769",
-    "run_url": "https://github.com/xuhuanhello/juice-c-sharp/actions/runs/31523680769",
+    "run_id": "31736283783",
+    "run_url": "https://github.com/xuhuanhello/juice-c-sharp/actions/runs/31736283783",
     "workflow": "Plugins matrix"
   },
   "platform": "darwin",
   "plugin": "datachannel_unity",
   "schema": 1,
   "source": {
-    "commit": "dcb1dfcb66258453f632cc82d3211115b31163eb"
+    "commit": "45a439f9f6d60878bfc9782e3c90e43758657fa5"
   },
   "toolchain": {
     "cmake": "4.4.0",
