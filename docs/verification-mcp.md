@@ -229,9 +229,20 @@ The artifact separates the failure modes rather than just saying "not zero": a c
 | Step | |
 |------|--|
 | 0 | **Close the GUI Editor.** Batchmode cannot open a project another Editor already has open (`Multiple Unity instances cannot open the same project`) |
-| 1 | `Unity -runTests -testPlatform <Android\|StandaloneWindows64\|StandaloneLinux64\|StandaloneOSX> -batchmode -projectPath . -testResults <host path>/smoke-<platform>.xml` — **`iOS` is not in that list on purpose**; see the box above and use §8b-iOS |
+| 1 | `Unity -runTests -testPlatform <Android\|StandaloneWindows64\|StandaloneLinux64\|StandaloneOSX> -buildTarget <target> -batchmode -projectPath . -testResults <host path>/smoke-<platform>.xml` — **`iOS` is not in that list on purpose**; see the box above and use §8b-iOS |
 | 2 | Let it run **on the device**, not in the Editor |
 | 3 | Attach the NUnit result XML to that platform's ticket |
+
+> **`-buildTarget` is not optional, and leaving it out fails in a misleading way.** `-testPlatform` tells the test framework what to run; it does **not** switch the Editor's active build target. With the project left on another target, the run reaches `Running tests for <platform>` and *then* dies at the build:
+>
+> ```
+> Error building player because build target was unsupported
+> Build Finished, Result: Failure.
+> ```
+>
+> That message reads as "the platform's build module is not installed" — measured against a machine where the module was fully present (`MacStandaloneSupport/Variations` held all six player variations) and the project simply sat on `iOS`. Adding `-buildTarget OSXUniversal` made the same command build and pass. Check the active target before believing the module is missing.
+>
+> **`OSXUniversal` is the value measured here.** The `-buildTarget` names are parsed in native code, so they cannot be enumerated by reflection from inside the Editor — take the other platforms' spelling from Unity's [Editor command line arguments](https://docs.unity3d.com/2022.3/Documentation/Manual/EditorCommandLineArguments.html) reference rather than from this table, and note that the `-buildTarget` name is **not** the same string as `-testPlatform` (`OSXUniversal` vs `StandaloneOSX`).
 
 **The XML is written on the host, not on the device** — the Editor process drives the run over adb/USB and serialises the result itself, so there is nothing to `adb pull`. (This holds for the Test Runner route only. On the §8b-iOS route the XML is written **on the device** and has to be copied off — step 4 there.) `-testResults` is optional; without it the file lands at `<project>/TestResults-<ticks>.xml` (`ResultsSavingCallbacks.GetDefaultResultFilePath`). Both option names are spelled without the leading dash in `CommandLineTest/SettingsBuilder.cs` (`testPlatform`, `testResults`), i.e. pass them as `-testPlatform` / `-testResults`.
 
