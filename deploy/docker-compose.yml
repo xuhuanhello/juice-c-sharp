@@ -1,0 +1,70 @@
+# datachannel-unity FishNet 示例的配套设施
+#
+# 决议：信令协议 #116 / TURN 凭据 #117 / 本布局 #122
+#
+# 这**不是包的一部分** —— SPEC 第 27 行把信令定为 application-supplied、
+# 第 36 行把 TURN 服务器列在包的 out of scope。这里是示例的配套。
+#
+# 起之前：cp .env.example .env 并填三个值（见 README.md）。
+
+services:
+  # --- TURN / STUN ------------------------------------------------------
+  turn:
+    # 钉住小版本 —— latest 会跟着上游漂，而 relay 行为的变化很难在示例里发现。
+    # 本机验证用的就是这个版本（#122）。
+    image: coturn/coturn:4.7.0
+    container_name: dcu-turn
+    restart: unless-stopped
+
+    # **Linux VPS 上必须 host 网络。**
+    # relay 要一段 40+ 的 UDP 端口，逐个 ports: 映射不现实；而 Docker 的
+    # userland proxy 会改写源地址，把 relay 路径弄坏。
+    # 注意：Docker Desktop for Mac/Windows **不支持** host 网络 ——
+    # 本机想试的话改成显式 ports:（见 README「本机试跑」一节）。
+    network_mode: host
+
+    volumes:
+      - ./turn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+
+    # secret 只从 .env 来，不进 turnserver.conf（那个文件是入库的）。
+    # 命令行参数覆盖配置文件同名项。
+    command:
+      - -c
+      - /etc/coturn/turnserver.conf
+      - --static-auth-secret=${TURN_SECRET:?TURN_SECRET 未设置，请先 cp .env.example .env}
+      - --realm=${TURN_REALM:?TURN_REALM 未设置}
+      - --external-ip=${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP 未设置，云主机不填这条 relay 候选会是私网地址}
+
+  # --- 信令服务器 -------------------------------------------------------
+  # 实现归 #121。它与 turn **共用同一份 .env** —— 这正是把两者收进一个
+  # deploy/ 的理由：TURN_SECRET 必须逐字节一致，抄两遍就会有对不上的那天，
+  # 而症状是一片莫名的 401/438（#117）。
+  #
+  signal:
+    # context 是 deploy/ 而不是 deploy/signal/ —— 镜像要拿到
+    # turn/mint-credential.py，凭据公式因此只存在一份（见 signal/Dockerfile）。
+    build:
+      context: .
+      dockerfile: signal/Dockerfile
+    container_name: dcu-signal
+    restart: unless-stopped
+
+    ports:
+      - "${SIGNAL_PORT:-8080}:8080"
+
+    environment:
+      TURN_SECRET: ${TURN_SECRET:?TURN_SECRET 未设置，请先 cp .env.example .env}
+      TURN_URLS: ${TURN_URLS:?TURN_URLS 未设置}
+      STUN_URLS: ${STUN_URLS:?STUN_URLS 未设置}
+      TURN_TTL_SECONDS: ${TURN_TTL_SECONDS:-43200}
+      SIGNAL_LOG_LEVEL: ${SIGNAL_LOG_LEVEL:-INFO}
+      # 两条路二选一，见 README「TLS 放哪」：
+      #   ① 容器自己终止 TLS —— 填这两个（容器内路径）
+      #   ② 前置反代终止 —— 留空，容器监听明文 ws
+      SIGNAL_TLS_CERT: ${SIGNAL_TLS_CERT:-}
+      SIGNAL_TLS_KEY: ${SIGNAL_TLS_KEY:-}
+
+    # 证书挂进来。走反代那条路时这一段可以整段删掉 —— 留着也无害，
+    # 宿主目录不存在时 Docker 会创建一个空目录，服务器则因为环境变量为空而走明文。
+    volumes:
+      - ${SIGNAL_TLS_DIR:-./signal/certs}:/certs:ro
