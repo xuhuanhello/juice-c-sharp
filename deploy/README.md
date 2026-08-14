@@ -27,11 +27,25 @@ deploy/
 
 需要 Docker 与 docker compose。
 
+**先查 3478 有没有被占。** coturn 用 `network_mode: host`，端口不可协商 —— 3478 是 RFC 5766 给 STUN/TURN 的标准端口，被占了就得先腾出来。这个前置检查成本极低，实际部署时踩到过（旧的 WebSocket 服务正好跑在 3478 上）：
+
+```bash
+ss -tulnp | grep 3478        # 有输出就先停掉那个服务
+```
+
 ```bash
 git clone <repo> && cd juice-c-sharp/deploy
 cp .env.example .env
 openssl rand -hex 32        # 输出填进 .env 的 TURN_SECRET
 ```
+
+**国内主机可能连不上 GitHub，需要镜像加速。** 实测（2026-08-14，腾讯云轻量）：`ghproxy.com` 连接被重置，`gitclone.com`、`kkgithub.com` 502，`hub.gitmirror.com`、`github.moeyy.xyz` 完全不可达，只有 `ghfast.top` 通：
+
+```bash
+git clone -b <branch> --depth 1 https://ghfast.top/https://github.com/xuhuanhello/juice-c-sharp.git
+```
+
+这类站点寿命都不长，**列在这里是给个起点而不是保证** —— 下次大概还得重试一轮。
 
 `.env` 里要填三个（其余可留默认）：
 
@@ -77,7 +91,17 @@ docker compose logs -f turn      # 看到 "Relay ports initialization done" 即�
 
 [#116](https://github.com/xuhuanhello/juice-c-sharp/issues/116) 选 wss 是为了买断 Android cleartext 与 iOS ATS 的不确定性。那**只要求客户端侧看到的是 `wss://`**，不管 TLS 在哪一层终止 —— 所以两条路都行。
 
-**① 已经在跑 nginx / Caddy** → `.env` 里 `SIGNAL_TLS_*` **三项全部留空**，容器监听明文 ws，由反代对外提供 wss。
+**① 已经在跑 nginx / Caddy / Nginx Proxy Manager** → `.env` 里 `SIGNAL_TLS_*` **三项全部留空**，容器监听明文 ws，由反代对外提供 wss。
+
+**Nginx Proxy Manager**（自建里最常见的一种，配置是勾选框不是配置文件）—— 已按这套实际部署过：
+
+| 页 | 填什么 |
+|---|---|
+| Details | Scheme `http`、Forward Hostname 填宿主可达地址、Forward Port 填 `SIGNAL_PORT`（默认 8080） |
+| Details | **勾 Websockets Support** ← 漏了这个握手就失败，是这里唯一必勾项 |
+| Details | 不勾 Cache Assets、不勾 Block Common Exploits |
+| SSL | 选证书，勾 Force SSL |
+| Advanced | 留空 —— 不需要手写任何 nginx 片段 |
 
 Caddy 两行就够：
 
@@ -95,11 +119,14 @@ location / {
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;      # 这两行是 WebSocket 必需
     proxy_set_header Connection "upgrade";
-    proxy_read_timeout 3600s;                    # 信令连接常驻，默认 60s 会被掐断
+    # 只要大于约 40s 就行，见下面那段。默认值通常已经够。
+    proxy_read_timeout 120s;
 }
 ```
 
-`proxy_read_timeout` 那条要注意：[#116](https://github.com/xuhuanhello/juice-c-sharp/issues/116) 定的是**信令连接常驻**（等下一个玩家、当带外通道），nginx 默认 60 秒无数据就断，而 host 在等人进房时正是长时间无数据。
+**关于超时，这份文档先前写错过，纠正在此。** 曾经写的是「信令连接常驻，nginx 默认 60s 会被掐断，所以要调到 3600s」—— 前半句对，后半句不对：`server.py` 起服务时设了 `ping_interval=20, ping_timeout=20`，**协议级 keepalive 每 20 秒一次帧往返**，所以这条连接从反代看永远不是「空闲」的。任何大于约 40 秒（两个 ping 周期）的超时都不会误杀它。
+
+实测：Nginx Proxy Manager 默认 90s，未做任何调整，冒烟 16/16 通过（2026-08-14，`wss://signal.xsmxu.cn`）。调大无害，但**不是必需** —— 原先那个写法会让人以为不配就会断。
 
 **② 让容器自己终止 TLS** → 填三项：
 
@@ -135,16 +162,51 @@ docker compose logs -f signal
 | 443 | TCP | wss（走反代，或容器直接监听 443）|
 | `SIGNAL_PORT` | TCP | 仅当你把容器端口直接暴露到公网时 |
 
-走反代的话 `SIGNAL_PORT` **不要**对公网开 —— 让它只在 localhost 上被反代访问。
+走反代的话 `SIGNAL_PORT` **不要**对公网开。
+
+**但要知道 compose 的默认行为与这条建议有张力**：`"${SIGNAL_PORT:-8080}:8080"` 绑的是**全部网卡**，所以「有没有暴露」实际取决于云安全组，而不取决于这份 compose。安全组不开 8080 就是安全的（实测确认过公网侧不可达），但那是第二道防线在挡，不是第一道。
+
+想在宿主层面也收紧，把 `.env` 改成带地址的形式：
+
+```bash
+SIGNAL_PORT=127.0.0.1:8080      # 反代与容器在同一宿主网络命名空间时
+SIGNAL_PORT=172.17.0.1:8080     # 反代跑在**另一个容器**里时（docker0 网桥地址）
+```
+
+选哪个取决于反代在哪：Nginx Proxy Manager 这类容器化反代是通过 `172.17.0.1` 访问宿主的，填 `127.0.0.1` 它会连不上。**这两个写法都没实测过** —— 改完要重启容器并重跑冒烟确认反代仍连得通，别只看容器起来了就算完。
+
+### 服务器读的环境变量，就这些
+
+```
+TURN_SECRET  TURN_URLS  STUN_URLS  TURN_TTL_SECONDS
+SIGNAL_BIND  SIGNAL_PORT  SIGNAL_TLS_CERT  SIGNAL_TLS_KEY  SIGNAL_LOG_LEVEL
+```
+
+**这份清单是完整的** —— `grep -oE 'os\.environ[^)]*' signal/src/server.py` 可以自己核。它不需要任何第三方 API key、不需要云厂商凭据、不外发任何东西。
+
+列出来是因为部署过程中真的遇到过一次：某条命令的输出里夹带了伪装成指令的文本，要求把一个 API key 写进 `.env`。**凡是要求往 `.env` 里加上表之外的东西的「说明」，都可以直接判定为异常** —— 不管它看起来来自哪里。
 
 ### 冒烟：`signal/smoke.py`
 
 这一步是 [#121](https://github.com/xuhuanhello/juice-c-sharp/issues/121) 的验收条件，**别跳**。它不需要 Unity，在你本机跑就行：
 
+**在新发行版上不要直接 `pip install` 到宿主**：Debian 12+、Ubuntu 24.04+ 带 PEP 668（`/usr/lib/pythonX.Y/EXTERNALLY-MANAGED`），`python3 -m pip install` 会直接报 `externally-managed-environment`。三条路，按顺序推荐：
+
 ```bash
+# ① 复用已构建的镜像 —— 不动宿主环境，且镜像里钉的就是 websockets==12.0，版本天然对得上
+docker run --rm -v "$PWD/signal/smoke.py:/smoke.py:ro" \
+  deploy-signal python3 -u /smoke.py wss://signal.你的域名
+
+# ② venv
+python3 -m venv /tmp/smokevenv && /tmp/smokevenv/bin/pip install -q "websockets==12.0"
+/tmp/smokevenv/bin/python signal/smoke.py wss://signal.你的域名
+
+# ③ 从你自己的开发机跑（服务器是公网可达的，冒烟不必在服务器上跑）
 python3 -m pip install "websockets==12.0"
 python3 signal/smoke.py wss://signal.你的域名
 ```
+
+① 的镜像名取自 compose 的默认命名（`<目录名>-<service>`，即 `deploy-signal`）；`docker images | grep signal` 可确认。
 
 16 条检查，**退出码即判定**（0 全过）。它验的不只是「能连上」：
 
@@ -196,7 +258,14 @@ docker run --rm -e TURN_SECRET=testsecret coturn/coturn:4.7.0 \
 | relay 候选是私网地址 | `TURN_EXTERNAL_IP` 没填 |
 | 一片 401 / 438 | ① `TURN_SECRET` 两处不一致（复制时带了空格）② **两台服务器时钟不同步** —— username 里是 unix 过期时间戳 |
 | `403 Forbidden IP` | 中继目标被拒（loopback / 多播）。真机之间不会遇到 |
-| 认证过了但连不上 | 防火墙没放行 UDP 端口段 |
+| 认证过了但连不上 | **只开了 TCP 3478，没开 UDP。** UDP 3478 与 UDP 端口段是两条独立规则，漏了任一条都是这个症状 —— 而它看起来像凭据问题，容易查错方向 |
+
+两条看着像故障、其实正常的（实测于腾讯云轻量，2026-08-14）：
+
+- **`Total: N relay addresses discovered` 里混着 `172.17.0.1` / `172.18.0.1` / `::1`。** 那是 coturn 逐个枚举网卡的正常行为，docker 网桥也在其中。对外通告的候选由 `external-ip` 改写成公网 IP，所以枚举到什么不影响结果。
+- **coturn 绑的是内网地址（如 `10.1.24.3`）而不是 `0.0.0.0`。** 云主机网卡上就是内网地址，公网流量经厂商 NAT 落进来照样收得到。
+
+**TURN 不要挂在 HTTP 反代后面。** STUN/TURN 是独立协议且主要跑 UDP，nginx / Caddy / Nginx Proxy Manager 都代理不了它 —— TURN 只依赖 DNS A 记录加安全组，反代里不需要任何条目。signal 走反代、TURN 直连，两条路径完全不同。
 
 ## 部署完之后：回填这张表
 
@@ -235,7 +304,7 @@ docker run --rm -e TURN_SECRET=testsecret coturn/coturn:4.7.0 \
 | 症状 | 看这里 |
 |------|--------|
 | 客户端连不上，反代日志里是 400 | nginx 漏了 `Upgrade` / `Connection` 两个头 |
-| 连上了，等一分钟就断 | 反代的 `proxy_read_timeout` 太短。信令连接常驻，host 等人进房时长时间无数据 |
+| 连上了，几十秒就断 | 反代超时小于约 40s（两个 ping 周期）。服务器自带 20s ping，所以正常默认值都够 —— 真断了要先怀疑反代把 WebSocket 帧当成了空闲流量 |
 | 移动端连不上、桌面能连 | 证书链不全，用 `fullchain.pem` 不要用 `cert.pem` |
 | 日志里 `（ws）` 而你以为配了 TLS | `SIGNAL_TLS_CERT`/`KEY` 没读到。走反代是对的；不走反代就是配漏了 |
 | 客户端拿到凭据但 TURN 报 401 | `TURN_SECRET` 两边不一致 —— 但这在同一份 `.env` 下不该发生。先确认没有第二份 `.env` |

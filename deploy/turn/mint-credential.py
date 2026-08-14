@@ -23,7 +23,7 @@ import sys
 import time
 
 
-def mint(secret: str, name: str = "demo", ttl: int = 43200):
+def mint(secret: str, name: str = "dcu", ttl: int = 43200):
     """返回 (username, credential)。
 
     公式（coturn use-auth-secret / TURN REST API）：
@@ -46,7 +46,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--secret", required=True, help="与 coturn static-auth-secret 逐字节一致")
-    p.add_argument("--name", default="demo", help="username 的后半段，任意（默认 demo）")
+    # 默认值与信令服务器保持一致（server.py 的 IceConfig.mint 传 name="dcu"）。
+    # 曾经是 demo，于是手工签的 username 和服务器下发的对不上，比对日志时会短暂困惑
+    # —— name 只是 username 的后半段、不参与校验，所以这纯粹是可读性问题。
+    p.add_argument("--name", default="dcu", help="username 的后半段，任意（默认 dcu，与服务器一致）")
     p.add_argument("--ttl", type=int, default=43200, help="有效秒数（默认 43200 = 12 小时）")
     p.add_argument("--json", action="store_true", help="按 iceServers 形状输出")
     p.add_argument("--urls", default="turn:turn.example.org:3478?transport=udp",
