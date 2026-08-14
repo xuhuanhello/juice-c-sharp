@@ -158,6 +158,22 @@ namespace DataChannelUnity.Example
         private LocalConnectionState _serverState = LocalConnectionState.Stopped;
         private LocalConnectionState _clientState = LocalConnectionState.Stopped;
 
+        // **门禁用这个，不用 _serverState。**
+        //
+        // _serverState 是「事件已投递」的状态：它要等 IterateIncoming 把队列排空才更
+        // 新，也就是下一个 tick。而契约 3.5 明说 StartConnection 的返回值语义是「没有
+        // 阻塞项」，不是「已连上」—— 所以 server 在 StartConnection(true) 返回 true 那
+        // 一刻就算逻辑上起了。
+        //
+        // 拿 _serverState 做门禁会拒掉真正有效的启动：NetworkHudCanvases 的
+        // AutoStartType.Host 在同一个 Start() 里**背靠背**调 ServerManager
+        // .StartConnection() 与 ClientManager.StartConnection()（`NetworkHudCanvases
+        // .cs:155-157`），中间没有任何 tick，于是 client 那次必然被误拒。
+        //
+        // 这与 #123 实测推翻 #118 的那处是**同一形状**：用事件缓存的状态当门禁，会拒掉
+        // 真正有效的操作。那次在原生／托管之间，这次在适配层自己这一层。
+        private bool _serverStartRequested;
+
         // 三个入站队列，分开是因为契约 2.3 把顺序写死了：先 local 连接状态，再
         // remote 连接状态，最后数据包。合到一个队列里就没法保证这个次序。
         private readonly Queue<LocalConnectionState> _pendingServerState = new Queue<LocalConnectionState>();
@@ -467,8 +483,10 @@ namespace DataChannelUnity.Example
 
         private bool StartServer()
         {
-            if (_serverState != LocalConnectionState.Stopped) return false;
+            if (_serverStartRequested) return false; // 幂等（契约 3.5）
 
+            // 同步置位，**先于**事件投递 —— 见 _serverStartRequested 的注释。
+            _serverStartRequested = true;
             _pendingServerState.Enqueue(LocalConnectionState.Starting);
             // server 侧没有要等的东西：它只是开始接受连接。Started 立刻入队。
             _pendingServerState.Enqueue(LocalConnectionState.Started);
@@ -488,8 +506,8 @@ namespace DataChannelUnity.Example
         /// </summary>
         private bool StartClient()
         {
-            if (_clientState != LocalConnectionState.Stopped) return false;
-            if (_serverState != LocalConnectionState.Started)
+            if (_clientPeer != null) return false; // 幂等，且不看事件缓存的 _clientState
+            if (!_serverStartRequested)
             {
                 // 第二步（两个进程 + wss 信令）才需要「client 先于 server」的路径。
                 // 这一版明确只支持 host，缺 server 时响亮失败而不是静默连不上。
@@ -550,8 +568,8 @@ namespace DataChannelUnity.Example
         {
             if (server)
             {
-                if (_serverState == LocalConnectionState.Stopped || _serverState == LocalConnectionState.Stopping)
-                    return false; // 幂等（契约 3.5）
+                if (!_serverStartRequested) return false; // 幂等（契约 3.5）
+                _serverStartRequested = false;
                 _pendingServerState.Enqueue(LocalConnectionState.Stopping);
                 foreach (var kv in _serverPeers) kv.Value.Dispose();
                 _serverPeers.Clear();
@@ -559,8 +577,7 @@ namespace DataChannelUnity.Example
                 return true;
             }
 
-            if (_clientState == LocalConnectionState.Stopped || _clientState == LocalConnectionState.Stopping)
-                return false;
+            if (_clientPeer == null) return false;
             _pendingClientState.Enqueue(LocalConnectionState.Stopping);
             _clientPeer?.Dispose();
             _clientPeer = null;
@@ -641,6 +658,28 @@ namespace DataChannelUnity.Example
         /// 忽略 channel 参数，和 Tugboat 一致。
         /// </summary>
         public override int GetMTU(byte channel) => MtuBytes;
+
+        /// <summary>
+        /// 读出某条连接走的是直连还是中继。
+        ///
+        /// 这不是 FishNet 契约的一部分 —— 是本 Transport 额外开的口，给诊断 UI 用。
+        /// <see cref="GetConnectionAddress"/> 也带这个信息，但那是给日志看的字符串，
+        /// 让 UI 去解析它就等于把格式当 API。
+        ///
+        /// <paramref name="connectionId"/> 传负数表示「本地 client 那条」。
+        /// </summary>
+        public bool TryGetConnectionPath(int connectionId, out ConnectionPath path, out string remoteCandidateSdp)
+        {
+            path = default;
+            remoteCandidateSdp = null;
+
+            var peer = connectionId < 0
+                ? _clientPeer
+                : (_serverPeers.TryGetValue(connectionId, out var p) ? p : null);
+
+            if (peer?.Pc == null) return false;
+            return peer.Pc.TryGetConnectionPath(out path, out remoteCandidateSdp);
+        }
 
         // 实现这两个只为免掉基类默认实现那条 warning（契约 3.7）。上限的真正决定归
         // #120 第 5 问；硬上界是 int.MaxValue - 1。

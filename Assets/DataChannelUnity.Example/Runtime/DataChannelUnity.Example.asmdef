@@ -3,6 +3,7 @@
   "rootNamespace": "DataChannelUnity.Example",
   "references": [
     "FishNet.Runtime",
+    "FishNet.Demos",
     "DataChannelUnity"
   ],
   "includePlatforms": [],
