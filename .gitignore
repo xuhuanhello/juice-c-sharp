@@ -153,3 +153,9 @@ deploy/.env
 # 不挡的话「把证书放进默认位置」就等于把私钥提交上去 —— 那是个只会犯一次
 # 但无法挽回的错误（推上去就得重新签发）。
 deploy/signal/certs/
+
+# 客户端的信令地址（#117）。**它不是秘密** —— 客户端一个秘密都不持有，
+# 凭据由信令服务器签发下发。不入库的理由是「每套部署各一份」，不是保密。
+# 入库的是 Assets/DataChannelUnity.Example/SignalingConfig.example.json。
+Assets/Resources/SignalingConfig.json
+Assets/Resources/SignalingConfig.json.meta
