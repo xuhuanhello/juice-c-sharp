@@ -4,13 +4,19 @@
 // research/fishnet-transport-contract 分支上，591 行，22 个成员逐条）。下面每处
 // 「契约 x.y」都指那份文档的节号。
 //
-// **这一版是垂直切片第一步：单进程 host 模式。** server 与 client 同时起在同一个
-// Transport 实例上（FishNet 的 host 就是 IsServerStarted && IsClientStarted，
-// 契约 4.4），于是信令是同对象内的直接调用，不需要 #121 的信令服务器。第二步
-// 才是两个进程 + wss 信令（#116 定的协议）。
+// **两条路都已跑通**：单进程 host（server 与 client 同起在同一个 Transport 实例上，
+// FishNet 的 host 就是 IsServerStarted && IsClientStarted，契约 4.4，信令是同对象内
+// 的直接调用），以及两个进程经 wss 信令（#116 定的协议，#128 落地）。
 //
-// **代替 #119 / #120 暂取的决策，全部集中在 ProvisionalDecisions 区域**，每条都
-// 写了理由与由谁最终定。它们是为了让垂直切片能跑，不是替那两张票做决定。
+// **本类刻意不拆成 client / server 两个 socket 类**（#133 定）。Tugboat 那样拆是
+// 照着 LiteNetLib 的形状 —— 它一端一个 NetManager，所以 Core/ 下一端一个 socket。
+// 我们下面这个库的形状不同：PeerConnection 是**一条连接一个**（host 上 N 个），
+// 而 DataChannelRuntime.Pump() 是**全局一个**。那个形状就是「一张 peer 表 + 一个
+// 全局泵」，也正是本类现在的样子；按端拆会把一个全局资源放到两个所有者背后。
+//
+// 回头推翻这个决定的触发条件只有一条：**server 侧与 client 侧不再共享同一套 Peer
+// 生命周期**（现在两边都是 Peer、都以两条通道开齐为 BothOpen）。那是「不拆」赖以
+// 成立的前提，前提没了就该重算 —— 大概率由 #134 的重连身份逻辑触发。
 using System;
 using System.Collections.Generic;
 using FishNet.Managing;
@@ -26,14 +32,18 @@ namespace DataChannelUnity.Example
     [DisallowMultipleComponent]
     public sealed class DataChannelTransport : Transport
     {
-        #region ProvisionalDecisions
+        #region Decisions
 
-        // ── 归 #119 的，暂取 ────────────────────────────────────────────────
+        // 这个区域曾叫 ProvisionalDecisions，装的是代 #119 / #120 暂取的决策。
+        // **那两张票都已关闭，下面每条都是已定结论**，票号是出处不是待办。
+
+        // ── #119 定 ─────────────────────────────────────────────────────────
         //
         // 每条 peer 连接开 **两条** DataChannel，不做单通道复用加自己的头。
         // 理由：#116 已查证「第二条 DataChannel 只开新 SCTP 流、不触发重新协商」，
         // 所以两条的代价只是多一次 CreateDataChannel，换来 channelId 到通道的
-        // 映射是恒等的、不用自己写头。最终由 #119 定。
+        // 映射是恒等的、不用自己写头。#119 复核后维持：单通道复用要么对应用撒谎，
+        // 要么坏分片重组。
         private const string ReliableLabel = "fishnet-reliable";
         private const string UnreliableLabel = "fishnet-unreliable";
 
@@ -56,7 +66,7 @@ namespace DataChannelUnity.Example
             MaxRetransmits = 0,
         };
 
-        // GetMTU 返回的固定常量。**#130 已实测定死为 1282**（不再是暂取）。
+        // GetMTU 返回的固定常量。**#130 已实测定死为 1282。**
         //
         // 1282 = Tugboat 的值（1350 - 68），一开始是为了和它做 A/B —— 同一个打包粒度才让
         // 差异指向传输层而不是包大小。实测之后它有了独立的理由：
@@ -79,9 +89,9 @@ namespace DataChannelUnity.Example
         // FishNet 的打包尺度」，Synapse 的注释是直接先例。
         private const int MtuBytes = 1282;
 
-        // ── 归 #120 的，暂取 ────────────────────────────────────────────────
+        // ── #120 定 ─────────────────────────────────────────────────────────
         //
-        // connectionId 从 0 起单调递增、**永不复用**。**#120 已定**（不再是暂取）。
+        // connectionId 从 0 起单调递增、**永不复用**。
         // 契约 4.3 的约束：必须 >= 0（ServerManager 会当场踢）、必须避开 int.MaxValue
         // （那是 SIMULATED_CLIENTID_VALUE）、存活期唯一；不要求连续/单调/从 0 起。
         //
@@ -745,7 +755,9 @@ namespace DataChannelUnity.Example
         }
         #endregion
 
-        #region Start / Stop
+        // 只有起，没有停 —— 停在下面的 Stop 区域。这个区域曾叫「Start / Stop」，
+        // 而里面一个 Stop 都没有（#133）。
+        #region Start
 
         [SerializeField]
         [Tooltip("ICE 服务器。垂直切片第一步（单进程 host）留空即可 —— 两端都在本机，host 候选就能连通。")]
@@ -1138,6 +1150,24 @@ namespace DataChannelUnity.Example
         /// connectionId 不会与 server 侧的表冲突 —— 纯 client 的 _serverPeers 是空的。
         /// </summary>
         private const int LocalClientConnectionId = 0;
+
+        /// <summary>
+        /// 排空信令（#128）。
+        ///
+        /// ## 为什么在 Update 而不是 IterateIncoming
+        ///
+        /// 信令必须在 FishNet 开始 iterate **之前**就能推进：client 从 `join-room` 到
+        /// `Started` 之间，FishNet 那侧还停在 Starting，把信令挂在它的 tick 上等于让连接
+        /// 建立依赖一个尚未开始的循环。`Update` 只要组件 enabled 就跑，没有这个耦合。
+        ///
+        /// 排空**必须在主线程**：`SetRemoteDescription` / `AddRemoteCandidate` 都带
+        /// `MainThread.Assert`。而 Drain 是顺序处理、一条不落 —— per-sender FIFO 在那里
+        /// 兑现（见 SignalingClient 的类注释）。
+        ///
+        /// 归在本区域而不是 Stop：它是**信令的泵**，与下面那些 On* 处理器是同一件事的
+        /// 两半（这里推进、那里处理）。#133 之前它归档在 Stop 下面，隔着两百行。
+        /// </summary>
+        private void Update() => _signaling?.Drain();
         #endregion
 
         #region Stop
@@ -1208,21 +1238,6 @@ namespace DataChannelUnity.Example
             StopConnection(false);
             StopConnection(true);
         }
-
-        /// <summary>
-        /// 排空信令（#128）。
-        ///
-        /// ## 为什么在 Update 而不是 IterateIncoming
-        ///
-        /// 信令必须在 FishNet 开始 iterate **之前**就能推进：client 从 `join-room` 到
-        /// `Started` 之间，FishNet 那侧还停在 Starting，把信令挂在它的 tick 上等于让连接
-        /// 建立依赖一个尚未开始的循环。`Update` 只要组件 enabled 就跑，没有这个耦合。
-        ///
-        /// 排空**必须在主线程**：`SetRemoteDescription` / `AddRemoteCandidate` 都带
-        /// `MainThread.Assert`。而 Drain 是顺序处理、一条不落 —— per-sender FIFO 在那里
-        /// 兑现（见 SignalingClient 的类注释）。
-        /// </summary>
-        private void Update() => _signaling?.Drain();
 
         private void OnDestroy() => Shutdown();
         #endregion
