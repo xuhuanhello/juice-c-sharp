@@ -32,6 +32,35 @@ namespace DataChannelUnity.Example
         /// </summary>
         public const float MaxShotSeconds = 15f;
 
+        /// <summary>
+        /// Rolling-resistance coefficient, applied as a constant deceleration of mu*g by
+        /// <see cref="BilliardsBall.ApplyRollingResistance"/> (#137).
+        ///
+        /// Tuned on the real table rather than taken from a reference: at 0.03 a full-power break
+        /// settles in 4.63 s, pockets 0 balls and never trips containment, which is inside what a
+        /// real nine-foot table does (3–5 s, 0–2 balls). Neighbouring values measured 6.07 s at 0.02
+        /// and 3.43 s at 0.05. It is deliberately larger than a textbook figure for cloth (~0.01)
+        /// because it carries every dissipation the model omits — see that method's remarks.
+        /// </summary>
+        public const float RollingResistance = 0.03f;
+
+        /// <summary>
+        /// Restitution below this impact speed is treated as zero by PhysX, and Unity's default of 2
+        /// m/s is far above billiards speeds: measured, a cushion returned e=0.000 at 1.9 m/s and
+        /// e=0.950 at 2.1 m/s — a cliff, not a curve, so any ball slower than 2 m/s died on the
+        /// cushion instead of rebounding. Since "let the ball come to rest against a cushion" is an
+        /// ordinary shot, that made a whole class of position play impossible (#137).
+        ///
+        /// Set here at runtime rather than in ProjectSettings because it is a *global*: the setting is
+        /// shared with every other scene, and this repo deliberately leaves such values alone
+        /// (compare sleepThreshold in #131). Nothing else needs it — the billiards scene holds the
+        /// only rigidbodies in the project — so the narrowest change is to own it for as long as this
+        /// component is enabled and put it back afterwards.
+        /// </summary>
+        private const float BounceThreshold = 0.1f;
+
+        private float _restoreBounceThreshold;
+
         private readonly List<BilliardsBall> _balls = new();
         private float _stillFor;
         private float _shotElapsed;
@@ -80,6 +109,9 @@ namespace DataChannelUnity.Example
         /// </summary>
         private void OnEnable()
         {
+            _restoreBounceThreshold = Physics.bounceThreshold;
+            Physics.bounceThreshold = BounceThreshold;
+
             // Deliberately not InstanceFinder: its getter logs "NetworkManager not found" every
             // call, which reads like a fault in a scene that is meant not to have one.
             var manager = FindObjectOfType<FishNet.Managing.NetworkManager>();
@@ -99,6 +131,8 @@ namespace DataChannelUnity.Example
 
         private void OnDisable()
         {
+            Physics.bounceThreshold = _restoreBounceThreshold;
+
             if (_timeManager != null)
                 _timeManager.OnPostPhysicsSimulation -= OnPostPhysicsSimulation;
         }
@@ -173,6 +207,14 @@ namespace DataChannelUnity.Example
         /// </summary>
         public void Step(float deltaTime)
         {
+            // Rolling resistance is ours to apply because PhysX has no such term (#137). Forces
+            // accumulate for the next Physics.Simulate, so applying it here — after the step rather
+            // than before — costs one step of lag and keeps the physics-clock ownership above as the
+            // single place that decides when a step happens.
+            float deceleration = RollingResistance * Mathf.Abs(Physics.gravity.y);
+            for (int i = 0; i < _balls.Count; i++)
+                _balls[i].ApplyRollingResistance(deceleration, deltaTime);
+
             for (int i = 0; i < _balls.Count; i++)
             {
                 if (_balls[i].ClampIntoPlay())

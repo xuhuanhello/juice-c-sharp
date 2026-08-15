@@ -81,11 +81,22 @@ namespace DataChannelUnity.Example
             _body.interpolation = RigidbodyInterpolation.Interpolate;
 
             // PhysX does not model rolling resistance: a sphere on a plane rolls forever no matter
-            // how much surface friction there is. angularDrag is the only lever, so it is doing the
-            // job a rolling-resistance term should — an approximation, and the one most likely to
-            // need retuning if the break feels wrong.
-            _body.drag = 0.12f;
-            _body.angularDrag = 1.4f;
+            // how much surface friction there is. It has to be added by hand — see ApplyRollingResistance,
+            // which the rack calls once per physics step. drag/angularDrag are therefore zero: they
+            // are *linear* dampers, so they decay speed exponentially, and this used to be
+            // drag = 0.12 / angularDrag = 1.4 standing in for rolling resistance (#137 measured what
+            // that cost: distance came out proportional to power instead of power squared, so the
+            // power-to-distance mapping — which is all of position play — had the wrong exponent).
+            _body.drag = 0f;
+            _body.angularDrag = 0f;
+
+            // Unity's default cap is 50 rad/s, and a rolling ball needs omega = v/r. With r = 28.5 mm
+            // that is only 1.43 m/s — below it a ball can roll, above it the cap holds omega down and
+            // the ball *slides* instead. A 4 m/s break needs 140 rad/s, so before #137 raised this
+            // every ball spent the first 1.7 s of every break sliding, where cloth sliding friction
+            // dominates and any rolling-resistance term is nearly mute. 400 rad/s covers 11 m/s of
+            // rolling plus headroom for spin picked up in collisions.
+            _body.maxAngularVelocity = 400f;
 
             // #131: the project-wide sleepThreshold (0.005) corresponds to ~0.1 m/s, which is
             // 1.75 ball diameters per second — visibly still rolling. Lower it per body so PhysX
@@ -113,6 +124,48 @@ namespace DataChannelUnity.Example
         {
             Body.velocity = Vector3.zero;
             Body.angularVelocity = Vector3.zero;
+        }
+
+        /// <summary>
+        /// One physics step of rolling resistance: a constant deceleration opposing travel, which is
+        /// what a ball on cloth actually experiences and what PhysX does not provide (#137).
+        ///
+        /// **Both halves are required.** Decelerating only the linear velocity leaves the ball
+        /// spinning, cloth friction converts that spin straight back into travel, and the shot never
+        /// satisfies the stop criterion — measured: every constant-deceleration run hit the 15 s
+        /// backstop until the angular half was added. So omega is pulled down alongside v to keep the
+        /// rolling relation omega = v/r.
+        ///
+        /// The coefficient is larger than a textbook rolling-resistance figure for cloth (~0.01)
+        /// because it is the only dissipation term in the model: ball-to-ball friction, cushion
+        /// friction and the sliding-to-rolling transition all land on it. What #137 bought is not a
+        /// true coefficient but the right *shape* — distance now goes as power squared, so doubling
+        /// power sends the ball four times as far rather than twice.
+        /// </summary>
+        public void ApplyRollingResistance(float deceleration, float deltaTime)
+        {
+            if (IsPocketed) return;
+
+            var travel = new Vector3(Body.velocity.x, 0f, Body.velocity.z);
+            float step = deceleration * deltaTime;
+
+            // Below one step's worth of speed, decelerating would overshoot into reversal. Park it
+            // instead — the vertical component is left alone so a ball falling into a pocket keeps
+            // falling. Zeroing spin here matters: without it a stopped ball keeps rotating and cloth
+            // friction pushes it off again.
+            if (travel.magnitude <= step)
+            {
+                Body.velocity = new Vector3(0f, Body.velocity.y, 0f);
+                Body.angularVelocity = Vector3.zero;
+                return;
+            }
+
+            Body.AddForce(-travel.normalized * deceleration, ForceMode.Acceleration);
+
+            float rollingSpin = (travel.magnitude - step) / BilliardsTable.BallRadius;
+            Vector3 spin = Body.angularVelocity;
+            if (spin.magnitude > rollingSpin && spin.magnitude > 1e-3f)
+                Body.angularVelocity = spin.normalized * rollingSpin;
         }
 
         public void Strike(Vector3 impulse)
