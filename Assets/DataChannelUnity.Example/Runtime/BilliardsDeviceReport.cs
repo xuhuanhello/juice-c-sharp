@@ -238,19 +238,35 @@ namespace DataChannelUnity.Example
         }
 
         /// <summary>
-        /// 落盘的四个时机。都写同一个文件、内容全量，所以多写几次是幂等的 —— 而少写一次就什么都
+        /// 落盘的时机。都写同一个文件、内容全量，所以多写几次是幂等的 —— 而少写一次就什么都
         /// 没有。<c>OnApplicationPause</c> 那条是给 iOS 的：系统可能在暂停之后直接杀掉进程，
         /// 那时 <c>OnApplicationQuit</c> 不会来。
+        ///
+        /// <c>OnApplicationQuit</c> 与 <c>OnDestroy</c> 在同一次退出里**都会来**（Editor 里退出
+        /// 播放态也是），所以第二次是纯噪声：一模一样的内容再写一遍、日志里再多一行。
+        /// <see cref="_wroteOnShutdown"/> 把它们收成一次。
         /// </summary>
-        private void OnApplicationQuit() => Write("application-quit");
+        private bool _wroteOnShutdown;
+
+        private void OnApplicationQuit() => WriteOnce("application-quit");
 
         private void OnApplicationPause(bool paused)
         {
+            // 暂停不是退出：恢复之后还会接着跑，所以这条不占用「退出只写一次」那个额度。
             if (paused)
                 Write("application-pause");
         }
 
-        private void OnDestroy() => Write("destroy");
+        private void OnDestroy() => WriteOnce("destroy");
+
+        private void WriteOnce(string trigger)
+        {
+            if (_wroteOnShutdown)
+                return;
+
+            _wroteOnShutdown = true;
+            Write(trigger);
+        }
 
         #endregion
 
@@ -814,11 +830,32 @@ namespace DataChannelUnity.Example
             Path.Combine(Application.persistentDataPath, $"{_fileNamePrefix}-{Role()}.json");
 
         /// <summary>
+        /// 这次运行到底观测到了什么没有。全空意味着这个实例从头到尾没连上、没出杆、没采到帧 ——
+        /// 它没有可报的东西。
+        /// </summary>
+        private bool ObservedAnything =>
+            _connectionPaths.Count > 0 || _rttSamples.Count > 0 || _shots.Count > 0 ||
+            _sessionFrames > 0 || _sawGameOver || _reconnectObserved;
+
+        /// <summary>
         /// 写一份全量报告。多次调用是幂等的（同一路径全量覆盖），所以每个可能是「最后一刻」的
         /// 时机都调它。
+        ///
+        /// **一份什么都没观测到的报告不落盘**（除非是手动按的）。理由不是省一个文件：它会
+        /// **盖掉一份真的**。踩到过 —— 一批验证用的实例（从没连过网、role 是 unknown）在退出
+        /// 播放态时各写了一次，最后落在磁盘上的那份带着注入的合成数字，而它正躺在真实测量该在
+        /// 的位置。手动那一下是例外：那时人就是想看「现在写会是什么样」。
         /// </summary>
         public void Write(string trigger)
         {
+            bool manual = trigger == "manual";
+            if (!manual && !ObservedAnything)
+            {
+                Debug.Log($"[BilliardsReport] 这次运行没有任何观测（触发：{trigger}），" +
+                          "不落盘 —— 一份空报告会盖掉一份真的。");
+                return;
+            }
+
             string path = ReportPath;
 
             try
