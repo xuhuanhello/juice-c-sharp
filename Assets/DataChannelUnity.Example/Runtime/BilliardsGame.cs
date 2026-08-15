@@ -173,6 +173,10 @@ namespace DataChannelUnity.Example
 
             ServerManager.OnRemoteConnectionState += OnRemoteConnectionState;
 
+            // 座位属于**这一次** server 会话。留座（#134）是为了会话**之内**的重连，
+            // 跨会话留着它只会挡住新来的人 —— 见 ClearSeats。
+            ClearSeats();
+
             _breakPending = true;
             PublishState(BilliardsPhase.Lobby, BilliardsRules.SeatNone, BilliardsFlags.None,
                 BilliardsRules.SeatNone);
@@ -182,6 +186,48 @@ namespace DataChannelUnity.Example
         {
             base.OnStopServer();
             ServerManager.OnRemoteConnectionState -= OnRemoteConnectionState;
+
+            // 停的时候也清一次，而不是只在起的时候：两次各有理由。停时清是因为这些座位所属的
+            // 那局已经没了，留着会让停止与下一次开始之间读到的状态在说谎；起时清是因为上一次
+            // 会话可能压根没走到这里（崩溃、域重载）。
+            ClearSeats();
+        }
+
+        /// <summary>
+        /// 把座位表还原成「谁都没来过」。
+        ///
+        /// ## 为什么必须显式清，而不是靠断连事件
+        ///
+        /// FishNet 在 server 停止时**不为每条连接发** <c>OnRemoteConnectionState(Stopped)</c> ——
+        /// `ServerManager.Transport_OnServerConnectionState` 直接 `Clients.Clear()`
+        /// （`ServerManager.cs:534`）。所以 <see cref="ReleaseConnection"/> 一次都不会跑，
+        /// 座位表原样留到下一次会话。
+        ///
+        /// ## 那样留下来的座位是什么形状（#139 实测抓到的活状态）
+        ///
+        /// <c>seat 1: ConnectionId=1, HoldRemaining=0</c> —— 指着一条**已经不存在**的连接，
+        /// 而且**没有**被标成留座。于是它同时满足「已占」与「未留座」：
+        /// <see cref="FirstFreeSeat"/> 要求两者皆非，所以它永远找不到空位，任何新 client 都被
+        /// 「连上了但没有空座位」拒掉 —— 不是 30 秒的窗口，是永久的。
+        ///
+        /// 而 <see cref="TryBeginGame"/> 只问 <c>IsOccupied</c>，于是它认为两个座位都有人、
+        /// 开局，接着把回合给了那个空座位：<c>Phase=Aim TurnSeat=1</c> 而座位 1 没有人，
+        /// 也没有任何东西在等他回来。那一局从此只能靠 60 秒超时来回换人，谁都赢不了。
+        /// </summary>
+        private void ClearSeats()
+        {
+            foreach (Seat seat in _seats)
+            {
+                seat.ConnectionId = -1;
+                seat.HoldRemaining = 0f;
+                // 令牌也丢掉：它是上一局的凭据，而房间码换了之后它连不上任何东西。
+                seat.Token = null;
+            }
+
+            _presentedTokens.Clear();
+            _pendingWelcomes.Clear();
+            ReconnectSecondsRemaining = 0f;
+            _nextBreakSeat = BilliardsRules.SeatHost;
         }
 
         public override void OnStartClient()
