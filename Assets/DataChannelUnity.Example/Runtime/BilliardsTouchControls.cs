@@ -3,37 +3,41 @@ using UnityEngine;
 namespace DataChannelUnity.Example
 {
     /// <summary>
-    /// 台球的最小操作层：手势进来，一条 <see cref="BilliardsGame.Shoot"/> 出去。
+    /// 台球的操作层：手势进来，一条 <see cref="BilliardsGame.Shoot"/> 出去。
     ///
-    /// 方案与实测数字在 `docs/billiards-touch-controls.md`，Q1–Q3 已定案；这里只落地，不重开那三个问题。
-    /// 读数与横幅在 <see cref="BilliardsHud"/>，两块分开是因为一块答「手指在做什么」、
-    /// 另一块答「局面是什么」—— 后者一行 `BilliardsGame` 都不碰输入。
+    /// 方案与实测数字在 `docs/billiards-touch-controls.md`。读数与横幅在 <see cref="BilliardsHud"/>，
+    /// 两块分开是因为一块答「手指在做什么」、另一块答「局面是什么」。
     ///
-    /// ## 决定形状的那条约束
+    /// ## 三个控件，各管一件事
     ///
-    /// 4.7 寸横屏上一颗球只有 8.5 pt（Apple 的最小可点区域是 44 pt），所以**白球没法被直接摸**。
-    /// 瞄准因此是间接的：在台面任意位置按下即锚点，往目标的**反方向**拖，拖动的方向给角度、
-    /// 长度给力度。抬手出杆。
+    /// 第一版把方向与力度合成一个手势（拖的方向给角度、拖的长度给力度）。**真机实测否掉了它**：
+    /// 转方向与拉长度在同一根手指上互相干扰 —— 想微调角度就会改掉力度，反之亦然。所以拆开：
     ///
-    /// ## 力度为什么是拖拽长度而不是滑条
+    /// | 控件 | 管什么 | 在哪 |
+    /// |---|---|---|
+    /// | 台面拖动 | **只**转方向 | 台面区（右侧条之外的全部） |
+    /// | 右侧能量条 | **只**给力度，松手出杆 | 屏幕右侧固定竖条 |
+    /// | 摆球 + 勾 | ballInHand 时定白球位 | 点台面选位，右侧出现勾 |
     ///
-    /// 距离随力度的**平方**变化（#137 实测 <c>d = 1.262·p²</c>），所以 0–4.0 的线性滑条会把每一次
-    /// 走位都挤进它下面三分之一。改成「拖多远、球滚多远」：非线性藏进
-    /// <see cref="PowerForDrag"/> 的 <c>√(d/1.262)</c> 里，玩家碰不到。
+    /// ## 瞄准是相对的，且常显
     ///
-    /// ## 开球那一段刻意断掉
+    /// 瞄准线**一直画着**（能出杆时），不等手指按下 —— 玩家先看到球会往哪走，再决定要不要动它。
+    /// 拖动改的是**角度增量**：手指横向位移 100 px 转 <see cref="DegreesPerHundredPixels"/> 度，
+    /// 与手指的绝对位置无关。于是微调可以在屏幕任意舒适位置小幅滑动，不用把手伸到台面另一头，
+    /// 也不会因为手指离白球远近不同而改变灵敏度。
     ///
-    /// 按屏幕比例最多拖出一个台面长（2.84 m ⇒ power 1.50），而开球要 4.0。所以拖过一个台面长之后
-    /// 比例**可见地断掉**，再拖 <see cref="OverRangeDragMetres"/> 米线性升到 4.0，并标「超量程」。
-    /// 一局一次，且开球的力度不是走位选择 —— 这是唯一一处手感不一致是诚实的地方。
+    /// 一颗球在 4.7 寸横屏上只有 8.5 pt（Apple 的最小可点区域是 44 pt），所以**白球永远不被直接
+    /// 触摸** —— 这一条从第一版起就没变，它是这套间接操作的全部理由。
     ///
-    /// **判据用拖拽长度，不用「手指越过了台面边界」**，虽然文档是按后者描述的：越界那条判据
-    /// 与锚点在哪有关，于是同一个手势在台面中央与靠库边给出不同力度，而力度控件最不能有的
-    /// 就是这个。长度判据与锚点、方向都无关，且 2.84 m 恰好就是文档写的 power 1.50 那条上限。
+    /// ## 力度：拖多远、球滚多远
+    ///
+    /// 距离随力度的**平方**变化（#137 实测 <c>d = 1.262·p²</c>），所以能量条的行程映射的是**距离**
+    /// 而不是力度：条走到一半，球滚半个台面长，非线性藏进 <see cref="PowerForTravel"/> 里。
+    /// 顶端 <see cref="OverRangeFraction"/> 那一段是开球用的超量程，比例在那里**可见地断掉**。
     ///
     /// ## 全部是本地意图
     ///
-    /// 瞄准与摆球从不过网络（#127）。抬手那一刻才有五个 float 走 Reliable 出去，
+    /// 瞄准、摆球、拉能量条从不过网络（#127）。松手那一刻才有五个 float 走 Reliable 出去，
     /// 在那之前对手什么都看不到。
     /// </summary>
     public sealed class BilliardsTouchControls : MonoBehaviour
@@ -49,10 +53,6 @@ namespace DataChannelUnity.Example
         private Camera _camera;
 
         [SerializeField]
-        [Tooltip("滑回锚点这么近算取消（屏幕像素）。也是「点一下」与「拖一下」的分界。")]
-        private float _cancelRadiusPixels = 12f;
-
-        [SerializeField]
         [Tooltip("在 Awake 里把朝向锁成横屏。竖屏下半个台子在屏幕外，所以这是硬要求。")]
         private bool _lockLandscape = true;
 
@@ -66,36 +66,51 @@ namespace DataChannelUnity.Example
         public const float RollCoefficient = 1.262f;
 
         /// <summary>
-        /// 比例段的上限：拖一个台面长，球滚一个台面长。<c>√(2.84/1.262) = 1.50</c>。
+        /// 手指横向移动 100 px 转多少度。
+        ///
+        /// 5° 是从这个游戏的精度需求推的：一次薄擦要亚度级精度，而 5°/100 px 意味着 1 px ≈ 0.05°，
+        /// 于是一个 44 pt 的舒适滑动跨 2.2°，够粗调；亚度级微调则是几个像素的事，触屏分辨得出来。
         /// </summary>
-        public const float ProportionalDragMetres = BilliardsTable.Length;
+        public const float DegreesPerHundredPixels = 5f;
 
         /// <summary>
-        /// 超量程段的长度。再拖这么多米，力度从比例段末端线性升到
-        /// <see cref="BilliardsRules.MaxPower"/>。
-        ///
-        /// 1.2 m 是**够得着**换来的：总行程 4.04 m，在 667×375 横屏上是 601 px，屏幕对角线 765 px
-        /// 之内 —— 一个明显的大动作，但拉得出来。给得更短会让开球轻易误触，更长则拉不满。
+        /// 能量条比例段的上限：条走到这个比例处，球正好滚一个台面长（power 1.50）。
+        /// 再往上是超量程段。
         /// </summary>
-        public const float OverRangeDragMetres = 1.2f;
+        public const float OverRangeFraction = 0.7f;
+
+        /// <summary>比例段末端对应的距离 —— 一个台面长。</summary>
+        public const float ProportionalMaxMetres = BilliardsTable.Length;
 
         #endregion
 
         #region State
 
-        private bool _dragging;
+        /// <summary>
+        /// 当前瞄准方向（台面平面上的单位向量）。**跨帧保持** —— 它是玩家调出来的状态，
+        /// 不是某一次手势的产物。
+        /// </summary>
+        private Vector2 _aim = Vector2.left;
 
-        /// <summary>按下那一刻的台面坐标。瞄准与力度都按相对它的位移读。</summary>
-        private Vector2 _anchorTable;
+        /// <summary>这一回合有没有初始化过瞄准方向。换回合时重置一次到一个合理的默认朝向。</summary>
+        private bool _aimInitialised;
 
-        private Vector2 _anchorScreen;
-        private Vector2 _currentTable;
-        private Vector2 _currentScreen;
+        /// <summary>能量条当前行程，0–1。松手即出杆并归零。</summary>
+        private float _travel;
 
-        /// <summary>ballInHand 时点下的摆球位（已吸附到合法位），没点过则为 null。</summary>
+        /// <summary>ballInHand 时点下的摆球位（已吸附到合法位），还没点过则为 null。</summary>
         private Vector2? _placedCue;
 
-        private GUIStyle _powerStyle;
+        /// <summary>摆球位有没有按过右侧那个勾确认。没确认之前不能出杆。</summary>
+        private bool _cuePlacementConfirmed;
+
+        private enum Drag { None, Aiming, Power }
+
+        private Drag _drag;
+        private Vector2 _lastScreen;
+
+        private GUIStyle _label;
+        private GUIStyle _hand;
         private static Texture2D _lineTexture;
 
         #endregion
@@ -111,6 +126,35 @@ namespace DataChannelUnity.Example
 
             if (_lockLandscape)
                 LockLandscape();
+        }
+
+        private void OnEnable()
+        {
+            if (_game != null)
+                _game.StateChanged += OnStateChanged;
+        }
+
+        private void OnDisable()
+        {
+            if (_game != null)
+                _game.StateChanged -= OnStateChanged;
+        }
+
+        /// <summary>
+        /// 换回合就把这一杆的意图全部丢掉：摆球位、确认、能量条、瞄准的初始化标记。
+        /// 留着它们会让下一杆从上一杆的一半状态开始。
+        /// </summary>
+        private void OnStateChanged(BilliardsState state)
+        {
+            _travel = 0f;
+            _drag = Drag.None;
+            _aimInitialised = false;
+
+            if (!state.HasFlag(BilliardsFlags.BallInHand))
+            {
+                _placedCue = null;
+                _cuePlacementConfirmed = false;
+            }
         }
 
         /// <summary>
@@ -138,26 +182,79 @@ namespace DataChannelUnity.Example
         #region Power curve
 
         /// <summary>
-        /// 拖拽长度（台面米）到力度。比例段是 <c>√(d/1.262)</c> 的反解，超量程段线性到 4.0。
+        /// 能量条行程（0–1）到力度。
+        ///
+        /// 下 <see cref="OverRangeFraction"/> 段：行程线性映射**距离** 0 到一个台面长，力度由
+        /// <c>p = √(d/1.262)</c> 反解 —— 所以「条走到一半」＝「球滚半个台面长」，玩家想的是距离。
+        /// 上段：线性升到 <see cref="BilliardsRules.MaxPower"/>，那是开球用的，比例在分界处断掉。
         /// </summary>
-        public static float PowerForDrag(float dragMetres)
+        public static float PowerForTravel(float travel)
         {
-            if (dragMetres <= 0f)
-                return 0f;
+            travel = Mathf.Clamp01(travel);
 
-            if (dragMetres <= ProportionalDragMetres)
-                return Mathf.Sqrt(dragMetres / RollCoefficient);
+            if (travel <= OverRangeFraction)
+            {
+                float metres = travel / OverRangeFraction * ProportionalMaxMetres;
+                return Mathf.Sqrt(metres / RollCoefficient);
+            }
 
-            float atBreakpoint = Mathf.Sqrt(ProportionalDragMetres / RollCoefficient);
-            float t = Mathf.Clamp01((dragMetres - ProportionalDragMetres) / OverRangeDragMetres);
+            float atBreakpoint = Mathf.Sqrt(ProportionalMaxMetres / RollCoefficient);
+            float t = (travel - OverRangeFraction) / (1f - OverRangeFraction);
             return Mathf.Lerp(atBreakpoint, BilliardsRules.MaxPower, t);
         }
 
         /// <summary>力度到自由滚距离（米）。画「球会停在这」那个圈用的。</summary>
         public static float RollDistanceForPower(float power) => RollCoefficient * power * power;
 
-        /// <summary>拖到这个长度以上就进了超量程段，比例不再成立。</summary>
-        public static bool IsOverRange(float dragMetres) => dragMetres > ProportionalDragMetres;
+        /// <summary>行程进了超量程段没有 —— 那一段的比例是刻意断掉的。</summary>
+        public static bool IsOverRange(float travel) => travel > OverRangeFraction;
+
+        #endregion
+
+        #region Layout
+
+        /// <summary>
+        /// 右侧那条能量条（GUI 坐标）。
+        ///
+        /// 上下各留出空间给右上的 <see cref="ConnectionDiagnosticsHud"/> 与右下的报告读数 ——
+        /// 四块 UI 各占一角，这一条挤在右侧中段，不与它们重叠。
+        /// </summary>
+        public static Rect PowerBarRect()
+        {
+            const float width = 56f;
+            const float rightMargin = 12f;
+            const float topReserved = 78f;    // ConnectionDiagnosticsHud
+            const float bottomReserved = 92f; // 报告读数
+
+            float height = Mathf.Max(120f, Screen.height - topReserved - bottomReserved);
+            return new Rect(Screen.width - width - rightMargin, topReserved, width, height);
+        }
+
+        /// <summary>ballInHand 时那个「确认摆球位」的勾。与能量条同一竖列，两者不同时出现。</summary>
+        public static Rect ConfirmButtonRect()
+        {
+            Rect bar = PowerBarRect();
+            const float size = 56f;
+            return new Rect(bar.x, bar.y + (bar.height - size) * 0.5f, size, size);
+        }
+
+        /// <summary>台面手势区＝屏幕减掉右侧那条、减掉左上 RoomPanel、减掉左下 BilliardsHud。</summary>
+        private static bool IsInTableArea(Vector2 guiPoint)
+        {
+            if (PowerBarRect().Contains(guiPoint))
+                return false;
+
+            // RoomPanel（左上 300×170）与 BilliardsHud（左下）都要让出去，否则点「断开」或者
+            // 「再来一局」会顺手转一下瞄准。数值与那两块重复，是因为 IMGUI 没有可查询的布局。
+            if (new Rect(10f, 10f, 300f, 170f).Contains(guiPoint))
+                return false;
+
+            float hudHeight = 150f;
+            if (new Rect(10f, Screen.height - hudHeight - 10f, 340f, hudHeight).Contains(guiPoint))
+                return false;
+
+            return true;
+        }
 
         #endregion
 
@@ -194,7 +291,7 @@ namespace DataChannelUnity.Example
             return new Vector2(screen.x, Screen.height - screen.y);
         }
 
-        /// <summary>一屏幕像素等于多少台面米。拖拽长度按台面尺度读，所以这个比例是承重的。</summary>
+        /// <summary>一屏幕像素等于多少台面米。画圈的半径要用它。</summary>
         private float MetresPerPixel()
         {
             if (_camera == null)
@@ -210,13 +307,12 @@ namespace DataChannelUnity.Example
 
         #endregion
 
-        #region Input
+        #region Turn gate
 
         /// <summary>
-        /// 现在能不能出杆。四条都不满足就整块冻住 —— 等重连那条是 #134 要的：
-        /// 对手在回来的路上，台子是他的。
+        /// 现在能不能出杆。等重连那条是 #134 要的：对手在回来的路上，台子是他的。
         /// </summary>
-        private bool CanAct()
+        private bool IsMyShot()
         {
             if (_game == null || _camera == null)
                 return false;
@@ -230,27 +326,57 @@ namespace DataChannelUnity.Example
             return _game.State.TurnSeat == _game.LocalSeat;
         }
 
+        /// <summary>还欠一次摆球确认 —— 那之前不给出杆，也不给拉能量条。</summary>
+        private bool AwaitingCuePlacement =>
+            _game != null && _game.State.HasFlag(BilliardsFlags.BallInHand) && !_cuePlacementConfirmed;
+
+        #endregion
+
+        #region Input
+
         private void Update()
         {
-            if (!CanAct())
+            if (!IsMyShot())
             {
                 // 冻住时把手上的意图丢掉，否则回合回来时会接着一条半途的拖动。
-                _dragging = false;
+                _drag = Drag.None;
+                _travel = 0f;
                 return;
             }
 
-            if (TryReadPointer(out Vector2 screen, out bool pressed, out bool released))
-                DriveGesture(screen, pressed, released);
+            EnsureAimInitialised();
+
+            if (TryReadPointer(out Vector2 screen, out bool pressed, out bool held, out bool released))
+                DriveGesture(screen, pressed, held, released);
+        }
+
+        /// <summary>
+        /// 换回合后第一次给一个合理的朝向：从白球指向脚点（球堆那一侧）。
+        /// 开球时那正是要瞄的方向，其余情况下它是一个中性的起点，玩家再拖着调。
+        /// </summary>
+        private void EnsureAimInitialised()
+        {
+            if (_aimInitialised)
+                return;
+
+            Vector2 from = CueOrigin();
+            var foot = new Vector2(BilliardsTable.FootSpot.x, BilliardsTable.FootSpot.z);
+            Vector2 toFoot = foot - from;
+
+            _aim = toFoot.sqrMagnitude > 1e-6f ? toFoot.normalized : Vector2.right;
+            _aimInitialised = true;
         }
 
         /// <summary>
         /// 一个指头或者鼠标左键，取先有的那个。工程走的是旧 Input（`activeInputHandler: 0`），
         /// 所以两条都在 <c>Input</c> 上。
         /// </summary>
-        private static bool TryReadPointer(out Vector2 screen, out bool pressed, out bool released)
+        private static bool TryReadPointer(out Vector2 screen, out bool pressed, out bool held,
+            out bool released)
         {
             screen = default;
             pressed = false;
+            held = false;
             released = false;
 
             if (Input.touchCount > 0)
@@ -259,64 +385,108 @@ namespace DataChannelUnity.Example
                 screen = touch.position;
                 pressed = touch.phase == TouchPhase.Began;
                 released = touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled;
+                held = !pressed && !released;
                 return true;
             }
 
             screen = Input.mousePosition;
             pressed = Input.GetMouseButtonDown(0);
             released = Input.GetMouseButtonUp(0);
-            return pressed || released || Input.GetMouseButton(0);
+            held = Input.GetMouseButton(0) && !pressed;
+            return pressed || held || released;
         }
 
-        private void DriveGesture(Vector2 screen, bool pressed, bool released)
+        private void DriveGesture(Vector2 screen, bool pressed, bool held, bool released)
         {
-            if (!TryScreenToTable(screen, out Vector2 table))
-                return;
+            var gui = new Vector2(screen.x, Screen.height - screen.y);
 
             if (pressed)
             {
-                if (IsOverReservedUi(screen))
-                    return;
+                _lastScreen = screen;
+                // 按下那一刻就锁定这根手指管哪个控件，之后滑出去也不换 —— 否则从台面滑进能量条
+                // 会在中途变成出杆，而那正是第一版方向与力度互相干扰的那类问题。
+                _drag = ChooseControl(gui);
 
-                _dragging = true;
-                _anchorScreen = screen;
-                _anchorTable = table;
+                if (_drag == Drag.Power)
+                    _travel = TravelAt(gui);
+
+                return;
             }
 
-            if (!_dragging)
+            if (_drag == Drag.None)
                 return;
 
-            _currentScreen = screen;
-            _currentTable = table;
+            if (held)
+            {
+                if (_drag == Drag.Aiming)
+                {
+                    // 相对：只看这一帧的横向位移，与手指在哪无关。
+                    float deltaX = screen.x - _lastScreen.x;
+                    RotateAim(deltaX / 100f * DegreesPerHundredPixels);
+                }
+                else
+                {
+                    _travel = TravelAt(gui);
+                }
+
+                _lastScreen = screen;
+                return;
+            }
 
             if (!released)
                 return;
 
-            _dragging = false;
+            // 松手：能量条那根出杆，台面那根只是结束一次转向。
+            if (_drag == Drag.Power)
+                ShootWithCurrentAim();
 
-            float pixels = Vector2.Distance(screen, _anchorScreen);
-
-            // 短过取消半径的一下是「点」而不是「拖」。ballInHand 时点＝摆球（点第二次就换个位置摆），
-            // 否则点＝取消。用同一个阈值分这两件事，是因为它们本来就是同一个手势的两种长度。
-            if (pixels < _cancelRadiusPixels)
-            {
-                if (_game.State.HasFlag(BilliardsFlags.BallInHand))
-                    _placedCue = SnapCueSpot(table);
-
-                return;
-            }
-
-            ShootFromDrag();
+            _drag = Drag.None;
         }
 
-        /// <summary>
-        /// `RoomPanel` 占的那块（左上 300×150）不接手势，否则点「断开」会顺手出一杆。
-        /// 数值与那块面板重复，是因为 IMGUI 没有可查询的布局；两处要一起改。
-        /// </summary>
-        private static bool IsOverReservedUi(Vector2 screenPoint)
+        /// <summary>按下的位置决定这根手指管哪个控件。</summary>
+        private Drag ChooseControl(Vector2 gui)
         {
-            var guiPoint = new Vector2(screenPoint.x, Screen.height - screenPoint.y);
-            return new Rect(10f, 10f, 300f, 150f).Contains(guiPoint);
+            if (AwaitingCuePlacement)
+            {
+                // 摆球阶段：勾与台面点选各走各的，都不是拖动。
+                if (ConfirmButtonRect().Contains(gui))
+                {
+                    if (_placedCue.HasValue)
+                        _cuePlacementConfirmed = true;
+
+                    return Drag.None;
+                }
+
+                if (IsInTableArea(gui) && TryScreenToTable(GuiToScreen(gui), out Vector2 spot))
+                    _placedCue = SnapCueSpot(spot);
+
+                return Drag.None;
+            }
+
+            if (PowerBarRect().Contains(gui))
+                return Drag.Power;
+
+            return IsInTableArea(gui) ? Drag.Aiming : Drag.None;
+        }
+
+        private static Vector2 GuiToScreen(Vector2 gui) => new Vector2(gui.x, Screen.height - gui.y);
+
+        private void RotateAim(float degrees)
+        {
+            if (Mathf.Abs(degrees) < 1e-5f)
+                return;
+
+            float radians = degrees * Mathf.Deg2Rad;
+            float cos = Mathf.Cos(radians);
+            float sin = Mathf.Sin(radians);
+            _aim = new Vector2(_aim.x * cos - _aim.y * sin, _aim.x * sin + _aim.y * cos).normalized;
+        }
+
+        /// <summary>能量条上一个 GUI 点对应的行程。条底是 0，条顶是 1。</summary>
+        private static float TravelAt(Vector2 gui)
+        {
+            Rect bar = PowerBarRect();
+            return Mathf.Clamp01((bar.yMax - gui.y) / bar.height);
         }
 
         /// <summary>
@@ -362,28 +532,28 @@ namespace DataChannelUnity.Example
                 ? state.BallPositions[BilliardsRules.CueBall]
                 : new Vector2(BilliardsTable.HeadSpot.x, BilliardsTable.HeadSpot.z);
 
-        /// <summary>抬手：把手势换成五个 float 交给 <see cref="BilliardsGame.Shoot"/>。</summary>
-        private void ShootFromDrag()
+        /// <summary>松手：把当前的方向与力度换成五个 float 交给 <see cref="BilliardsGame.Shoot"/>。</summary>
+        private void ShootWithCurrentAim()
         {
-            Vector2 drag = _currentTable - _anchorTable;
-            if (drag.sqrMagnitude < 1e-8f)
+            float power = PowerForTravel(_travel);
+            _travel = 0f;
+
+            // 条基本没拉动就不是一杆 —— 那是一次误触。
+            if (power < 0.05f)
                 return;
 
-            // 往目标的反方向拖 —— 像把杆往后拉。
-            Vector2 aimDirection = -drag.normalized;
-            float power = PowerForDrag(drag.magnitude);
+            if (AwaitingCuePlacement)
+                return;
 
             Vector2 from = CueOrigin();
-            Vector2 cueSpot = _game.State.HasFlag(BilliardsFlags.BallInHand)
-                ? from
-                : Vector2.zero;
+            Vector2 cueSpot = _game.State.HasFlag(BilliardsFlags.BallInHand) ? from : Vector2.zero;
 
             // aimAt 而不是方向：`Shoot` 自己按快照算 `aimAt - from`，所以这里必须用同一个 from
             // 反推那个点，否则两边各算一次会差一个白球位。
-            _game.Shoot(from + aimDirection, power, cueSpot);
+            _game.Shoot(from + _aim, power, cueSpot);
 
-            // 摆球位只对这一杆有效；下一次 ballInHand 要重新点。
             _placedCue = null;
+            _cuePlacementConfirmed = false;
         }
 
         #endregion
@@ -395,80 +565,138 @@ namespace DataChannelUnity.Example
             if (_game == null || _camera == null)
                 return;
 
-            _powerStyle ??= new GUIStyle(GUI.skin.label)
+            _label ??= new GUIStyle(GUI.skin.label)
             {
-                fontSize = 14,
+                fontSize = 13,
                 normal = { textColor = Color.white }
             };
 
-            bool ballInHand = _game.State.HasFlag(BilliardsFlags.BallInHand);
-            bool mine = CanAct();
+            _hand ??= new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 30,
+                alignment = TextAnchor.MiddleCenter
+            };
 
+            if (!IsMyShot())
+                return;
+
+            if (AwaitingCuePlacement)
+            {
+                DrawCuePlacement();
+                return;
+            }
+
+            DrawAim();
+            DrawPowerBar();
+        }
+
+        /// <summary>
+        /// 摆球阶段：袋口禁放圈、白球影子、跟着手指的手、右侧那个勾。
+        /// </summary>
+        private void DrawCuePlacement()
+        {
             // 袋口禁放圈：画出来而不是让玩家自己撞上。白球中心落在离袋口中心 12.2 cm 以内会直接
             // 掉下去（袋口是台面上的真洞，#136），那一杆在打之前就没了。
-            if (mine && ballInHand)
-                DrawPocketKeepOuts();
-
-            if (mine && ballInHand && _placedCue.HasValue)
-                DrawCueGhost(_placedCue.Value);
-
-            if (!_dragging || !mine)
-                return;
-
-            DrawAimAndPower();
-        }
-
-        private void DrawAimAndPower()
-        {
-            Vector2 drag = _currentTable - _anchorTable;
-            float dragMetres = drag.magnitude;
-            if (dragMetres < 1e-4f)
-                return;
-
-            Vector2 aimDirection = -drag.normalized;
-            float power = PowerForDrag(dragMetres);
-            bool over = IsOverRange(dragMetres);
-            Vector2 from = CueOrigin();
-
-            // 瞄准线：从白球往瞄准方向拉到库边，够玩家看清它指向哪一颗。
-            Vector2 aimEnd = from + aimDirection * BilliardsTable.Length;
-            DrawTableLine(from, aimEnd, over ? new Color(1f, 0.55f, 0.1f) : new Color(0.4f, 1f, 0.5f), 2f);
-
-            // 球会滚到这 —— 力度控件的全部内容就是这个圈。超量程时它超出台面，那正是要看见的。
-            float roll = RollDistanceForPower(power);
-            DrawTableCircle(from + aimDirection * roll, BilliardsTable.BallRadius * 2.5f,
-                over ? new Color(1f, 0.45f, 0.1f) : new Color(0.95f, 0.95f, 0.5f));
-
-            // 拖动本身也画出来：手指与锚点之间那条线是「我拖了多长」的唯一凭据。
-            DrawTableLine(_anchorTable, _currentTable, new Color(1f, 1f, 1f, 0.35f), 1.5f);
-            DrawTableCircle(_anchorTable, BilliardsTable.BallRadius, new Color(1f, 1f, 1f, 0.5f));
-
-            var label = new Vector2(_currentScreen.x + 14f, Screen.height - _currentScreen.y - 30f);
-            string text = over
-                ? $"力度 {power:F2}  ⚠ 超量程（比例已断）\n拖 {dragMetres:F2} m / 台面 {ProportionalDragMetres:F2} m"
-                : $"力度 {power:F2}\n拖 {dragMetres:F2} m ⇒ 球滚 {roll:F2} m";
-
-            var prev = _powerStyle.normal.textColor;
-            _powerStyle.normal.textColor = over ? new Color(1f, 0.7f, 0.3f) : Color.white;
-            GUI.Label(new Rect(label.x, label.y, 260f, 40f), text, _powerStyle);
-            _powerStyle.normal.textColor = prev;
-        }
-
-        private void DrawPocketKeepOuts()
-        {
-            // 与 BilliardsTable.PushOutOfPockets 的 keepOut 同一个式子。两处重复是因为那个是
-            // private；数字变了这里也要跟着变。
             float keepOut = BilliardsTable.PocketNotchHalf + BilliardsTable.BallRadius * 2f;
-            var colour = new Color(1f, 0.35f, 0.35f, 0.5f);
-
             foreach (Vector3 pocket in BilliardsTable.Pockets)
-                DrawTableCircle(new Vector2(pocket.x, pocket.z), keepOut, colour);
+                DrawTableCircle(new Vector2(pocket.x, pocket.z), keepOut, new Color(1f, 0.35f, 0.35f, 0.5f));
+
+            if (_placedCue.HasValue)
+            {
+                DrawTableCircle(_placedCue.Value, BilliardsTable.BallRadius, new Color(1f, 1f, 1f, 0.9f));
+                DrawTableCircle(_placedCue.Value, BilliardsTable.BallRadius * 1.8f, new Color(1f, 1f, 1f, 0.4f));
+            }
+
+            // 一只手拿着球，跟着手指 —— 「现在是你在放球」这件事靠它说，不靠一行字。
+            if (Input.touchCount > 0 || Input.mousePresent)
+            {
+                Vector2 screen = Input.touchCount > 0 ? Input.GetTouch(0).position : (Vector2)Input.mousePosition;
+                var gui = new Vector2(screen.x, Screen.height - screen.y);
+                if (IsInTableArea(gui))
+                    GUI.Label(new Rect(gui.x - 20f, gui.y - 44f, 40f, 40f), "✋", _hand);
+            }
+
+            GUI.Label(new Rect(PowerBarRect().x - 210f, ConfirmButtonRect().y - 26f, 200f, 24f),
+                _placedCue.HasValue ? "点右边的勾确认" : "点台面选白球位置", _label);
+
+            // 勾：没选位置之前是灰的 —— 一个能按但什么都不做的按钮比一个灰的更难懂。
+            Rect confirm = ConfirmButtonRect();
+            GUI.enabled = _placedCue.HasValue;
+            if (GUI.Button(confirm, "✔"))
+            {
+                if (_placedCue.HasValue)
+                    _cuePlacementConfirmed = true;
+            }
+            GUI.enabled = true;
         }
 
-        private void DrawCueGhost(Vector2 spot)
+        /// <summary>
+        /// 瞄准线常显：从白球沿当前方向拉到库边，末端一个箭头。力度 > 0 时再画一个「球会停在这」的圈。
+        /// </summary>
+        private void DrawAim()
         {
-            DrawTableCircle(spot, BilliardsTable.BallRadius, new Color(1f, 1f, 1f, 0.85f));
-            DrawTableCircle(spot, BilliardsTable.BallRadius * 1.6f, new Color(1f, 1f, 1f, 0.35f));
+            Vector2 from = CueOrigin();
+            float power = PowerForTravel(_travel);
+            bool over = IsOverRange(_travel);
+            Color colour = over ? new Color(1f, 0.55f, 0.1f) : new Color(0.4f, 1f, 0.5f);
+
+            Vector2 end = from + _aim * BilliardsTable.Length;
+            DrawTableLine(from, end, colour, 2f);
+
+            // 白球自己也描一圈：它只有 8.5 px，描出来才看得出线是从它出发的。
+            DrawTableCircle(from, BilliardsTable.BallRadius * 1.4f, new Color(1f, 1f, 1f, 0.6f));
+
+            // 箭头：两条短线，指出方向。没有它这条线两头长得一样。
+            Vector2 tipGui = TableToGui(end);
+            Vector2 dirGui = (tipGui - TableToGui(from)).normalized;
+            var perp = new Vector2(-dirGui.y, dirGui.x);
+            DrawGuiLine(tipGui, tipGui - dirGui * 14f + perp * 7f, colour, 2f);
+            DrawGuiLine(tipGui, tipGui - dirGui * 14f - perp * 7f, colour, 2f);
+
+            if (_travel <= 0.001f)
+                return;
+
+            float roll = RollDistanceForPower(power);
+            DrawTableCircle(from + _aim * roll, BilliardsTable.BallRadius * 2.5f,
+                over ? new Color(1f, 0.45f, 0.1f) : new Color(0.95f, 0.95f, 0.5f));
+        }
+
+        /// <summary>
+        /// 右侧那条能量条。分界线画出来，因为比例在那里**断掉** —— 不画的话超量程段看着只是
+        /// 「更大力一点」，而它其实是另一套映射。
+        /// </summary>
+        private void DrawPowerBar()
+        {
+            Rect bar = PowerBarRect();
+            float power = PowerForTravel(_travel);
+            bool over = IsOverRange(_travel);
+
+            Color prev = GUI.color;
+
+            // 槽
+            GUI.color = new Color(0f, 0f, 0f, 0.55f);
+            GUI.DrawTexture(bar, Texture2D.whiteTexture);
+
+            // 已填充部分，从底往上
+            float filled = bar.height * Mathf.Clamp01(_travel);
+            GUI.color = over ? new Color(1f, 0.5f, 0.1f, 0.85f) : new Color(0.35f, 0.85f, 0.45f, 0.85f);
+            GUI.DrawTexture(new Rect(bar.x, bar.yMax - filled, bar.width, filled), Texture2D.whiteTexture);
+
+            // 比例段与超量程段的分界
+            float splitY = bar.yMax - bar.height * OverRangeFraction;
+            GUI.color = new Color(1f, 1f, 1f, 0.9f);
+            GUI.DrawTexture(new Rect(bar.x, splitY - 1f, bar.width, 2f), Texture2D.whiteTexture);
+            GUI.color = prev;
+
+            GUI.Label(new Rect(bar.x - 74f, splitY - 10f, 70f, 20f), "↑超量程", _label);
+
+            // 读数：力度与它对应的距离，那是玩家真正在选的量。
+            string text = over
+                ? $"力度 {power:F2}\n⚠ 超量程"
+                : $"力度 {power:F2}\n球滚 {RollDistanceForPower(power):F2} m";
+            GUI.Label(new Rect(bar.x - 150f, bar.y - 2f, 145f, 40f), text, _label);
+
+            GUI.Label(new Rect(bar.x - 150f, bar.yMax - 22f, 145f, 20f), "拖这条，松手出杆", _label);
         }
 
         private void DrawTableLine(Vector2 fromTable, Vector2 toTable, Color colour, float thickness)

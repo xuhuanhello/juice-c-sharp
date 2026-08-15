@@ -47,7 +47,20 @@ namespace DataChannelUnity.Example
                 // RoundTripTime 量化到 tick —— 一档就是 TickDelta。把两者一起显示，
                 // 否则「100ms」看着像真的测到了 100ms，其实是「1 个 tick」。
                 var tickMs = tm.TickDelta * 1000d;
-                _sb.AppendLine($"ping   {tm.RoundTripTime} ms   (量化到 tick，1 档 = {tickMs:F0} ms)");
+
+                // **这个数是本机 client 的 RTT，不是对手的。** 在 host 上它量的是那条进程内
+                // loopback —— pong 恒定晚一个 tick，所以它永远读一档（TickRate 30 下就是 33 ms），
+                // 与对手的延迟毫无关系。FishNet 没有服务端 per-connection RTT 的公开面
+                // （`NetworkConnection.PingPong.cs` 里只有限流用的 private 成员），要显示各玩家的
+                // ping 得让每个 client 用 RPC 上报，那是 app 层的活。
+                //
+                // 实测过这个读数怎么骗人（#139）：host 显示 33 ms 而 client 显示 0 ms，看着像
+                // 「client 那端更快」，其实两个数量的是两条不同的连接。所以标签必须说清是谁的。
+                bool onHost = _networkManager.IsServerStarted && _networkManager.IsClientStarted;
+                string whose = onHost ? "本机 loopback，非对手" : "本机到 host";
+                _sb.AppendLine($"ping   {tm.RoundTripTime} ms   ({whose}；量化到 tick，1 档 = {tickMs:F0} ms)");
+                if (onHost)
+                    _sb.AppendLine("       ↑ host 上这个数恒为一档，不反映对手延迟");
                 _sb.AppendLine($"tick   {tm.Tick}   @ {tm.TickRate}/s");
             }
 

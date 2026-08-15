@@ -304,11 +304,50 @@ namespace DataChannelUnity.Example
         }
 
         /// <summary>
+        /// True when this process owns the simulation: the host, or a scene with no NetworkManager at
+        /// all (the headless check and the edit-mode measurements, which drive physics themselves).
+        ///
+        /// A pure client must own **none** of it. Its bodies are kinematic and driven by
+        /// NetworkTransform, so every host-side step either does nothing or actively fights the
+        /// replicated position — and one of them did:
+        ///
+        /// <see cref="BilliardsBall.ClampIntoPlay"/> returns early on a pocketed ball, but
+        /// <see cref="BilliardsBall.IsPocketed"/> is **derived locally** from observing y below
+        /// <see cref="BilliardsTable.FallThroughY"/>. On a client that y arrives interpolated
+        /// (`_interpolation: 2`), so the dip through the pocket is smoothed away and the client may
+        /// never see a single frame below the threshold. The flag then stays false, containment keeps
+        /// running, and it drags the parked ball from the parking row (z = 1.060) back to the table
+        /// edge (z = 0.6815) every step — measured on a real two-process run (#139): the host showed
+        /// pocketed balls in the parking row and the client showed them pinned just above the cloth.
+        ///
+        /// The authoritative pocketed mask was correct throughout (it rides in #135's state message);
+        /// only this locally-derived flag disagreed, and containment is the one thing that read it.
+        /// </summary>
+        private bool OwnsSimulation
+        {
+            get
+            {
+                if (_timeManager == null)
+                    return true;
+
+                FishNet.Managing.NetworkManager manager = _timeManager.NetworkManager;
+                // Asked through ServerManager rather than IsServerStarted: that property dereferences
+                // ServerManager, which does not exist yet while FishNet is still starting up.
+                return manager == null || manager.ServerManager == null ||
+                       manager.ServerManager.Started;
+            }
+        }
+
+        /// <summary>
         /// Runs on the host's physics step. Order matters: contain first (so a clamped ball is
         /// judged at its corrected position), then pocket, then test for settling.
         /// </summary>
         public void Step(float deltaTime)
         {
+            // A client owns none of this — see OwnsSimulation for what went wrong when it did.
+            if (!OwnsSimulation)
+                return;
+
             // Rolling resistance is ours to apply because PhysX has no such term (#137). Forces
             // accumulate for the next Physics.Simulate, so applying it here — after the step rather
             // than before — costs one step of lag and keeps the physics-clock ownership above as the
