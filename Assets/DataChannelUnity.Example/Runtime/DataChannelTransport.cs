@@ -71,12 +71,16 @@ namespace DataChannelUnity.Example
 
         // ── 归 #120 的，暂取 ────────────────────────────────────────────────
         //
-        // connectionId 从 0 起单调递增、**永不复用**（Synapse 的先例）。契约 4.3 的
-        // 约束：必须 >= 0（ServerManager 会当场踢）、必须避开 int.MaxValue（那是
-        // SIMULATED_CLIENTID_VALUE）、存活期唯一；不要求连续/单调/从 0 起。
+        // connectionId 从 0 起单调递增、**永不复用**。**#120 已定**（不再是暂取）。
+        // 契约 4.3 的约束：必须 >= 0（ServerManager 会当场踢）、必须避开 int.MaxValue
+        // （那是 SIMULATED_CLIENTID_VALUE）、存活期唯一；不要求连续/单调/从 0 起。
         //
         // 选永不复用是因为复用会让「拿着过期 id 去发」这类 bug 静默命中**另一个**
-        // peer；不复用则查表失败，响亮。最终由 #120 定。
+        // peer；不复用则查表失败，响亮。
+        //
+        // **代价已知并接受**（#120 → #134）：断线重连回来的是一个**新 id**，FishNet 眼里
+        // 是新连接、新 NetworkConnection、新 owner。所以游戏层若要「接回原来那半边球」，
+        // 必须自己有一个与 connectionId 解耦的身份（座位号 / 信令 peer id）。
         private int _nextConnectionId;
 
         // pump 对齐取契约 5.4 推荐的方案 D：在 IterateIncoming 里直接 Pump()，用
@@ -101,9 +105,20 @@ namespace DataChannelUnity.Example
         [Tooltip("勾上＝方案 D：在 IterateIncoming 里 Pump()，同帧交付。取消＝方案 A：只靠 PlayerLoop 的 pump，入站晚一帧。")]
         private bool _pumpInsideIterateIncoming = true;
 
+        // 台球是两人局，所以默认 2（#120）。**原先是 8，那个值会误导** —— 说 8 而实际
+        // 只能玩 2。
+        //
+        // **这个值不拦任何东西，它只是如实转述。** #120 查明 FishNet 核心**从不读**
+        // GetMaximumClients()：调用者只有各 transport 读自己 socket 的实现
+        // （Multipass.cs:714、Tugboat.cs:365、Synapse.cs:261），ServerManager /
+        // TransportManager 里一处都没有。Tugboat 是在自己的 ServerSocket 里靠 LiteNetLib
+        // 拦的。
+        //
+        // 真正的拦在**房间层**（信令），用 #116 的 reject —— 见 OnSignalingDescription。
+        // 拦在那一层就够：建 PeerConnection 必须过信令，绕不过去。
         [SerializeField]
-        [Tooltip("host 支持的 client 数上限。实现 GetMaximumClients 只为免掉基类默认实现那条 warning（契约 3.7）。")]
-        private int _maximumClients = 8;
+        [Tooltip("host 支持的 client 数上限。台球是两人局故为 2。注意：这个值只是如实转述给 FishNet，真正的拦在信令层（满员回 reject）。")]
+        private int _maximumClients = 2;
         #endregion
 
         #region State
@@ -154,6 +169,29 @@ namespace DataChannelUnity.Example
         // client 侧：只有一条连到 host 的连接（契约 4.4 末：client 侧不需要 server
         // 能力，但 Iterate*(asServer: true) 在纯 client 上照样会被调，必须安全空转）。
         private Peer _clientPeer;
+
+        // ── 信令（#128）──────────────────────────────────────────────────
+        //
+        // **两张表，别混**（#120）：#116 信封里的 from/to 是**信令层的 peer id**，不是
+        // FishNet 的 connectionId。映射是 signalingPeerId → connectionId → Peer。
+        private SignalingClient _signaling;
+        private readonly Dictionary<string, int> _peerIdToConnectionId = new Dictionary<string, int>();
+        private readonly Dictionary<int, string> _connectionIdToPeerId = new Dictionary<int, string>();
+
+        /// <summary>host 侧建房后由服务器带回的 6 位房间码；client 侧是自己填的那个。</summary>
+        public string RoomCode => _signaling?.RoomCode;
+
+        /// <summary>信令是否已连上（诊断 HUD 用）。</summary>
+        public bool SignalingConnected => _signaling != null && _signaling.IsConnected;
+
+        [SerializeField]
+        [Tooltip("client 要加入的房间码。host 侧留空 —— 房间码由服务器分配，见 RoomCode。")]
+        private string _joinRoomCode = "";
+
+        /// <summary>
+        /// 运行时设房间码（房间 UI 用）。必须在 StartConnection(false) 之前调。
+        /// </summary>
+        public void SetJoinRoomCode(string code) => _joinRoomCode = code;
 
         private LocalConnectionState _serverState = LocalConnectionState.Stopped;
         private LocalConnectionState _clientState = LocalConnectionState.Stopped;
@@ -240,12 +278,27 @@ namespace DataChannelUnity.Example
         }
 
         /// <summary>
+        /// 每条**成功送出**的出站消息触发一次：(asServer, connectionId, channel, bytes)。
+        ///
+        /// 这是量出站的唯一可靠位置。理由是本 Transport 的 IterateOutgoing 是空的
+        /// （见那里的说明）—— Send* 里同步 P/Invoke 就出去了，所以「一个 tick 发了多少
+        /// 字节」在别处都读不到：FishNet 的 IntermediateLayer 只给一个 toServer bool，
+        /// 没有 channel 也没有 connectionId，而这两个正是要分的维度。
+        ///
+        /// 只在 dc.Send 没抛的路径上触发：抛了那条就是被丢的（见下面 catch），
+        /// 计进去会把「丢了多少」记成「发了多少」。
+        ///
+        /// 纯诊断，不参与任何决策路径。#130 要定 GetMTU 与背压时量的就是这个。
+        /// </summary>
+        public event Action<bool, int, Channel, int> OutboundSent;
+
+        /// <summary>
         /// 真正的发送。**不能抛** —— 契约 3.2：调用点在 IterateOutgoing 的双层循环里，
         /// 一次抛会把该帧剩余所有连接的发送全打断。而我们的 DataChannel.Send 在通道
         /// 未 open 时**会抛**（SendCore 刻意不预检 open 状态，交给原生失败后
         /// RequireOk 抛），所以这个 try/catch 是契约要求的，不是防御性冗余。
         /// </summary>
-        private void SendOn(Peer peer, byte channelId, ArraySegment<byte> segment)
+        private void SendOn(Peer peer, byte channelId, ArraySegment<byte> segment, bool asServer)
         {
             if (peer == null) return; // 未知 connectionId：静默丢（契约 3.2）
 
@@ -259,6 +312,16 @@ namespace DataChannelUnity.Example
                 // segment.Array 可能带 offset，用带 offset 的重载，不额外拷 ——
                 // DataChannel.Send 会把字节拷进原生，返回后 segment 复用是安全的。
                 dc.Send(segment.Array, segment.Offset, segment.Count);
+
+                // 订阅者抛异常不能打断发送循环（同上：契约 3.2）。
+                try
+                {
+                    OutboundSent?.Invoke(asServer, peer.ConnectionId, channel, segment.Count);
+                }
+                catch (Exception e)
+                {
+                    DataChannelLogOnce($"OutboundSent 订阅者抛出，已忽略：{e.GetType().Name}: {e.Message}");
+                }
             }
             catch (Exception e)
             {
@@ -285,7 +348,7 @@ namespace DataChannelUnity.Example
 
         public override void SendToServer(byte channelId, ArraySegment<byte> segment)
         {
-            SendOn(_clientPeer, channelId, segment);
+            SendOn(_clientPeer, channelId, segment, asServer: false);
         }
 
         public override void SendToClient(byte channelId, ArraySegment<byte> segment, int connectionId)
@@ -295,7 +358,7 @@ namespace DataChannelUnity.Example
             // 连接去查表**即可（契约 3.2）。
             if (connectionId < 0) return;
             _serverPeers.TryGetValue(connectionId, out var peer);
-            SendOn(peer, channelId, segment);
+            SendOn(peer, channelId, segment, asServer: true);
         }
         #endregion
 
@@ -398,6 +461,47 @@ namespace DataChannelUnity.Example
             });
         }
 
+        /// <summary>
+        /// 被动接到一条通道（answerer 侧）：按 label 归档到 reliable / unreliable。
+        ///
+        /// ## label 严格匹配，认不出来就关掉（#119）
+        ///
+        /// 原先是 `if (label == UnreliableLabel) … else → Reliable`，即**任何不认识的
+        /// label 都被静默当成 reliable**。单进程下两端是同一份代码，看不出来；两进程之后
+        /// （#128）版本不一致的对端会被静默映射到错误的档 —— 一条 unreliable 流被当
+        /// reliable 用，症状是「偶尔卡顿」，查起来极贵。所以两个都不匹配就记 Error 并关掉
+        /// 那条通道，响亮地失败。
+        ///
+        /// label 字符串本身就是版本标记：语义变了就换 label，旧版本自然对不上、自然响亮，
+        /// 不需要额外的 -v1 后缀。
+        /// </summary>
+        private void AttachReceivedChannel(Peer peer, DataChannel dc)
+        {
+            if (dc.Label == ReliableLabel)
+            {
+                peer.Reliable = dc;
+                WireChannel(peer, dc, Channel.Reliable, asServer: true);
+            }
+            else if (dc.Label == UnreliableLabel)
+            {
+                peer.Unreliable = dc;
+                WireChannel(peer, dc, Channel.Unreliable, asServer: true);
+            }
+            else
+            {
+                Debug.LogError(
+                    $"[DataChannelTransport] 对端开了一条 label 认不出来的通道：\"{dc.Label}\"。" +
+                    $"只接受 \"{ReliableLabel}\" 与 \"{UnreliableLabel}\" —— 大概是两端版本不一致。" +
+                    "这条通道被关掉，不猜它是哪一档（猜错的症状是偶尔卡顿，比连不上难查得多）。");
+                dc.Dispose(); // dcu_dc_destroy 内部先 close()，所以对端会收到关闭
+                return;
+            }
+
+            // 被动接到的通道可能**已经**是 open 的（Opened 事件可能早于我们订阅），
+            // 所以这里补判一次，否则 Started 永远不会上报。
+            OnPeerChannelOpened(peer, asServer: true);
+        }
+
         private void WireChannel(Peer peer, DataChannel dc, Channel channel, bool asServer)
         {
             dc.MessageReceived += (ReadOnlySpan<byte> data) =>
@@ -432,24 +536,65 @@ namespace DataChannelUnity.Example
             }
         }
 
+        /// <summary>
+        /// 通道关闭 —— **两条通道任意一条**关闭都走这里（#120）。
+        ///
+        /// ## 这里必须自己清理，没人替我们做
+        ///
+        /// `_serverPeers.Remove` 原先全仓只有一个调用点：`StopConnection(int, bool)`。
+        /// 而 FishNet **只在自己发起断开时**才回调那个方法（`TransportManager.cs:716-740`，
+        /// 延迟 max(100ms, 2 ticks) 后传 true）；对**已经自己掉线**的连接它不回调 ——
+        /// 它只清掉自己的 NetworkConnection。
+        ///
+        /// 于是网络掉线那条路上，Peer 连同 PeerConnection 与两条 DataChannel 的**原生
+        /// 句柄留在表里没人释放**，直到 Shutdown。包里的 LeakTracker 会给这个记账。
+        /// 这是 #120 查出来的泄漏，修在这里。
+        ///
+        /// ## 清理与上报解耦
+        ///
+        /// 旧代码开头是 `if (!peer.StartedReported) return;` —— 那让**第二条泄漏路径**
+        /// 存在：ICE 在建立中途失败时通道会关而 Started 从未报过，于是直接 return，
+        /// 表里那行连同 PC 一起留下。所以现在**清理无条件做，上报才看 StartedReported**。
+        /// </summary>
         private void OnPeerChannelClosed(Peer peer, bool asServer)
         {
-            if (!peer.StartedReported) return;
+            var wasStarted = peer.StartedReported;
             peer.StartedReported = false;
 
             if (asServer)
             {
-                // Stopped 必须**后于**该连接最后一条数据（契约 2.3 第 3 条）。我们的
-                // DcClosed 已经先 DrainChannel 再 raise，所以入桶顺序天然合规：那条
-                // 消息已经在 _inboundToServer 里排在这个状态事件之前。
-                _pendingRemoteState.Enqueue(new RemoteConnectionStateArgs(
-                    RemoteConnectionState.Stopped, peer.ConnectionId, Index));
+                // 先上报再 Dispose：Stopped 必须**后于**该连接最后一条数据（契约 2.3
+                // 第 3 条）。我们的 DcClosed 已经先 DrainChannel 再 raise，所以那条消息
+                // 已经在 _inboundToServer 里排在这个状态事件之前 —— 顺序天然合规。
+                if (wasStarted)
+                    _pendingRemoteState.Enqueue(new RemoteConnectionStateArgs(
+                        RemoteConnectionState.Stopped, peer.ConnectionId, Index));
+
+                // 幂等：StopConnection(int,bool) 也会删同一行，两条路都要能删。
+                // Remove 对不存在的键返回 false，Dispose 自己也是幂等的（字段置 null）。
+                if (_serverPeers.Remove(peer.ConnectionId))
+                    peer.Dispose();
             }
             else
             {
-                _pendingClientState.Enqueue(LocalConnectionState.Stopping);
-                _pendingClientState.Enqueue(LocalConnectionState.Stopped);
+                if (wasStarted)
+                {
+                    _pendingClientState.Enqueue(LocalConnectionState.Stopping);
+                    _pendingClientState.Enqueue(LocalConnectionState.Stopped);
+                }
+
+                // 本地 client 那条：清引用并释放。host 模式下这条 peer 的**对端**
+                // （_serverPeers 里那行）由上面 asServer 的分支各自清 —— 两个 PC 是
+                // 独立对象，各自的 Closed 各走一次。
+                if (ReferenceEquals(_clientPeer, peer))
+                {
+                    _clientPeer = null;
+                    peer.Dispose();
+                }
             }
+
+            // 信令侧的映射也要跟着掉，否则 peerId → connectionId 会指向一个已删的行。
+            ForgetSignalingMapping(peer.ConnectionId);
         }
         #endregion
 
@@ -474,6 +619,24 @@ namespace DataChannelUnity.Example
             return cfg;
         }
 
+        /// <summary>
+        /// 用**服务器下发的** iceServers 建配置（#128）。
+        ///
+        /// 这些凭据是 #117 定的时限 HMAC，由信令服务器每次建/进房重新签发 —— 客户端一个
+        /// 秘密都不持有。所以它们**只能**从这里来，不能进 Inspector：`IceServer` 刻意没有
+        /// `[Serializable]`，正是为了不让凭据落进 .unity / .prefab 随包发出去。
+        ///
+        /// Inspector 里的 `_iceServerUrls` 仍然叠加进来，方便本地调试塞一个自己的 STUN；
+        /// 两者不冲突，`IceServers` 是个列表。
+        /// </summary>
+        private PeerConnectionConfig BuildConfig(List<IceServer> fromSignaling)
+        {
+            var cfg = BuildConfig();
+            if (fromSignaling != null)
+                foreach (var s in fromSignaling) cfg.IceServers.Add(s);
+            return cfg;
+        }
+
         public override bool StartConnection(bool server)
         {
             // 返回值语义是「没有阻塞项」，不是「已连上」（契约 3.5）。
@@ -481,6 +644,14 @@ namespace DataChannelUnity.Example
             return StartClient();
         }
 
+        /// <summary>
+        /// 起 server：连信令并建房（#128）。
+        ///
+        /// **Started 仍然立刻入队，不等 room-created。** server 侧的 Started 语义是「开始
+        /// 接受连接」（契约 3.5：返回值是「没有阻塞项」，不是「已连上」），而这时确实没有
+        /// 阻塞项 —— 房间码晚几十毫秒到，期间也没有 client 能来。若信令连不上，会经
+        /// OnSignalingFailed 如实报 Stopped。
+        /// </summary>
         private bool StartServer()
         {
             if (_serverStartRequested) return false; // 幂等（契约 3.5）
@@ -488,8 +659,49 @@ namespace DataChannelUnity.Example
             // 同步置位，**先于**事件投递 —— 见 _serverStartRequested 的注释。
             _serverStartRequested = true;
             _pendingServerState.Enqueue(LocalConnectionState.Starting);
-            // server 侧没有要等的东西：它只是开始接受连接。Started 立刻入队。
+
+            if (!EnsureSignaling(joinCode: null)) // null = 建房
+            {
+                _serverStartRequested = false;
+                _pendingServerState.Enqueue(LocalConnectionState.Stopped);
+                return false;
+            }
+
             _pendingServerState.Enqueue(LocalConnectionState.Started);
+            return true;
+        }
+
+        /// <summary>
+        /// 连信令。<paramref name="joinCode"/> 为 null 表示建房（host），否则进房（client）。
+        /// 已连上时直接复用 —— host 模式下 server 与 client 共用**同一条**信令连接。
+        /// </summary>
+        private bool EnsureSignaling(string joinCode)
+        {
+            if (_signaling != null) return true;
+
+            string url;
+            try
+            {
+                url = SignalingConfig.Load().signalingUrl;
+            }
+            catch (Exception e)
+            {
+                // 缺配置就响亮失败（CONTRIBUTING 的「让缺失变成失败」）—— 不给默认地址。
+                Debug.LogError($"[DataChannelTransport] 读不到信令配置，无法起连接：{e.Message}");
+                return false;
+            }
+
+            _signaling = new SignalingClient();
+            _signaling.RoomCreated += OnSignalingRoomCreated;
+            _signaling.Joined += OnSignalingJoined;
+            _signaling.DescriptionReceived += OnSignalingDescription;
+            _signaling.CandidateReceived += OnSignalingCandidate;
+            _signaling.PeerLeft += OnSignalingPeerLeft;
+            _signaling.RoomClosed += OnSignalingRoomClosed;
+            _signaling.Failed += OnSignalingFailed;
+
+            if (joinCode == null) _signaling.ConnectAndCreateRoom(url);
+            else _signaling.ConnectAndJoinRoom(url, joinCode);
             return true;
         }
 
@@ -507,17 +719,29 @@ namespace DataChannelUnity.Example
         private bool StartClient()
         {
             if (_clientPeer != null) return false; // 幂等，且不看事件缓存的 _clientState
-            if (!_serverStartRequested)
-            {
-                // 第二步（两个进程 + wss 信令）才需要「client 先于 server」的路径。
-                // 这一版明确只支持 host，缺 server 时响亮失败而不是静默连不上。
-                Debug.LogError("[DataChannelTransport] 这一版只支持单进程 host：请先起 server。" +
-                               "两个进程的路径要等 #121 的信令服务器。");
-                return false;
-            }
 
             _pendingClientState.Enqueue(LocalConnectionState.Starting);
 
+            // **两条路（#120 / #128）**：
+            //
+            // - 本地有 server 在跑 → host 模式，本地 client 走**进程内 loopback**。#120 定
+            //   了保留真 loopback PC：短路能省的量算出来只有约 24 KB/s 过 DTLS，不值；而
+            //   loopback 与远端走同一条代码路径，正是这个 example 的主要价值。
+            //   loopback **不过 wss** —— 让它绕一趟服务器毫无意义，服务端还得转给自己。
+            // - 本地没有 server → 纯 client，走 wss 进房。
+            if (_serverStartRequested) return StartLocalLoopbackClient();
+            return StartRemoteClient();
+        }
+
+        /// <summary>
+        /// host 模式的本地 client：进程内 loopback，两个 PeerConnection 直接对接。
+        ///
+        /// 契约 4.4 要求它走**真 loopback**：必须占一个正常的 connectionId 并走完整的
+        /// Started 流程，否则要伪造 remote 连接事件，且 GetConnectionState /
+        /// GetConnectionAddress 都得为它开分支。
+        /// </summary>
+        private bool StartLocalLoopbackClient()
+        {
             var connectionId = _nextConnectionId++;
             var cfg = BuildConfig();
 
@@ -537,22 +761,7 @@ namespace DataChannelUnity.Example
 
             // server 侧被动接收两条通道。label 决定它是哪一档 —— 这也是选两条通道
             // 而非单通道复用的好处：映射是恒等的，不用自己写头。
-            serverSide.Pc.DataChannelReceived += dc =>
-            {
-                if (dc.Label == UnreliableLabel)
-                {
-                    serverSide.Unreliable = dc;
-                    WireChannel(serverSide, dc, Channel.Unreliable, asServer: true);
-                }
-                else
-                {
-                    serverSide.Reliable = dc;
-                    WireChannel(serverSide, dc, Channel.Reliable, asServer: true);
-                }
-                // 被动接到的通道可能**已经**是 open 的（Opened 事件可能早于我们订阅），
-                // 所以这里补判一次，否则 Started 永远不会上报。
-                OnPeerChannelOpened(serverSide, asServer: true);
-            };
+            serverSide.Pc.DataChannelReceived += dc => AttachReceivedChannel(serverSide, dc);
 
             // client 侧主动开两条。#116 已查证第二条只开新 SCTP 流、不触发重新协商，
             // 所以两条只需一次 offer/answer。
@@ -564,6 +773,228 @@ namespace DataChannelUnity.Example
             return true;
         }
 
+        /// <summary>
+        /// 纯 client：经 wss 进房（#128）。
+        ///
+        /// **这里只连信令，不建 PeerConnection** —— PC 要等 `joined` 到达，因为那条消息
+        /// 才带来两样必需的东西：host 的 peerId（发 offer 得知道发给谁）与服务器签发的
+        /// iceServers（#117 的时限 TURN 凭据）。建完 PC 之后 client 当 offerer（#116）。
+        /// </summary>
+        private bool StartRemoteClient()
+        {
+            if (string.IsNullOrWhiteSpace(_joinRoomCode))
+            {
+                // 响亮失败，不静默连不上（CONTRIBUTING 的「让缺失变成失败」）。
+                Debug.LogError("[DataChannelTransport] 要进房必须先给房间码：" +
+                               "在 Inspector 填 _joinRoomCode，或运行时调 SetJoinRoomCode()。");
+                _pendingClientState.Enqueue(LocalConnectionState.Stopped);
+                return false;
+            }
+
+            if (!EnsureSignaling(_joinRoomCode.Trim()))
+            {
+                _pendingClientState.Enqueue(LocalConnectionState.Stopped);
+                return false;
+            }
+            return true;
+        }
+        #endregion
+
+        #region Signaling handlers
+
+        /// <summary>host：房间建好了。房间码这时才可读 —— 房间 UI 要显示它。</summary>
+        private void OnSignalingRoomCreated()
+        {
+            Debug.Log($"[DataChannelTransport] 房间已建立：{_signaling.RoomCode}（把这个码给对手）");
+        }
+
+        /// <summary>
+        /// client：进房成功。**现在才建 PC 并当 offerer**（#116：client 是 offerer）。
+        /// </summary>
+        private void OnSignalingJoined()
+        {
+            var hostPeerId = _signaling.HostPeerId;
+            if (string.IsNullOrEmpty(hostPeerId))
+            {
+                Debug.LogError("[DataChannelTransport] joined 没带 hostPeerId，无处发 offer。");
+                _pendingClientState.Enqueue(LocalConnectionState.Stopped);
+                return;
+            }
+
+            // 纯 client 只有一条连接。它在自己眼里的 connectionId 不来自服务器 ——
+            // 用固定的 LocalClientConnectionId：client 侧的入站事件走 _inboundToClient，
+            // FishNet 的 client 面不看 connectionId（契约 3.3 只有 server 侧用它）。
+            var peer = new Peer
+            {
+                ConnectionId = LocalClientConnectionId,
+                Pc = new PeerConnection(BuildConfig(_signaling.IceServers)),
+            };
+            _clientPeer = peer;
+            _connectionIdToPeerId[LocalClientConnectionId] = hostPeerId;
+            _peerIdToConnectionId[hostPeerId] = LocalClientConnectionId;
+
+            // 出站信令：本地生成的 description / candidate 发给 host。
+            peer.Pc.LocalDescriptionGenerated += (sdp, type) => _signaling.SendDescription(hostPeerId, sdp, type);
+            peer.Pc.LocalCandidateGenerated += (cand, mid) => _signaling.SendCandidate(hostPeerId, cand, mid);
+
+            // 当 offerer：建两条通道，这会触发 LocalDescriptionGenerated 发出 offer。
+            // 两条只需一次 offer/answer —— #116 已查证第二条只开新 SCTP 流。
+            peer.Reliable = peer.Pc.CreateDataChannel(ReliableLabel, ReliableInit);
+            WireChannel(peer, peer.Reliable, Channel.Reliable, asServer: false);
+            peer.Unreliable = peer.Pc.CreateDataChannel(UnreliableLabel, UnreliableInit);
+            WireChannel(peer, peer.Unreliable, Channel.Unreliable, asServer: false);
+
+            Debug.Log($"[DataChannelTransport] 已进房 {_signaling.RoomCode}，向 host {hostPeerId} 发 offer");
+        }
+
+        /// <summary>
+        /// 收到 description。
+        ///
+        /// ## host 侧：这是「有新 client 来了」的**唯一**信号
+        ///
+        /// 服务端**不通知 host 有人进房** —— `join-room` 只回 `joined` 给进房的那个
+        /// （server.py:139-153），没有 peer-joined 这种消息。所以 host 第一次知道某个
+        /// client 存在，就是收到它的 offer 那一刻。这恰好是 #120 定的「信令出现即建行」，
+        /// 也与 #116 让 client 当 offerer 对上。
+        /// </summary>
+        private void OnSignalingDescription(string from, string sdp, string sdpType)
+        {
+            if (string.IsNullOrEmpty(from) || string.IsNullOrEmpty(sdp)) return;
+
+            // client 侧：这是 host 的 answer。
+            if (_clientPeer != null && _connectionIdToPeerId.TryGetValue(LocalClientConnectionId, out var hostId)
+                && from == hostId)
+            {
+                _clientPeer.Pc.SetRemoteDescription(sdp, sdpType);
+                return;
+            }
+
+            if (!_serverStartRequested) return; // 不是 host，也不是给我们的
+
+            // host 侧：认识的 peer → 直接喂给它的 PC（重发的 offer 等）。
+            if (_peerIdToConnectionId.TryGetValue(from, out var existingId)
+                && _serverPeers.TryGetValue(existingId, out var existing))
+            {
+                existing.Pc.SetRemoteDescription(sdp, sdpType);
+                return;
+            }
+
+            // host 侧：陌生 peer = 新 client。**满员就在这里拦**（#120：上限归房间层）。
+            // _serverPeers 含 host 自己的本地 loopback client，所以它天然算在人数里。
+            if (_serverPeers.Count >= _maximumClients)
+            {
+                _signaling.SendReject(from, "room-full");
+                Debug.Log($"[DataChannelTransport] 房间已满（{_serverPeers.Count}/{_maximumClients}），拒绝 {from}");
+                return;
+            }
+
+            var connectionId = _nextConnectionId++;
+            var peer = new Peer
+            {
+                ConnectionId = connectionId,
+                Pc = new PeerConnection(BuildConfig(_signaling.IceServers)),
+            };
+            _serverPeers[connectionId] = peer;
+            _peerIdToConnectionId[from] = connectionId;
+            _connectionIdToPeerId[connectionId] = from;
+
+            peer.Pc.LocalDescriptionGenerated += (s, t) => _signaling.SendDescription(from, s, t);
+            peer.Pc.LocalCandidateGenerated += (c, m) => _signaling.SendCandidate(from, c, m);
+            // host 是 answerer：被动接两条通道，不自己建。
+            peer.Pc.DataChannelReceived += dc => AttachReceivedChannel(peer, dc);
+
+            // 喂 offer —— 这会触发 answer 生成并经上面的订阅发回去。
+            peer.Pc.SetRemoteDescription(sdp, sdpType);
+            Debug.Log($"[DataChannelTransport] 新 client {from} → connectionId {connectionId}，已回 answer");
+        }
+
+        /// <summary>
+        /// 收到 candidate。**必然晚于该 peer 的 description** —— 服务端一个连接一个协程
+        /// 保住 per-sender FIFO，我们这侧一条接收循环 + 主线程单点排空保住它。所以这里
+        /// 不需要自己缓存乱序到达的 candidate。
+        /// </summary>
+        private void OnSignalingCandidate(string from, string candidate, string mid)
+        {
+            if (string.IsNullOrEmpty(from) || string.IsNullOrEmpty(candidate)) return;
+
+            if (_clientPeer != null && _connectionIdToPeerId.TryGetValue(LocalClientConnectionId, out var hostId)
+                && from == hostId)
+            {
+                _clientPeer.Pc.AddRemoteCandidate(candidate, mid);
+                return;
+            }
+
+            if (_peerIdToConnectionId.TryGetValue(from, out var id)
+                && _serverPeers.TryGetValue(id, out var peer))
+            {
+                peer.Pc.AddRemoteCandidate(candidate, mid);
+                return;
+            }
+            // 找不到就静默丢：正常的断开竞态里会走到这里（对端刚被清掉，它的 candidate
+            // 还在路上）。报错无从补救，只会刷屏。
+        }
+
+        /// <summary>
+        /// host：某个 client 的**信令**连接断了。
+        ///
+        /// **信令断 ≠ 掉线**（#116）。P2P 若还活着，这一局照常打下去 —— 真正的掉线判据是
+        /// DataChannel 关闭，那条路走 OnPeerChannelClosed。所以这里只清信令侧的映射，
+        /// **不动 _serverPeers、不报 Stopped**。
+        /// </summary>
+        private void OnSignalingPeerLeft(string peerId)
+        {
+            if (string.IsNullOrEmpty(peerId)) return;
+            if (_peerIdToConnectionId.TryGetValue(peerId, out var id))
+            {
+                _peerIdToConnectionId.Remove(peerId);
+                _connectionIdToPeerId.Remove(id);
+                Debug.Log($"[DataChannelTransport] client {peerId}（connectionId {id}）的信令断了。" +
+                          "P2P 若仍连通则游戏继续 —— 掉线以 DataChannel 关闭为准。");
+            }
+        }
+
+        /// <summary>
+        /// client：房间没了（host 走了）。FishNet 4.7.2 **没有 host migration**（#113 的
+        /// Out of scope 已查证），局面全在旧 server 的物理世界里，所以这一局到此为止。
+        /// 停掉本地 client；具体的收场形态（回主菜单还是留个终局画面）归 #134。
+        /// </summary>
+        private void OnSignalingRoomClosed(string reason)
+        {
+            Debug.LogWarning($"[DataChannelTransport] 房间已关闭（{reason}）。FishNet 没有 host migration，这一局结束。");
+            StopConnection(false);
+        }
+
+        private void OnSignalingFailed(string code, string message)
+        {
+            Debug.LogError($"[DataChannelTransport] 信令失败 [{code}]：{message}");
+
+            // 启动过程中失败必须如实报 Stopped，否则 FishNet 永远停在 Starting ——
+            // 那是「静默连不上」，正是要避免的形态。
+            if (_clientPeer == null && _clientState != LocalConnectionState.Stopped)
+                _pendingClientState.Enqueue(LocalConnectionState.Stopped);
+        }
+
+        private void ForgetSignalingMapping(int connectionId)
+        {
+            if (_connectionIdToPeerId.TryGetValue(connectionId, out var peerId))
+            {
+                _connectionIdToPeerId.Remove(connectionId);
+                _peerIdToConnectionId.Remove(peerId);
+            }
+        }
+
+        /// <summary>
+        /// 纯 client 侧那条连接的 connectionId。
+        ///
+        /// 取 0 而不是负数：`TryGetConnectionPath` 用**负数**表示「本地 client 那条」
+        /// （见它的注释），所以这里必须是非负的，否则两个约定会撞。而 client 侧的
+        /// connectionId 不会与 server 侧的表冲突 —— 纯 client 的 _serverPeers 是空的。
+        /// </summary>
+        private const int LocalClientConnectionId = 0;
+        #endregion
+
+        #region Stop
+
         public override bool StopConnection(bool server)
         {
             if (server)
@@ -574,6 +1005,7 @@ namespace DataChannelUnity.Example
                 foreach (var kv in _serverPeers) kv.Value.Dispose();
                 _serverPeers.Clear();
                 _pendingServerState.Enqueue(LocalConnectionState.Stopped);
+                DisposeSignalingIfIdle();
                 return true;
             }
 
@@ -581,8 +1013,24 @@ namespace DataChannelUnity.Example
             _pendingClientState.Enqueue(LocalConnectionState.Stopping);
             _clientPeer?.Dispose();
             _clientPeer = null;
+            ForgetSignalingMapping(LocalClientConnectionId);
             _pendingClientState.Enqueue(LocalConnectionState.Stopped);
+            DisposeSignalingIfIdle();
             return true;
+        }
+
+        /// <summary>
+        /// server 与 client **共用一条**信令连接（host 模式下两者都在这个 Transport 里），
+        /// 所以只有两边都停了才能拆它。少了这个判断，host 停 client 会把 server 的房间
+        /// 一起断掉 —— 服务端见 host 的 socket 断就销毁房间（server.py:200-210）。
+        /// </summary>
+        private void DisposeSignalingIfIdle()
+        {
+            if (_serverStartRequested || _clientPeer != null) return;
+            _signaling?.Dispose();
+            _signaling = null;
+            _peerIdToConnectionId.Clear();
+            _connectionIdToPeerId.Clear();
         }
 
         /// <summary>
@@ -613,6 +1061,21 @@ namespace DataChannelUnity.Example
             StopConnection(false);
             StopConnection(true);
         }
+
+        /// <summary>
+        /// 排空信令（#128）。
+        ///
+        /// ## 为什么在 Update 而不是 IterateIncoming
+        ///
+        /// 信令必须在 FishNet 开始 iterate **之前**就能推进：client 从 `join-room` 到
+        /// `Started` 之间，FishNet 那侧还停在 Starting，把信令挂在它的 tick 上等于让连接
+        /// 建立依赖一个尚未开始的循环。`Update` 只要组件 enabled 就跑，没有这个耦合。
+        ///
+        /// 排空**必须在主线程**：`SetRemoteDescription` / `AddRemoteCandidate` 都带
+        /// `MainThread.Assert`。而 Drain 是顺序处理、一条不落 —— per-sender FIFO 在那里
+        /// 兑现（见 SignalingClient 的类注释）。
+        /// </summary>
+        private void Update() => _signaling?.Drain();
 
         private void OnDestroy() => Shutdown();
         #endregion
