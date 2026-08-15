@@ -161,6 +161,15 @@ namespace DataChannelUnity.Example
 
             public bool StartedReported;
 
+            /// <summary>
+            /// host 眼里的这条连接是不是它自己那条进程内 loopback（#120）。
+            ///
+            /// 记成一个字段而不是靠「id 为 0」或「第一个连上的」去推：游戏层要靠它把座位 0 认
+            /// 给 host（#132 的预分配分组），而按到达顺序推的那天顺序一变就把远端 client 放进
+            /// host 的座位，且完全静默。
+            /// </summary>
+            public bool IsLoopback;
+
             public void Dispose()
             {
                 Reliable?.Dispose();
@@ -198,8 +207,38 @@ namespace DataChannelUnity.Example
         private readonly Dictionary<string, int> _peerIdToConnectionId = new Dictionary<string, int>();
         private readonly Dictionary<int, string> _connectionIdToPeerId = new Dictionary<int, string>();
 
-        /// <summary>host 侧建房后由服务器带回的 6 位房间码；client 侧是自己填的那个。</summary>
-        public string RoomCode => _signaling?.RoomCode;
+        /// <summary>
+        /// host 侧建房后由服务器带回的 6 位房间码；client 侧是自己填的那个。
+        ///
+        /// client 侧刻意回退到 `_joinRoomCode`：#134 的令牌是**房间级**的，存取都按房间码作
+        /// 键，而客户端要在**发 offer 之前**就取出令牌 —— 那时 `joined` 还没回来，
+        /// `_signaling.RoomCode` 是 null。
+        /// </summary>
+        public string RoomCode
+        {
+            get
+            {
+                var fromSignaling = _signaling?.RoomCode;
+                if (!string.IsNullOrEmpty(fromSignaling)) return fromSignaling;
+                return string.IsNullOrWhiteSpace(_joinRoomCode) ? null : _joinRoomCode.Trim();
+            }
+        }
+
+        /// <summary>
+        /// 游戏层的座位权威（#134），可为 null。
+        ///
+        /// **Transport 只向它问两件事**：留了几个座、手里这个令牌能不能取回一个。留座的状态机、
+        /// 令牌怎么签怎么比，全在游戏层 —— 那是刻意的，见 <see cref="ISeatAuthority"/> 的说明：
+        /// 让 Transport 自己维持「等重连」态会命中 #133 的推翻条件。
+        /// </summary>
+        public ISeatAuthority SeatAuthority { get; set; }
+
+        /// <summary>
+        /// 这个 connectionId 是不是 host 自己那条进程内 loopback（#120）。游戏层靠它把座位 0
+        /// 认给 host，而不是靠到达顺序去猜。
+        /// </summary>
+        public bool IsLoopbackConnection(int connectionId) =>
+            _serverPeers.TryGetValue(connectionId, out var peer) && peer.IsLoopback;
 
         /// <summary>信令是否已连上（诊断 HUD 用）。</summary>
         public bool SignalingConnected => _signaling != null && _signaling.IsConnected;
@@ -906,7 +945,12 @@ namespace DataChannelUnity.Example
 
             // 两个 PeerConnection：serverSide 是 host 眼里的这条 client 连接，
             // clientSide 是本地 client 自己那条。
-            var serverSide = new Peer { ConnectionId = connectionId, Pc = new PeerConnection(cfg) };
+            var serverSide = new Peer
+            {
+                ConnectionId = connectionId,
+                Pc = new PeerConnection(cfg),
+                IsLoopback = true,
+            };
             var clientSide = new Peer { ConnectionId = connectionId, Pc = new PeerConnection(cfg) };
 
             _serverPeers[connectionId] = serverSide;
@@ -993,7 +1037,12 @@ namespace DataChannelUnity.Example
             _peerIdToConnectionId[hostPeerId] = LocalClientConnectionId;
 
             // 出站信令：本地生成的 description / candidate 发给 host。
-            peer.Pc.LocalDescriptionGenerated += (sdp, type) => _signaling.SendDescription(hostPeerId, sdp, type);
+            //
+            // offer 上搭座位令牌（#134）。**在生成的那一刻问游戏层**而不是提前抄一份：这条路径
+            // 在重连时是客户端最早能动的地方，而令牌存在 PlayerPrefs 里、按房间码作键。没有
+            // 令牌（第一次进这个房间）就是 null，host 那侧会给一个新的。
+            peer.Pc.LocalDescriptionGenerated += (sdp, type) =>
+                _signaling.SendDescription(hostPeerId, sdp, type, SeatAuthority?.LocalSeatToken(RoomCode));
             peer.Pc.LocalCandidateGenerated += (cand, mid) => _signaling.SendCandidate(hostPeerId, cand, mid);
 
             // 当 offerer：建两条通道，这会触发 LocalDescriptionGenerated 发出 offer。
@@ -1016,7 +1065,7 @@ namespace DataChannelUnity.Example
         /// client 存在，就是收到它的 offer 那一刻。这恰好是 #120 定的「信令出现即建行」，
         /// 也与 #116 让 client 当 offerer 对上。
         /// </summary>
-        private void OnSignalingDescription(string from, string sdp, string sdpType)
+        private void OnSignalingDescription(string from, string sdp, string sdpType, string seatToken)
         {
             if (string.IsNullOrEmpty(from) || string.IsNullOrEmpty(sdp)) return;
 
@@ -1040,14 +1089,34 @@ namespace DataChannelUnity.Example
 
             // host 侧：陌生 peer = 新 client。**满员就在这里拦**（#120：上限归房间层）。
             // _serverPeers 含 host 自己的本地 loopback client，所以它天然算在人数里。
-            if (_serverPeers.Count >= _maximumClients)
+            //
+            // **留座的那几个也要算进来**（#134 事实 4）：掉线时 _serverPeers 那行被删（#120 的
+            // 清理），人数从 2 掉回 1，于是这道拦截当场放行 —— 座位在传输层根本没被留住。
+            // 加上游戏层报的留座数才拦得住。
+            var heldSeats = SeatAuthority?.HeldSeatCount ?? 0;
+            var occupied = _serverPeers.Count + heldSeats;
+
+            // 但拿着有效令牌回来的那一个必须放行，否则留座就只是把人挡在门外。令牌对本类是
+            // 不透明字符串 —— 认不认由游戏层答。
+            var reclaims = !string.IsNullOrEmpty(seatToken)
+                           && (SeatAuthority?.TokenReclaimsSeat(seatToken) ?? false);
+
+            if (occupied >= _maximumClients && !reclaims)
             {
-                _signaling.SendReject(from, "room-full");
-                Debug.Log($"[DataChannelTransport] 房间已满（{_serverPeers.Count}/{_maximumClients}），拒绝 {from}");
+                // 两种码分开，因为对玩家是不同的信息：「满了」是别来了，「有人掉线正在等」是
+                // 等一会儿再试（#134）。`reject` 是中继消息，服务端零改动。
+                var reason = heldSeats > 0 ? "seat-held" : "room-full";
+                _signaling.SendReject(from, reason);
+                Debug.Log($"[DataChannelTransport] 拒绝 {from}（{reason}）：" +
+                          $"活连接 {_serverPeers.Count} + 留座 {heldSeats} >= 上限 {_maximumClients}");
                 return;
             }
 
             var connectionId = _nextConnectionId++;
+
+            // 令牌在**分配了 connectionId 之后、报 Started 之前**转上去，游戏层才能在座位落定
+            // 的那一刻查到它。空令牌也照常走这条路，游戏层自己判。
+            SeatAuthority?.RemoteTokenPresented(connectionId, seatToken);
             var peer = new Peer
             {
                 ConnectionId = connectionId,
@@ -1125,6 +1194,14 @@ namespace DataChannelUnity.Example
 
         private void OnSignalingFailed(string code, string message)
         {
+            // seat-held 与 room-full 是**两种不同的信息**（#134）：前者意味着有人掉线、座位正
+            // 留着，等一会儿再试就能进；后者是别来了。所以分开说，而不是都落到「被拒绝」。
+            if (code == "rejected" && message == "seat-held")
+            {
+                Debug.LogWarning("[DataChannelTransport] 房间里有座位正留给一个掉线的玩家，" +
+                                 "等一会儿（最多 30 秒）再用同一个码试。");
+            }
+
             Debug.LogError($"[DataChannelTransport] 信令失败 [{code}]：{message}");
 
             // 启动过程中失败必须如实报 Stopped，否则 FishNet 永远停在 Starting ——

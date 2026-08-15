@@ -36,6 +36,7 @@ namespace DataChannelUnity.EditorTools
             CreateNetworking();
             BilliardsRack rack = CreateRack();
             CreateBalls(rack);
+            CreateGame();
 
             // Saved *before* the SceneIds are assigned, and this order is load-bearing. A scene created
             // by NewScene has no name until it is written to disk, and NetworkObject's OnValidate zeroes
@@ -105,21 +106,36 @@ namespace DataChannelUnity.EditorTools
         /// here — an unlisted scene fails as "scene not loaded", which reads like a broken test rather
         /// than a missing entry.
         /// </summary>
+        /// <remarks>
+        /// Placed at <b>index 0</b>, not merely present. A player launches whatever scene is first, and
+        /// this one was appended at index 2 behind the CharacterController demo — so a packaged build
+        /// started in the wrong example and never reached the billiards table at all. That is invisible
+        /// in the Editor, where you open the scene yourself, and it blocks the two-process acceptance
+        /// run for #138 rather than merely inconveniencing it.
+        ///
+        /// The reorder is deliberate rather than incidental: #113's destination is the billiards
+        /// example, so it is the one a build should come up in.
+        /// </remarks>
         private static void RegisterInBuildSettings()
         {
-            EditorBuildSettingsScene[] existing = EditorBuildSettings.scenes;
-            foreach (EditorBuildSettingsScene entry in existing)
+            var scenes = new System.Collections.Generic.List<EditorBuildSettingsScene>(
+                EditorBuildSettings.scenes);
+
+            int at = scenes.FindIndex(s => s.path == ScenePath);
+            if (at == 0 && scenes[0].enabled)
             {
-                if (entry.path == ScenePath)
-                    return;
+                Debug.Log($"[Billiards] Already first in build settings: {ScenePath}");
+                return;
             }
 
-            var updated = new EditorBuildSettingsScene[existing.Length + 1];
-            System.Array.Copy(existing, updated, existing.Length);
-            updated[existing.Length] = new EditorBuildSettingsScene(ScenePath, true);
-            EditorBuildSettings.scenes = updated;
+            if (at >= 0)
+                scenes.RemoveAt(at);
 
-            Debug.Log($"[Billiards] Added to build settings: {ScenePath}");
+            scenes.Insert(0, new EditorBuildSettingsScene(ScenePath, true));
+            EditorBuildSettings.scenes = scenes.ToArray();
+
+            Debug.Log($"[Billiards] Build settings: {ScenePath} moved to index 0 " +
+                      $"(was {(at < 0 ? "absent" : "index " + at)}); a player now launches into it.");
         }
 
         /// <summary>
@@ -135,6 +151,12 @@ namespace DataChannelUnity.EditorTools
 
             // Measurement lives on the same object so it can find the transport without wiring.
             go.AddComponent<OutboundByteMeter>();
+
+            // Room code entry. Not game UI — the code is allocated by the signalling server at
+            // runtime, so the joining end cannot have it baked into a build and a two-process run
+            // needs somewhere to type it (#128). Without this the acceptance line for #138 is
+            // unreachable, whatever the turn machine does.
+            go.AddComponent<RoomPanel>();
 
             var timeManager = go.AddComponent<FishNet.Managing.Timing.TimeManager>();
             var so = new SerializedObject(timeManager);
@@ -231,6 +253,33 @@ namespace DataChannelUnity.EditorTools
         /// Ball on ball is nearly elastic (real balls return ~0.95), which is what makes a rack
         /// scatter instead of absorbing the cue ball and moving off as one lump.
         /// </summary>
+        /// <remarks>
+        /// <para><c>bounceCombine</c> must not be <c>Maximum</c>, and this is the one setting here
+        /// that breaks the game rather than merely looking wrong. PhysX resolves a contact by taking
+        /// the higher-priority of the two colliders' combine modes, and <c>Maximum</c> is the highest
+        /// — so it overrides the cloth and every ball-versus-slate contact uses the ball's 0.95
+        /// instead of the surface's 0.02.</para>
+        ///
+        /// <para>Measured, at the 33 ms step physics runs on here: dropped from 5 cm a ball rebounded
+        /// to <b>11.2 cm</b> — an effective restitution of <b>1.50</b>, so the bounce gains energy
+        /// and never decays. A ball that leaves the cloth at all then bounces forever, #131's stop
+        /// criterion never becomes true, and <i>every</i> shot runs to the 15 s backstop instead of
+        /// settling in about 4. With <c>Minimum</c> the same drop rebounds to 1.1 cm (e ≈ 0.47) and a
+        /// shot along the cloth settles in 3.4 s.</para>
+        ///
+        /// <para>#137 established this and fixed it — but it edited the generated
+        /// <c>.physicMaterial</c> asset, not this method, and <see cref="SaveMaterial"/> deletes and
+        /// recreates that asset on every build. So the fix survived exactly until the next scene
+        /// rebuild, which is how #138 hit it again. <b>These values are the source of truth; the
+        /// assets are output.</b> Hand-editing one is erased silently and without a diff to notice.</para>
+        ///
+        /// <para><b>Reading the asset needs care: the serialized form swaps two of the names.</b>
+        /// Measured by writing each mode out and reading the YAML back — runtime <c>Multiply</c>
+        /// serializes as <c>2</c> and runtime <c>Minimum</c> as <c>1</c>, while <c>Average</c> and
+        /// <c>Maximum</c> keep 0 and 3. So <c>bounceCombine: 1</c> in a <c>.physicMaterial</c> is
+        /// <c>Minimum</c>, not the <c>Multiply</c> its C# enum value suggests. Comparing this method
+        /// against an asset by number is how a reader concludes they disagree when they do not.</para>
+        /// </remarks>
         private static PhysicMaterial CreateBallMaterial()
         {
             return SaveMaterial(new PhysicMaterial
@@ -238,7 +287,7 @@ namespace DataChannelUnity.EditorTools
                 bounciness = 0.95f,
                 dynamicFriction = 0.2f,
                 staticFriction = 0.2f,
-                bounceCombine = PhysicMaterialCombine.Maximum,
+                bounceCombine = PhysicMaterialCombine.Minimum,
                 frictionCombine = PhysicMaterialCombine.Multiply
             }, "BilliardsBall");
         }
@@ -381,9 +430,38 @@ namespace DataChannelUnity.EditorTools
         {
             var go = new GameObject("Billiards");
             BilliardsRack rack = go.AddComponent<BilliardsRack>();
+
             // Verification scaffolding for #136, built in so a rebuild does not silently drop it.
-            go.AddComponent<BilliardsBreakProbe>();
+            //
+            // Its automatic break is switched off now that #138 owns the table. Two reasons, and the
+            // second is the one that bit: a stray break half a second into play would scatter a rack
+            // the turn machine is about to set up, and the probe's own counters accumulate from Awake
+            // and never reset — so a report read after its break *and* a real shot describes the sum
+            // of both, which #137 misread once as a regression.
+            var probe = go.AddComponent<BilliardsBreakProbe>();
+            SetPrivateBool(probe, "_breakOnStart", false);
+
             return rack;
+        }
+
+        /// <summary>
+        /// The turn machine (#138), on its own NetworkObject.
+        ///
+        /// Separate from the rack because the two have different lifetimes and different owners: the
+        /// rack is local host physics with no network identity at all, while this one is the room-level
+        /// object that must outlive every connection in the room — #134's seat holds cannot live on a
+        /// NetworkConnection, because FishNet destroys that the moment `Stopped` arrives.
+        ///
+        /// It needs a SceneId like the balls do, and gets one from <see cref="AssignSceneIds"/>: a
+        /// NetworkObject without one is skipped silently (ServerObjects.cs:471), which here would mean
+        /// no state RPC and no seats — a table that racks up and then never takes a shot.
+        /// </summary>
+        private static void CreateGame()
+        {
+            var go = new GameObject("Billiards Game");
+            go.AddComponent<FishNet.Object.NetworkObject>();
+            go.AddComponent<BilliardsGame>();
+            Debug.Log("[Billiards] Turn machine (BilliardsGame) built on its own NetworkObject.");
         }
 
         /// <summary>
@@ -409,17 +487,29 @@ namespace DataChannelUnity.EditorTools
                     ? BilliardsTable.HeadSpot
                     : BilliardsTable.RackPosition(number);
 
-                // Mirror what BilliardsBall.ConfigureBody applies at runtime. Without this the
-                // serialised scene holds Unity's defaults (discrete CCD, no drag) and anyone
-                // inspecting it sees a configuration the game does not actually run with.
+                // Mirror what BilliardsBall.ConfigureBody applies at runtime, so that anyone
+                // inspecting the saved scene sees the configuration the game actually runs with.
+                //
+                // **Two of ConfigureBody's settings cannot be mirrored, and they are not listed
+                // below on purpose.** `maxAngularVelocity` and `sleepThreshold` have no serialised
+                // backing on Rigidbody in 2022.3 — verified by asking SerializedObject for them
+                // (both absent) and by dumping the component to JSON (fourteen fields, neither
+                // present). Assigning them here compiles, runs, and is discarded on save, so a line
+                // for them would read as configuration while doing nothing. They exist only at
+                // runtime, which is where ConfigureBody sets them.
                 var body = go.AddComponent<Rigidbody>();
                 body.useGravity = true;
                 body.constraints = RigidbodyConstraints.None;
                 body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
                 body.interpolation = RigidbodyInterpolation.Interpolate;
-                body.drag = 0.12f;
-                body.angularDrag = 1.4f;
-                body.sleepThreshold = 0.0001f;
+
+                // Zero because #137 replaced the exponential drag with a constant deceleration
+                // applied by hand: drag/angularDrag are linear dampers and were only ever standing
+                // in for rolling resistance. They were left at 0.12/1.4 when that landed — the
+                // runtime overwrites them, so the game was right while the saved scene described a
+                // configuration it never runs with.
+                body.drag = 0f;
+                body.angularDrag = 0f;
 
                 go.GetComponent<Collider>().sharedMaterial = _ballMaterial ??= CreateBallMaterial();
                 BilliardsBall ball = go.AddComponent<BilliardsBall>();
@@ -575,6 +665,20 @@ namespace DataChannelUnity.EditorTools
             }
 
             p.enumValueIndex = index;
+        }
+
+        private static void SetPrivateBool(Object target, string field, bool value)
+        {
+            var so = new SerializedObject(target);
+            SerializedProperty p = so.FindProperty(field);
+            if (p == null)
+            {
+                Debug.LogError($"[Billiards] Field {field} not found on {target.GetType().Name}");
+                return;
+            }
+
+            p.boolValue = value;
+            so.ApplyModifiedPropertiesWithoutUndo();
         }
 
         private static void SetPrivateInt(Object target, string field, int value)

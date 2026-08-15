@@ -66,6 +66,18 @@ namespace DataChannelUnity.Example
         private float _shotElapsed;
         private bool _shotInFlight;
 
+        /// <summary>
+        /// #132's first observable: the first object ball the cue ball touched this shot, or -1 for a
+        /// whiff. Recorded here rather than in the rules layer because the only source is a PhysX
+        /// callback, and "first" needs the shot boundary that this class already owns.
+        /// </summary>
+        public int FirstContact { get; private set; } = -1;
+
+        private readonly List<int> _pocketedThisShot = new();
+
+        /// <summary>#132's second observable, for the shot that just finished: which balls dropped.</summary>
+        public IReadOnlyList<int> PocketedThisShot => _pocketedThisShot;
+
         /// <summary>Raised on the host when the table settles. Argument is the shot's duration.</summary>
         public event Action<float> ShotSettled;
 
@@ -92,6 +104,21 @@ namespace DataChannelUnity.Example
 
             if (_balls.Count != 16)
                 Debug.LogWarning($"[Billiards] Registered {_balls.Count} balls; expected 16.");
+        }
+
+        /// <summary>
+        /// Records the cue ball's first contact of the shot. Subscribed on every ball rather than
+        /// only the cue ball, because a contact is reported to both bodies and PhysX does not
+        /// guarantee which side raises it first.
+        /// </summary>
+        private void OnBallContact(BilliardsBall a, BilliardsBall b)
+        {
+            if (!_shotInFlight || FirstContact >= 0)
+                return;
+
+            BilliardsBall other = a.IsCueBall ? b : b.IsCueBall ? a : null;
+            if (other != null)
+                FirstContact = other.Number;
         }
 
         /// <summary>
@@ -156,8 +183,18 @@ namespace DataChannelUnity.Example
                 return;
 
             _balls.Add(ball);
+            ball.BallContact += OnBallContact;
             if (ball.IsCueBall)
                 CueBall = ball;
+        }
+
+        private void OnDestroy()
+        {
+            foreach (BilliardsBall ball in _balls)
+            {
+                if (ball != null)
+                    ball.BallContact -= OnBallContact;
+            }
         }
 
         /// <summary>Fixed rack plus fixed cue position. Deterministic by construction (#132).</summary>
@@ -174,6 +211,66 @@ namespace DataChannelUnity.Example
             _shotInFlight = false;
             _stillFor = 0f;
             _shotElapsed = 0f;
+            FirstContact = -1;
+            _pocketedThisShot.Clear();
+        }
+
+        /// <summary>
+        /// Returns the cue ball to play at a given spot after a scratch, or moves it for ball in
+        /// hand. The caller is responsible for the spot being legal — <see cref="BilliardsTable"/>
+        /// owns that test, and #132 makes it the same function that clamps a ball back into play.
+        /// </summary>
+        public void PlaceCueBall(Vector2 tablePosition)
+        {
+            if (CueBall == null)
+                return;
+
+            var spot = new Vector3(tablePosition.x, BilliardsTable.BallY, tablePosition.y);
+            if (CueBall.IsPocketed)
+                CueBall.Restore(spot);
+            else
+                CueBall.PlaceAt(spot);
+        }
+
+        /// <summary>Current pocketed set as #135's 16-bit mask. Bit 0 is the cue ball.</summary>
+        public ushort PocketedMask()
+        {
+            ushort mask = 0;
+            foreach (BilliardsBall ball in _balls)
+            {
+                if (ball.IsPocketed)
+                    mask |= (ushort)(1 << ball.Number);
+            }
+
+            return mask;
+        }
+
+        /// <summary>
+        /// Resting positions by ball number, for #135's snapshot. Read from the rigidbody rather
+        /// than the transform: with interpolation on, the transform lags the body by up to a frame,
+        /// and this snapshot is what the next shot is aimed from.
+        /// </summary>
+        public void WritePositions(Vector2[] into)
+        {
+            if (into == null || into.Length < BilliardsRules.BallCount)
+                return;
+
+            foreach (BilliardsBall ball in _balls)
+            {
+                Vector3 p = ball.Body.position;
+                into[ball.Number] = new Vector2(p.x, p.z);
+            }
+        }
+
+        public BilliardsBall Ball(int number)
+        {
+            foreach (BilliardsBall ball in _balls)
+            {
+                if (ball.Number == number)
+                    return ball;
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -194,6 +291,11 @@ namespace DataChannelUnity.Example
                 Debug.LogWarning("[Billiards] Break direction is degenerate; ignoring.");
                 return;
             }
+
+            // Cleared before the strike, not after: the first contact can happen on the very next
+            // physics step, and clearing afterwards would race it.
+            FirstContact = -1;
+            _pocketedThisShot.Clear();
 
             CueBall.Strike(flat.normalized * Mathf.Max(0f, power));
             _shotInFlight = true;
@@ -263,6 +365,8 @@ namespace DataChannelUnity.Example
                     continue;
 
                 ball.Pocket();
+                if (_shotInFlight)
+                    _pocketedThisShot.Add(ball.Number);
                 BallPocketed?.Invoke(ball);
             }
         }

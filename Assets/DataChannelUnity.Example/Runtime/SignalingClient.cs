@@ -67,6 +67,18 @@ namespace DataChannelUnity.Example
             public string mid;          // candidate
             public string reason;       // room-closed
             public string message;      // error
+
+            /// <summary>
+            /// description: 重连时客户端出示的座位令牌（#134）。
+            ///
+            /// **搭在 description 的 payload 里，所以服务端零改动** —— `description` 走
+            /// `relay`，服务端只看信封的 `to` 转发、**从不解析 payload**（#134 事实 5）。
+            /// 换成新增一种消息就要动服务端。
+            ///
+            /// 对本类和 Transport 都是**不透明字符串**：谁签、里面是什么、怎么比，全归游戏层
+            /// （见 <see cref="ISeatAuthority"/>）。
+            /// </summary>
+            public string seatToken;
             public IceServerDto[] iceServers; // room-created, joined
         }
 
@@ -106,7 +118,11 @@ namespace DataChannelUnity.Example
         public event Action Joined;
 
         /// <summary>收到对端的 description。参数：from、sdp、sdpType。</summary>
-        public event Action<string, string, string> DescriptionReceived;
+        /// <summary>
+        /// 收到 description：(from, sdp, sdpType, seatToken)。第四个参数是 #134 的座位令牌，
+        /// 无则为 null；本类只转述，不解析。
+        /// </summary>
+        public event Action<string, string, string, string> DescriptionReceived;
 
         /// <summary>收到对端的 candidate。参数：from、candidate、mid。</summary>
         public event Action<string, string, string> CandidateReceived;
@@ -234,10 +250,18 @@ namespace DataChannelUnity.Example
         /// 发 description。<paramref name="to"/> 是对端 peer id；<c>from</c> **不填** ——
         /// 服务器盖章，自报会被忽略（smoke.py 专门验了这条：故意自报假 from 仍被改回）。
         /// </summary>
-        public void SendDescription(string to, string sdp, string sdpType)
+        /// <param name="seatToken">
+        /// 座位令牌，没有则传 null（#134）。只有 client 侧的 offer 会带它 —— host 的 answer
+        /// 不需要证明自己是谁，它就是房间的权威方。
+        /// </param>
+        public void SendDescription(string to, string sdp, string sdpType, string seatToken = null)
         {
-            SendEnvelope("description", to,
-                "{\"sdp\":" + JsonString(sdp) + ",\"sdpType\":" + JsonString(sdpType) + "}");
+            var payload = "{\"sdp\":" + JsonString(sdp) + ",\"sdpType\":" + JsonString(sdpType);
+            // 没有令牌时**不写这个键**，而不是写 null：服务端从不解析 payload，所以这纯粹是
+            // 为了让抓下来的信令日志里「这条是不是重连」一眼可读。
+            if (!string.IsNullOrEmpty(seatToken))
+                payload += ",\"seatToken\":" + JsonString(seatToken);
+            SendEnvelope("description", to, payload + "}");
         }
 
         /// <summary>发 candidate。<paramref name="mid"/> 可为 null（包的 mid 是可选的）。</summary>
@@ -355,7 +379,7 @@ namespace DataChannelUnity.Example
                         break;
 
                     case "description":
-                        DescriptionReceived?.Invoke(env.from, p.sdp, p.sdpType);
+                        DescriptionReceived?.Invoke(env.from, p.sdp, p.sdpType, p.seatToken);
                         break;
 
                     case "candidate":

@@ -54,9 +54,33 @@ namespace DataChannelUnity.Example
 
         public Vector3 AngularVelocity => Body.angularVelocity;
 
+        /// <summary>
+        /// Raised when this ball touches another. Arguments are (this, other).
+        ///
+        /// Reported per ball rather than watched centrally because PhysX only offers the callback on
+        /// the colliding body — and it is the sole source of #132's first observable, "which ball did
+        /// the cue strike first". Cushions and cloth are filtered out here: they have no
+        /// <see cref="BilliardsBall"/>, so a contact with one raises nothing.
+        /// </summary>
+        public event System.Action<BilliardsBall, BilliardsBall> BallContact;
+
         private void Awake()
         {
             _ = Body;
+        }
+
+        private void OnCollisionEnter(Collision collision)
+        {
+            // Only ball-to-ball matters. The rigidbody test comes first because it is a field read
+            // and it rejects the common case for free: rails and slate are static colliders, so
+            // collision.rigidbody is null for them, and they account for most contacts in a shot.
+            // GetComponent then runs only for the handful that really are ball-to-ball.
+            if (collision.rigidbody == null)
+                return;
+
+            var other = collision.rigidbody.GetComponent<BilliardsBall>();
+            if (other != null)
+                BallContact?.Invoke(this, other);
         }
 
         internal void SetNumber(int number) => _number = number;

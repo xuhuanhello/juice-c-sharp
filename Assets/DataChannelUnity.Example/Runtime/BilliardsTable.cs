@@ -182,6 +182,99 @@ namespace DataChannelUnity.Example
         }
 
         /// <summary>
+        /// Nearest spot to <paramref name="wanted"/> where the cue ball may legally be placed, given
+        /// where the other balls are resting.
+        ///
+        /// This is #132's "snap to the nearest legal position, never refuse" and the containment
+        /// clamp expressed once: an out-of-bounds request and a ball that beat the rails both need
+        /// the same answer, and computing it twice is how the two drift apart.
+        ///
+        /// Three things make a spot illegal, and the third is the one that is easy to miss: the
+        /// playing rectangle, overlap with a ball already on the table, and a pocket notch — since
+        /// the pockets are holes in the surface (#136), a cue ball placed over one falls through and
+        /// the shot is lost before it is taken.
+        /// </summary>
+        /// <param name="wanted">Requested spot, on the table plane.</param>
+        /// <param name="occupied">Resting positions of balls still on the table, cue ball excluded.</param>
+        public static Vector2 NearestLegalCueSpot(Vector2 wanted, System.Collections.Generic.IReadOnlyList<Vector2> occupied)
+        {
+            Vector2 spot = ClampToPlay(wanted);
+
+            // Fixed number of relaxation passes rather than "until nothing overlaps": with sixteen
+            // balls a nudge away from one can push into another, so this converges rather than
+            // solves — and a loop with no bound is a hang in the one place that must always answer.
+            const int passes = 12;
+            const float minGap = BallRadius * 2f + 0.001f;
+
+            for (int pass = 0; pass < passes; pass++)
+            {
+                bool moved = false;
+
+                spot = PushOutOfPockets(spot, ref moved);
+
+                if (occupied != null)
+                {
+                    for (int i = 0; i < occupied.Count; i++)
+                    {
+                        Vector2 delta = spot - occupied[i];
+                        float distance = delta.magnitude;
+                        if (distance >= minGap)
+                            continue;
+
+                        // Exactly coincident gives no direction to push along. Pick one rather than
+                        // dividing by zero — any deterministic choice does, and this keeps the
+                        // result reproducible on both ends of a two-process run.
+                        Vector2 direction = distance < 1e-5f ? Vector2.right : delta / distance;
+                        spot = ClampToPlay(occupied[i] + direction * minGap);
+                        moved = true;
+                    }
+                }
+
+                if (!moved)
+                    break;
+            }
+
+            return spot;
+        }
+
+        /// <summary>Clamps a spot into the playing rectangle. The horizontal half of containment.</summary>
+        public static Vector2 ClampToPlay(Vector2 position) => new Vector2(
+            Mathf.Clamp(position.x, -MaxX, MaxX),
+            Mathf.Clamp(position.y, -MaxZ, MaxZ));
+
+        /// <summary>
+        /// Moves a spot clear of every pocket mouth. Radially rather than by axis, so a spot near a
+        /// corner comes out along the diagonal instead of sliding into the adjacent cushion.
+        /// </summary>
+        private static Vector2 PushOutOfPockets(Vector2 spot, ref bool moved)
+        {
+            // One ball radius of margin past the notch: a ball centred exactly on the lip is
+            // balanced on an edge, and which way it then falls is the solver's business, not a
+            // decision this function should leave open.
+            float keepOut = PocketNotchHalf + BallRadius * 2f;
+
+            foreach (Vector3 pocket in Pockets)
+            {
+                var mouth = new Vector2(pocket.x, pocket.z);
+                Vector2 delta = spot - mouth;
+                float distance = delta.magnitude;
+                if (distance >= keepOut)
+                    continue;
+
+                Vector2 direction = distance < 1e-5f
+                    // A spot dead on the mouth has no direction either; push toward the table
+                    // centre, which is legal for all six pockets.
+                    ? (-mouth).normalized
+                    : delta / distance;
+
+                spot = ClampToPlay(mouth + direction * keepOut);
+                moved = true;
+            }
+
+            return spot;
+        }
+
+        /// <summary>
         /// Where a pocketed ball parks. Off the playing surface, in a fixed row, so the ball
         /// stays spawned and costs zero bytes once it stops (#131 §5).
         /// </summary>
