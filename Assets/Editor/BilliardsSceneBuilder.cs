@@ -158,6 +158,11 @@ namespace DataChannelUnity.EditorTools
             // unreachable, whatever the turn machine does.
             go.AddComponent<RoomPanel>();
 
+            // The machine-judged report (#139). On this object because it reads the transport, the
+            // TimeManager and the byte meter — all three are here — and because it must exist for the
+            // whole run rather than being attached when somebody remembers to.
+            go.AddComponent<BilliardsDeviceReport>();
+
             var timeManager = go.AddComponent<FishNet.Managing.Timing.TimeManager>();
             var so = new SerializedObject(timeManager);
 
@@ -462,6 +467,24 @@ namespace DataChannelUnity.EditorTools
             go.AddComponent<FishNet.Object.NetworkObject>();
             go.AddComponent<BilliardsGame>();
             Debug.Log("[Billiards] Turn machine (BilliardsGame) built on its own NetworkObject.");
+
+            CreateControls();
+        }
+
+        /// <summary>
+        /// The operating layer (#139): gestures on one component, readouts on the other.
+        ///
+        /// Deliberately *not* on the "Billiards Game" NetworkObject. That object is replicated, and
+        /// hanging UI off it would make presentation part of a NetworkObject's identity; these two are
+        /// plain MonoBehaviours that read its public face and never write to it.
+        /// </summary>
+        private static void CreateControls()
+        {
+            var go = new GameObject("Billiards Controls");
+            go.AddComponent<BilliardsTouchControls>();
+            go.AddComponent<BilliardsHud>();
+            Debug.Log("[Billiards] Operating layer built (BilliardsTouchControls + BilliardsHud). " +
+                      "Landscape is locked at runtime in Awake, not in ProjectSettings.");
         }
 
         /// <summary>
