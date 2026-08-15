@@ -1834,6 +1834,7 @@ GameObject:
   - component: {fileID: 7443408886491487341}
   - component: {fileID: 7443408886491487342}
   - component: {fileID: 7443408886491487343}
+  - component: {fileID: 7443408886491487344}
   m_Layer: 0
   m_Name: NetworkManager
   m_TagString: Untagged
@@ -1950,7 +1951,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   _pumpInsideIterateIncoming: 1
-  _maximumClients: 8
+  _maximumClients: 2
+  _joinRoomCode: 
   _iceServerUrls: []
   _forceRelay: 0
 --- !u!114 &7443408886491487343
@@ -1968,6 +1970,20 @@ MonoBehaviour:
   _networkManager: {fileID: 0}
   _transport: {fileID: 0}
   _corner: 2
+--- !u!114 &7443408886491487344
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7443408886491487334}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 84d34b96d073b49eda4f382be660603b, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  _networkManager: {fileID: 0}
+  _transport: {fileID: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
