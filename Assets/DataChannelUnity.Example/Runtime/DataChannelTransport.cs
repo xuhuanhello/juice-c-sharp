@@ -56,17 +56,27 @@ namespace DataChannelUnity.Example
             MaxRetransmits = 0,
         };
 
-        // GetMTU 返回的固定常量。取 1282 = Tugboat 的值（1350 - 68），**故意**和它
-        // 一样：bring-up 阶段要拿本 Transport 和 Tugboat 做 A/B，同一个打包粒度才
-        // 让差异指向传输层而不是包大小。
+        // GetMTU 返回的固定常量。**#130 已实测定死为 1282**（不再是暂取）。
         //
-        // 契约 4.2 的四条硬约束都满足：① 连接建立前就被调用、拿不到协商值，所以这
-        // 是静态常量不是协商结果；② 结果被永久缓存，运行期改不了；③ FishNet 再净扣
-        // 2 字节且扣完 <= 100 视为无效，1282 远在其上；④ 两档返回同值，绕开
-        // SetLowestMTUs 里 allLowest 那处从不更新的可疑逻辑。
+        // 1282 = Tugboat 的值（1350 - 68），一开始是为了和它做 A/B —— 同一个打包粒度才让
+        // 差异指向传输层而不是包大小。实测之后它有了独立的理由：
         //
-        // SCTP 自己会分片，所以这个值和 PeerConnectionConfig.Mtu 解耦 —— 它只是
-        // 「给 FishNet 的打包尺度」，Synapse 的注释是直接先例。最终由 #119 定。
+        // **报大 MTU 的唯一动机是躲开 FishNet 的分片路径**（超 MTU 会被切片并强制挪到
+        // reliable 有序，于是过期的球位置卡在重传后面）。而那条路径在 498 个 tick 里**一次
+        // 都没被踩到**：峰值 192 字节/tick（TickRate 30）/ 188（60），离 1282 有 6.7 倍余量。
+        // 所以那个动机在台球这个负载下没有实测支撑。
+        //
+        // **而报大是有代价的**：这个值有双重身份 —— 出站切片尺度 **＋ 入站踢人阈值**
+        // （`FN:ServerManager.cs:735-742`，入站超 MTU 当场踢）。报大＝容忍更大的入站包，
+        // 那是在没有收益的前提下放宽一道门。
+        //
+        // 契约 4.2 的四条硬约束仍然满足：① 连接建立前就被调用、拿不到协商值，所以这是静态
+        // 常量不是协商结果；② 结果被永久缓存，运行期改不了；③ FishNet 再净扣 2 字节且扣完
+        // <= 100 视为无效，1282 远在其上；④ 两档返回同值，绕开 SetLowestMTUs 里 allLowest
+        // 那处从不更新的可疑逻辑。
+        //
+        // SCTP 自己会分片，所以这个值和 PeerConnectionConfig.Mtu 解耦 —— 它只是「给
+        // FishNet 的打包尺度」，Synapse 的注释是直接先例。
         private const int MtuBytes = 1282;
 
         // ── 归 #120 的，暂取 ────────────────────────────────────────────────
@@ -431,14 +441,151 @@ namespace DataChannelUnity.Example
         }
 
         /// <summary>
-        /// 空实现，**这是有意的**。契约 1.4：Send* 是「入队」、IterateOutgoing 是
-        /// 「冲刷」，但我们的 DataChannel.Send 是同步 P/Invoke，在 Send* 里就已经出去
-        /// 了（契约 5.2：出站没有对齐问题）。所以没有要冲刷的东西。
+        /// 每个 tick 冲刷完之后触发一次（参数是 asServer）。**这是采背压读数的正确位置**：
+        /// 此刻本 tick 该发的全发完了，所以 BufferedAmount 报的是「一个 tick 之后还积着
+        /// 多少」，正是 #130 要的那条曲线。
         ///
-        /// 代价是放弃了「一帧内合并/限流」的唯一位置 —— 那归 #119 的背压决策，真要做
-        /// 时把 Send* 改成入队、在这里冲刷即可，结构已经留好。
+        /// 不用 `TimeManager.OnPostTick` 采：它在 `TryIterateData(false)` **之前**
+        /// （`TimeManager.cs:751-766`），采到的是冲刷前的值。
         /// </summary>
-        public override void IterateOutgoing(bool asServer) { }
+        public event Action<bool> OutboundFlushed;
+
+        /// <summary>
+        /// 空实现（除了那个诊断钩子），**这是有意的**。契约 1.4：Send* 是「入队」、
+        /// IterateOutgoing 是「冲刷」，但我们的 DataChannel.Send 是同步 P/Invoke，在
+        /// Send* 里就已经出去了（契约 5.2：出站没有对齐问题）。所以没有要冲刷的东西。
+        ///
+        /// 代价是放弃了「一帧内合并/限流」的唯一位置 —— 那归 #119/#130 的背压决策，真要
+        /// 做时把 Send* 改成入队、在这里冲刷即可，结构已经留好。
+        /// </summary>
+        public override void IterateOutgoing(bool asServer)
+        {
+            // server 侧才查：积压是「host 发不出去」的症状，而 client 侧那条上行只有出杆与
+            // ping，量级差两个数量级（#131：出杆五个 float，一回合一次）。
+            if (asServer)
+                CheckBacklog();
+
+            try
+            {
+                OutboundFlushed?.Invoke(asServer);
+            }
+            catch (Exception e)
+            {
+                DataChannelLogOnce($"OutboundFlushed 订阅者抛出，已忽略：{e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 一条连接某一档通道的出站积压字节数，读的是上游 SCTP 的发送队列。
+        ///
+        /// 这是**唯一**能读到积压的地方：#130 已查明上游发送队列 `limit = 0`（不限长）、
+        /// `send()` 从不失败，所以「发不出去」永远不会以错误的形式出现，只会以这个数一直
+        /// 涨的形式出现。
+        ///
+        /// 返回 false 而不抛：调用点是诊断，而 `BufferedAmount` 在通道已 dispose 时会抛
+        /// （`DataChannel.cs:112`），关闭过程中采样是正常的，不该把它变成异常。
+        /// </summary>
+        public bool TryGetBufferedAmount(bool asServer, int connectionId, Channel channel, out int bytes)
+        {
+            bytes = 0;
+
+            Peer peer;
+            if (asServer)
+            {
+                if (!_serverPeers.TryGetValue(connectionId, out peer)) return false;
+            }
+            else
+            {
+                peer = _clientPeer;
+                if (peer == null) return false;
+            }
+
+            var dc = channel == Channel.Unreliable ? peer.Unreliable : peer.Reliable;
+            if (dc == null || !dc.IsOpen) return false;
+
+            try
+            {
+                bytes = dc.BufferedAmount;
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>server 侧当前的 connectionId 列表（诊断用；分配的顺序即加入顺序）。</summary>
+        public IEnumerable<int> ServerConnectionIds => _serverPeers.Keys;
+
+        // ── 背压看守（#130 定）─────────────────────────────────────────────
+        //
+        // **只报，不丢、不断。** 判据是：上游发送队列 `limit = 0` 不限长、`send()` 从不
+        // 失败，所以「发不出去」永远不会以错误的形式出现 —— 它只会以 BufferedAmount 一直
+        // 涨的形式出现，而那是**没有症状的**。这条看守把一个无症状的失败变成有症状的。
+        //
+        // 为什么不丢：丢 unreliable 在语义上合法，但**触发点无法在本机验证** —— loopback
+        // 没有瓶颈（结构上产生不出背压：它不过信令，拿不到 TURN 凭据，RelayOnly 走不通），
+        // 所以任何丢弃阈值都只能靠推。#113 Notes 那条「阈值不许凭空猜」正是为此立的，一版
+        // 凭空造的 64 KB/1 MB 已因此撤回。**报一条日志猜错了只是噪音，丢一条猜错了是丢数据。**
+        //
+        // 丢 reliable 从来不在选项内：FishNet 靠它送 spawn/despawn/SyncType，分片也在这条
+        // 上（超 MTU 会被强制挪过来）。真要处理只能是断这条连接，而那个动作归 #120 的生命
+        // 周期，不归这里。
+        private const int BacklogWarnBytes = 12 * 1024;
+
+        // 一条连接一档通道只报一次，排空后复位 —— 否则每 tick 一条会把 Console 淹掉，而
+        // 淹掉之后就看不见第一次是什么时候开始的。复位是为了让**再次**发生时还会喊。
+        private readonly HashSet<(int, Channel)> _backlogReported = new HashSet<(int, Channel)>();
+
+        /// <summary>
+        /// 每 tick 冲刷完之后查一遍积压。**采样点必须在冲刷之后** —— 冲刷之前采到的是上一
+        /// 个 tick 的残留，那个数不回答「这个 tick 之后还积着多少」。
+        ///
+        /// 阈值 12 KiB 的来历：实测峰值 188 字节/tick @ TickRate 60 ＝ 约 11.3 KB/s，所以
+        /// 12 KiB **约等于一整秒的峰值流量**。对一条载着球位置的 unreliable 通道来说，落后
+        /// 一秒意味着积压里的数据全部过期了 16 倍以上（60Hz 下一个 tick 是 16 ms）——
+        /// 换句话说，这个数不是「多少字节算多」，而是「链路已经落后一整秒」。
+        /// </summary>
+        private void CheckBacklog()
+        {
+            foreach (var kv in _serverPeers)
+            {
+                CheckOne(kv.Key, Channel.Unreliable, kv.Value.Unreliable);
+                CheckOne(kv.Key, Channel.Reliable, kv.Value.Reliable);
+            }
+
+            void CheckOne(int connectionId, Channel channel, DataChannel dc)
+            {
+                if (dc == null || !dc.IsOpen) return;
+
+                int buffered;
+                try
+                {
+                    buffered = dc.BufferedAmount;
+                }
+                catch (Exception)
+                {
+                    // 关闭过程中采样是正常的，不该把它变成异常（BufferedAmount 在已 dispose
+                    // 时会抛）。
+                    return;
+                }
+
+                var key = (connectionId, channel);
+                if (buffered < BacklogWarnBytes)
+                {
+                    _backlogReported.Remove(key);
+                    return;
+                }
+
+                if (!_backlogReported.Add(key)) return;
+
+                Debug.LogError(
+                    $"[DataChannelTransport] 出站积压 {buffered} 字节（connectionId={connectionId} " +
+                    $"channel={channel}），已超过约一秒的峰值流量（{BacklogWarnBytes} 字节）。" +
+                    "上游发送队列不限长且 send() 从不失败，所以这个数只会继续涨 —— " +
+                    "链路正在落后，而不是某一条消息出了问题。本条只报不丢（#130）。");
+            }
+        }
         #endregion
 
         #region Inbound plumbing

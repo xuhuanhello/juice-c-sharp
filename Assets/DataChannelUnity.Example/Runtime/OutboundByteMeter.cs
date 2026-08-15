@@ -32,7 +32,17 @@ namespace DataChannelUnity.Example
             public int Reliable;
             public int Unreliable;
             public int Messages;
+
+            /// <summary>
+            /// SCTP's send backlog after this tick was flushed, summed over connections. Separate from
+            /// the byte counts because it answers a different question: those say how much was handed
+            /// to the transport, this says how much has not left yet.
+            /// </summary>
+            public int BacklogReliable;
+            public int BacklogUnreliable;
+
             public int Total => Reliable + Unreliable;
+            public int Backlog => BacklogReliable + BacklogUnreliable;
         }
 
         private readonly Dictionary<uint, TickRecord> _byTick = new();
@@ -95,7 +105,49 @@ namespace DataChannelUnity.Example
             }
 
             _transport.OutboundSent += OnOutboundSent;
+            _transport.OutboundFlushed += OnOutboundFlushed;
             _subscribed = true;
+        }
+
+        /// <summary>
+        /// Samples the send backlog once per tick, after the flush. #130 needs this curve because the
+        /// upstream send queue is unbounded and send() never fails — so "cannot keep up" never surfaces
+        /// as an error, only as this number climbing.
+        /// </summary>
+        private void OnOutboundFlushed(bool asServer)
+        {
+            if (!asServer || _transport == null)
+                return;
+
+            uint tick = _timeManager == null ? 0u : _timeManager.LocalTick;
+            int reliable = 0;
+            int unreliable = 0;
+
+            foreach (int connectionId in _transport.ServerConnectionIds)
+            {
+                if (_transport.TryGetBufferedAmount(true, connectionId, Channel.Reliable, out int r))
+                    reliable += r;
+                if (_transport.TryGetBufferedAmount(true, connectionId, Channel.Unreliable, out int u))
+                    unreliable += u;
+            }
+
+            // Recorded even when zero, and that matters: a flat zero is itself the finding for an
+            // in-process loopback, where nothing throttles the link. Skipping empty samples would make
+            // "no backlog" indistinguishable from "never sampled".
+            TickRecord record = RecordFor(tick);
+            record.BacklogReliable = Mathf.Max(record.BacklogReliable, reliable);
+            record.BacklogUnreliable = Mathf.Max(record.BacklogUnreliable, unreliable);
+        }
+
+        private TickRecord RecordFor(uint tick)
+        {
+            if (!_byTick.TryGetValue(tick, out TickRecord record))
+            {
+                record = new TickRecord();
+                _byTick[tick] = record;
+            }
+
+            return record;
         }
 
         private void Update()
@@ -106,7 +158,11 @@ namespace DataChannelUnity.Example
         private void OnDisable()
         {
             if (_transport != null && _subscribed)
+            {
                 _transport.OutboundSent -= OnOutboundSent;
+                _transport.OutboundFlushed -= OnOutboundFlushed;
+            }
+
             _subscribed = false;
         }
 
@@ -120,11 +176,7 @@ namespace DataChannelUnity.Example
                 return;
 
             uint tick = _timeManager == null ? 0u : _timeManager.LocalTick;
-            if (!_byTick.TryGetValue(tick, out TickRecord record))
-            {
-                record = new TickRecord();
-                _byTick[tick] = record;
-            }
+            TickRecord record = RecordFor(tick);
 
             if (channel == Channel.Reliable)
                 record.Reliable += bytes;
@@ -164,6 +216,9 @@ namespace DataChannelUnity.Example
             long sumUnreliable = 0, sumTotal = 0;
             int counted = 0;
             int overMtu = 0;
+            int peakBacklog = 0, peakBacklogReliable = 0, peakBacklogUnreliable = 0;
+            uint peakBacklogTick = 0;
+            int ticksWithBacklog = 0;
 
             foreach (uint tick in ticks)
             {
@@ -192,6 +247,19 @@ namespace DataChannelUnity.Example
                 // the measurement.
                 if (r.Unreliable > 1282)
                     overMtu++;
+
+                if (r.Backlog > 0)
+                    ticksWithBacklog++;
+                if (r.Backlog > peakBacklog)
+                {
+                    peakBacklog = r.Backlog;
+                    peakBacklogTick = tick;
+                }
+
+                if (r.BacklogReliable > peakBacklogReliable)
+                    peakBacklogReliable = r.BacklogReliable;
+                if (r.BacklogUnreliable > peakBacklogUnreliable)
+                    peakBacklogUnreliable = r.BacklogUnreliable;
             }
 
             sb.AppendLine($"ticksCounted={counted}");
@@ -204,15 +272,18 @@ namespace DataChannelUnity.Example
             }
 
             sb.AppendLine($"ticksOverMtu(1282)={overMtu}");
+            sb.AppendLine($"peakBacklog={peakBacklog}B at tick {peakBacklogTick} " +
+                          $"(reliable {peakBacklogReliable}B, unreliable {peakBacklogUnreliable}B)");
+            sb.AppendLine($"ticksWithAnyBacklog={ticksWithBacklog}/{counted}");
             sb.AppendLine();
-            sb.AppendLine("per-tick detail (tick: unreliable + reliable = total, messages):");
+            sb.AppendLine("per-tick detail (tick: unreliable + reliable = total, msgs, backlog):");
 
             foreach (uint tick in ticks)
             {
                 TickRecord r = _byTick[tick];
                 string mark = tick < MeasureFromTick ? " (pre-break)" : "";
                 sb.AppendLine($"  {tick,6}: {r.Unreliable,6} + {r.Reliable,6} = {r.Total,6}  " +
-                              $"msgs={r.Messages,3}{mark}");
+                              $"msgs={r.Messages,3}  backlog={r.Backlog,6}{mark}");
             }
 
             return sb.ToString();

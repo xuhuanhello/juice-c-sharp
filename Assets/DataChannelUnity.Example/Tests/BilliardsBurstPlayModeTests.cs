@@ -31,10 +31,13 @@ namespace DataChannelUnity.Example.Tests
             "Assets/DataChannelUnity.Example/Scenes/Billiards over DataChannel.unity";
 
         /// <summary>
-        /// Generous: the host's local client is a real loopback PeerConnection (#120), so this waits on
-        /// ICE gathering plus a DTLS handshake, not just a flag flip.
+        /// Generous, and it has to be. The host's local client is a real loopback PeerConnection (#120),
+        /// so this waits on ICE gathering plus a DTLS handshake — and before any of that, on a round trip
+        /// to the live signalling server, because StartServer creates a room before reporting Started.
+        /// 30s was observed to be too tight for the first case in a run, which also pays native library
+        /// initialisation.
         /// </summary>
-        private const float HostStartTimeout = 30f;
+        private const float HostStartTimeout = 60f;
 
         private const float SettleTimeout = 25f;
 
@@ -54,14 +57,24 @@ namespace DataChannelUnity.Example.Tests
                                        "Tools/DataChannel Example/Build Billiards Scene.");
         }
 
+        /// <summary>
+        /// Both tick rates #113 put in play. Doubling the rate does not simply double the bytes: each
+        /// tick's displacement halves while the 1 mm sensitivity threshold is absolute, so a slow ball
+        /// can drop out of the send set entirely at 60 where it still qualified at 30. That interaction
+        /// is the reason this is measured at both rather than extrapolated from one.
+        /// </summary>
         [UnityTest]
-        public IEnumerator BreakBurstStaysUnderMtu()
+        public IEnumerator BreakBurstStaysUnderMtu([Values(30, 60)] int tickRate)
         {
             var meter = Object.FindObjectOfType<OutboundByteMeter>();
             Assert.IsNotNull(meter, "No OutboundByteMeter in the scene; nothing would be measured.");
 
             var rack = Object.FindObjectOfType<BilliardsRack>();
             Assert.IsNotNull(rack, "No BilliardsRack in the scene.");
+
+            // Before the host starts: TickDelta is derived here, and with PhysicsMode.TimeManager it is
+            // also the physics step, so changing it afterwards would move the physics timestep mid-shot.
+            _manager.TimeManager.SetTickRate((ushort)tickRate);
 
             // Host: server and client in one process, the local client on a real loopback
             // PeerConnection (#120). That loopback is why host mode measures real bytes — the server
@@ -76,8 +89,25 @@ namespace DataChannelUnity.Example.Tests
                 yield return null;
             }
 
-            Assert.IsTrue(_manager.IsHostStarted,
-                $"Host did not start within {HostStartTimeout}s (ICE + DTLS on loopback).");
+            if (!_manager.IsHostStarted)
+            {
+                // Two very different causes, separated deliberately. Host mode is not self-contained:
+                // StartServer requires EnsureSignaling to succeed, so it connects to the live wss server
+                // to create a room even though the loopback client never uses signaling. When that
+                // server is slow or down, the symptom is an un-started host — which reads exactly like a
+                // transport defect. A gate that mislabels its own failure sends the next person to debug
+                // the wrong layer.
+                var transport = _manager.TransportManager.Transport as DataChannelTransport;
+                bool signalling = transport != null && transport.SignalingConnected;
+
+                Assert.Fail(signalling
+                    ? $"Signalling is up (room={transport.RoomCode}) but the host did not start within " +
+                      $"{HostStartTimeout}s — ICE or DTLS on the loopback pair did not complete. This is " +
+                      "a transport problem."
+                    : $"Host did not start within {HostStartTimeout}s and signalling never connected. " +
+                      "This measurement needs the wss server reachable, because StartServer creates a " +
+                      "room before reporting Started — check the service before suspecting the transport.");
+            }
 
             // Spawned as scene objects, or nothing replicates. This is the assertion that catches an
             // unset SceneId or WasActiveDuringEdit_Set1 — FishNet skips those objects, and a skipped
@@ -129,9 +159,9 @@ namespace DataChannelUnity.Example.Tests
             }
 
             string report = meter.Report();
-            Debug.Log($"[BilliardsBurst] settled={!rack.ShotInFlight} after {shot:F2}s " +
-                      $"pocketed={pocketed}\n{report}");
-            WriteReport(report, shot, !rack.ShotInFlight, spawned, pocketed);
+            Debug.Log($"[BilliardsBurst] tickRate={tickRate} settled={!rack.ShotInFlight} " +
+                      $"after {shot:F2}s pocketed={pocketed}\n{report}");
+            WriteReport(report, shot, !rack.ShotInFlight, spawned, pocketed, tickRate);
 
             Assert.Greater(meter.TicksRecorded, 0,
                 "No outbound bytes recorded during the break. Either the meter never attached or the " +
@@ -145,6 +175,18 @@ namespace DataChannelUnity.Example.Tests
             Assert.LessOrEqual(PeakUnreliable(report), 1282,
                 "A tick's unreliable payload crossed GetMTU (1282); FishNet would split it onto the " +
                 "reliable channel. See the report.");
+
+            // Loopback has no bottleneck, so SCTP drains inside the tick and the backlog must be flat
+            // zero. Asserted rather than merely reported for two reasons: it is the evidence that the
+            // #130 backlog threshold is nowhere near normal operation, and a non-zero reading here
+            // would mean loopback had somehow become a constrained link — which would invalidate every
+            // byte figure in this report, since they all assume the sends actually left.
+            //
+            // The watch firing would also fail this test on its own: it logs an Error, and errors are
+            // only tolerated in teardown.
+            Assert.AreEqual(0, PeakField(report, "peakBacklog="),
+                "Outbound backlog was non-zero on an in-process loopback. Either the link is no longer " +
+                "unconstrained or the sends are not completing; the byte figures cannot be trusted.");
         }
 
         /// <summary>
@@ -152,16 +194,18 @@ namespace DataChannelUnity.Example.Tests
         /// #130's input rather than a pass/fail.
         /// </summary>
         private static void WriteReport(string report, float settleSeconds, bool settled, int spawned,
-            int pocketed)
+            int pocketed, int tickRate)
         {
             try
             {
+                // One file per tick rate: the two runs are the comparison, so overwriting one with the
+                // other would destroy the only thing they are for.
                 string path = System.IO.Path.Combine(
-                    Application.dataPath, "..", "Logs", "billiards-burst.txt");
+                    Application.dataPath, "..", "Logs", $"billiards-burst-tick{tickRate}.txt");
                 System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path));
                 System.IO.File.WriteAllText(path,
-                    $"spawned={spawned}/16 settled={settled} settleSeconds={settleSeconds:F2} " +
-                    $"pocketed={pocketed}\n\n{report}");
+                    $"tickRate={tickRate} spawned={spawned}/16 settled={settled} " +
+                    $"settleSeconds={settleSeconds:F2} pocketed={pocketed}\n\n{report}");
                 Debug.Log($"[BilliardsBurst] report written to {System.IO.Path.GetFullPath(path)}");
             }
             catch (System.Exception e)
@@ -170,19 +214,29 @@ namespace DataChannelUnity.Example.Tests
             }
         }
 
-        private static int PeakUnreliable(string report)
+        private static int PeakUnreliable(string report) => PeakField(report, "peakUnreliable=");
+
+        /// <summary>
+        /// Pulls a "<c>name=123B</c>" figure out of the report. Parsing the report rather than reading
+        /// the meter's fields directly is deliberate: it asserts against the same text a human reads, so
+        /// a report that says one thing while the test passes on another is not possible.
+        /// </summary>
+        private static int PeakField(string report, string prefix)
         {
             foreach (string line in report.Split('\n'))
             {
-                if (!line.StartsWith("peakUnreliable="))
+                int at = line.IndexOf(prefix, System.StringComparison.Ordinal);
+                if (at < 0)
                     continue;
 
-                string value = line.Substring("peakUnreliable=".Length);
+                string value = line.Substring(at + prefix.Length);
                 int end = value.IndexOf('B');
                 if (end > 0 && int.TryParse(value.Substring(0, end), out int bytes))
                     return bytes;
             }
 
+            Assert.Fail($"Report has no '{prefix}' figure; the meter's format changed and this test " +
+                        "would otherwise silently assert against 0.");
             return 0;
         }
 
