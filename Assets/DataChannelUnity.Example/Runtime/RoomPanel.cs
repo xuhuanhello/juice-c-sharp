@@ -1,4 +1,5 @@
 using FishNet.Managing;
+using FishNet.Transporting;
 using UnityEngine;
 
 namespace DataChannelUnity.Example
@@ -29,6 +30,17 @@ namespace DataChannelUnity.Example
         private string _codeInput = "";
         private GUIStyle _label;
 
+        /// <summary>
+        /// 两端各自最后一次上报的连接状态。
+        ///
+        /// 存在的理由是 <c>ServerManager.Started</c> / <c>ClientManager.Started</c> 是**布尔**，
+        /// 而这个 transport 的状态有四档（`Starting` / `Started` / `Stopping` / `Stopped`）——
+        /// 布尔把前两档压成同一个值，于是「正在连」与「连上了」在面板上长得一样。#139 实测的症状：
+        /// 一端还没连上，面板已经显示房间码与「断开」按钮。
+        /// </summary>
+        private LocalConnectionState _serverState = LocalConnectionState.Stopped;
+        private LocalConnectionState _clientState = LocalConnectionState.Stopped;
+
         private void Awake()
         {
             if (_networkManager == null)
@@ -37,19 +49,50 @@ namespace DataChannelUnity.Example
                 _transport = _networkManager.GetComponent<DataChannelTransport>();
         }
 
+        private void OnEnable()
+        {
+            if (_networkManager == null)
+                return;
+
+            _networkManager.ServerManager.OnServerConnectionState += OnServerState;
+            _networkManager.ClientManager.OnClientConnectionState += OnClientState;
+        }
+
+        private void OnDisable()
+        {
+            if (_networkManager == null)
+                return;
+
+            _networkManager.ServerManager.OnServerConnectionState -= OnServerState;
+            _networkManager.ClientManager.OnClientConnectionState -= OnClientState;
+        }
+
+        private void OnServerState(ServerConnectionStateArgs args) => _serverState = args.ConnectionState;
+        private void OnClientState(ClientConnectionStateArgs args) => _clientState = args.ConnectionState;
+
+        private static string Text(LocalConnectionState state) => state switch
+        {
+            LocalConnectionState.Stopped => "停",
+            LocalConnectionState.Starting => "连接中",
+            LocalConnectionState.Started => "已连",
+            LocalConnectionState.Stopping => "断开中",
+            _ => state.ToString()
+        };
+
         private void OnGUI()
         {
             if (_networkManager == null || _transport == null) return;
 
             _label ??= new GUIStyle(GUI.skin.label) { fontSize = 13, normal = { textColor = Color.white } };
 
-            const int w = 300, h = 150;
+            const int w = 300, h = 170;
             GUILayout.BeginArea(new Rect(10, 10, w, h), GUI.skin.box);
 
-            var serverOn = _networkManager.ServerManager.Started;
-            var clientOn = _networkManager.ClientManager.Started;
+            // 「彻底停着」才显示建房/进房。Starting 也算已经在动，否则连按钮会在连接中途仍然可按。
+            bool serverIdle = _serverState == LocalConnectionState.Stopped;
+            bool clientIdle = _clientState == LocalConnectionState.Stopped;
 
-            if (!serverOn && !clientOn)
+            if (serverIdle && clientIdle)
             {
                 GUILayout.Label("① 一端建房（当 host），另一端输码加入", _label);
 
@@ -81,18 +124,55 @@ namespace DataChannelUnity.Example
             }
             else
             {
-                var code = _transport.RoomCode;
-                GUILayout.Label(string.IsNullOrEmpty(code)
-                    ? "房间码：等信令返回…"
-                    : $"房间码：{code}   ← 把这个给对手", _label);
-                GUILayout.Label($"信令={( _transport.SignalingConnected ? "已连" : "未连")}"
-                                + $"  server={serverOn}  client={clientOn}", _label);
+                // 「连上了」是两端至少一端 Started。只在 Starting 的时候说「正在连」而不是显示
+                // 一个房间码加一个「断开」—— 后者读起来像已经连上了，而那时什么都还没成。
+                bool anyStarted = _serverState == LocalConnectionState.Started ||
+                                  _clientState == LocalConnectionState.Started;
 
-                if (GUILayout.Button("断开"))
+                bool anyStopping = _serverState == LocalConnectionState.Stopping ||
+                                   _clientState == LocalConnectionState.Stopping;
+
+                var code = _transport.RoomCode;
+                if (anyStopping)
+                    // 断开中优先说：这时说「正在连接」是反的。
+                    GUILayout.Label("正在断开…", _label);
+                else if (!anyStarted)
+                    GUILayout.Label("正在连接…（还没连上）", _label);
+                else
+                    GUILayout.Label(string.IsNullOrEmpty(code)
+                        ? "房间码：等信令返回…"
+                        : $"房间码：{code}   ← 把这个给对手", _label);
+
+                // 两端各自的四档状态都写出来，而不是两个 true/false。
+                GUILayout.Label($"信令={(_transport.SignalingConnected ? "已连" : "未连")}"
+                                + $"   server={Text(_serverState)}   client={Text(_clientState)}", _label);
+
+                // host 起了 server 但自己那条 client 没连上，是一个**会让游戏永远停在 Lobby**
+                // 的状态，而它在别处完全看不出来：座位 0 一直空，`TryBeginGame` 永不触发。
+                // #139 实测踩过（_forceRelay 把 loopback 也强制成 RelayOnly），所以在这里说出来。
+                if (_serverState == LocalConnectionState.Started &&
+                    _clientState != LocalConnectionState.Started)
                 {
-                    if (clientOn) _networkManager.ClientManager.StopConnection();
-                    if (serverOn) _networkManager.ServerManager.StopConnection(true);
+                    GUILayout.Label("⚠ server 起来了，但本机 client 没连上 —— 座位 0 会一直空着，"
+                                    + "游戏停在 Lobby。看 Console 里的 ICE 状态。", _label);
                 }
+
+                // 正在停的时候按钮变灰：那一下没有可断的东西，而一个可按的按钮会让人以为有。
+                bool anythingUp = _serverState != LocalConnectionState.Stopped ||
+                                  _clientState != LocalConnectionState.Stopped;
+
+                // 按钮说它实际做的那件事：还没连上时它取消一次尝试，连上了才是断开。
+                string label = anyStopping ? "正在断开…" : anyStarted ? "断开" : "取消连接";
+
+                GUI.enabled = anythingUp && !anyStopping;
+                if (GUILayout.Button(label))
+                {
+                    if (_clientState != LocalConnectionState.Stopped)
+                        _networkManager.ClientManager.StopConnection();
+                    if (_serverState != LocalConnectionState.Stopped)
+                        _networkManager.ServerManager.StopConnection(true);
+                }
+                GUI.enabled = true;
             }
 
             GUILayout.EndArea();

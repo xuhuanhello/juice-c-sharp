@@ -229,6 +229,17 @@ namespace DataChannelUnity.Example
             {
                 _seats[BilliardsRules.SeatHost].ConnectionId = connectionId;
                 _seats[BilliardsRules.SeatHost].HoldRemaining = 0f;
+
+                // host 的 LocalSeat 直接设，不发 RPC。
+                //
+                // 它与远端那条的区别不是「省一次往返」，是**没有令牌可发**：留座令牌是给断线重连
+                // 用的（#134），而 host 的 client 断了就意味着进程在走（`ReleaseConnection` 里
+                // 那条 early return），没有可以接回的东西。原先这里直接 return，于是 host 的
+                // LocalSeat 永远停在 SeatNone —— 操作层的第一个门就是它，所以 host **拖动毫无
+                // 反应**，#139 实测踩到。
+                LocalSeat = BilliardsRules.SeatHost;
+                LocalGameVoided = false;
+
                 Debug.Log($"[BilliardsGame] 座位 {BilliardsRules.SeatHost}（host）← connection {connectionId}");
                 TryBeginGame();
                 return;
@@ -246,7 +257,7 @@ namespace DataChannelUnity.Example
 
                 // Same token, so the client keeps what it stored: reissuing here would invalidate
                 // the copy it is holding and break the *next* reconnect.
-                SendWelcome(connectionId, reclaimed, seat.Token, reconnected: true);
+                QueueWelcome(connectionId, reclaimed, seat.Token, reconnected: true);
                 ClearReconnectWaitIfDone();
                 return;
             }
@@ -267,8 +278,54 @@ namespace DataChannelUnity.Example
             _seats[free].Token = NewToken();
             Debug.Log($"[BilliardsGame] 座位 {free} ← connection {connectionId}（新令牌已下发）");
 
-            SendWelcome(connectionId, free, _seats[free].Token, reconnected: false);
+            QueueWelcome(connectionId, free, _seats[free].Token, reconnected: false);
             TryBeginGame();
+        }
+
+        /// <summary>
+        /// 一份待发的 welcome。存在的理由是**这条 RPC 不能在这一刻发**。
+        ///
+        /// `SendWelcome` 是 <see cref="TargetRpcAttribute"/>，而这里是
+        /// <c>OnRemoteConnectionState(Started)</c> —— 那一刻 FishNet 还没把这个连接加进本对象的
+        /// observer 集合，于是 RPC 被**丢掉**，只留一行 warning：
+        /// <c>Action cannot be completed as Target is not an observer for object Billiards Game</c>。
+        /// 后果是客户端的 <see cref="LocalSeat"/> 永远是 <see cref="BilliardsRules.SeatNone"/>，
+        /// 它一杆也出不了（#139 实测踩到，两端都拖不动）。
+        ///
+        /// 所以攒到 <see cref="OnSpawnServer"/>：那个回调在 spawn 消息**发出之后**才来
+        /// （`ServerObjects.Observers.cs:386`），此时连接已经是 observer。同一处还先跑
+        /// <c>SendBufferedRpcs</c>，所以 #135 的状态快照仍然排在 welcome 之前 —— 与 §6 的顺序一致。
+        /// </summary>
+        private readonly Dictionary<int, (int Seat, string Token, bool Reconnected)> _pendingWelcomes = new();
+
+        private void QueueWelcome(int connectionId, int seat, string token, bool reconnected)
+        {
+            _pendingWelcomes[connectionId] = (seat, token, reconnected);
+
+            // 已经是 observer 的话就地发掉（重连时 spawn 早就发生过，OnSpawnServer 不会再来）。
+            if (ServerManager.Clients.TryGetValue(connectionId, out NetworkConnection conn) &&
+                NetworkObject.Observers.Contains(conn))
+                FlushWelcome(conn);
+        }
+
+        /// <summary>
+        /// 这个连接现在能收 TargetRpc 了。<see cref="QueueWelcome"/> 的注释里是全部理由。
+        /// </summary>
+        public override void OnSpawnServer(NetworkConnection connection)
+        {
+            base.OnSpawnServer(connection);
+            FlushWelcome(connection);
+        }
+
+        private void FlushWelcome(NetworkConnection connection)
+        {
+            if (connection == null)
+                return;
+            if (!_pendingWelcomes.TryGetValue(connection.ClientId, out var pending))
+                return;
+
+            _pendingWelcomes.Remove(connection.ClientId);
+            SendWelcome(connection, pending.Seat, pending.Token, pending.Reconnected);
         }
 
         /// <summary>
@@ -284,6 +341,10 @@ namespace DataChannelUnity.Example
                     continue;
 
                 _seats[seat].ConnectionId = -1;
+
+                // 没发出去的 welcome 跟着这条连接一起丢掉：#120 从不复用 connectionId，所以留着
+                // 它永远等不到自己的 OnSpawnServer，只会在字典里堆着。
+                _pendingWelcomes.Remove(connectionId);
 
                 if (seat == BilliardsRules.SeatHost)
                 {

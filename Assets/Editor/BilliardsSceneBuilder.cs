@@ -64,6 +64,42 @@ namespace DataChannelUnity.EditorTools
             Debug.Log($"[Billiards] Scene written to {ScenePath}");
             RegisterInBuildSettings();
             VerifySceneIdsOnDisk();
+            WarnAboutResetVerificationSwitches();
+        }
+
+        /// <summary>
+        /// Says out loud which verification-only switches a rebuild has just returned to their code
+        /// defaults.
+        ///
+        /// A rebuild recreates every component, so **any value set by hand in the Inspector is gone** —
+        /// the same trap the physics materials carry, and for the same reason: this builder is the
+        /// source of truth and the scene is its output. #139 hit it live: <c>_forceRelay</c> had been
+        /// ticked for a two-process run, a rebuild silently cleared it, and the next run measured a
+        /// different link than the one intended.
+        ///
+        /// These are deliberately *not* set here. <c>_forceRelay</c> forces every connection through
+        /// TURN, which is right for verifying the Relayed branch on one machine and wrong for anything
+        /// shipped — so the committed scene must have it off, and turning it on is a per-run act.
+        /// </summary>
+        private static void WarnAboutResetVerificationSwitches()
+        {
+            var transport = Object.FindObjectOfType<DataChannelTransport>();
+            if (transport == null)
+                return;
+
+            var so = new SerializedObject(transport);
+            SerializedProperty forceRelay = so.FindProperty("_forceRelay");
+            SerializedProperty iceUrls = so.FindProperty("_iceServerUrls");
+
+            Debug.LogWarning(
+                "[Billiards] 重建把验证用的开关退回了代码默认值 —— 要跑验证的话现在重新设：\n" +
+                $"  DataChannelTransport._forceRelay = {(forceRelay != null && forceRelay.boolValue)}" +
+                "   ← 单机验 Relayed 分支与真断连需要勾上（勾上后**远端**那条走 TURN；" +
+                "本机 loopback 刻意不受它管，否则 host 自己起不来）\n" +
+                $"  DataChannelTransport._iceServerUrls = {(iceUrls == null ? 0 : iceUrls.arraySize)} 条" +
+                "   ← 留空即可，TURN 凭据由信令服务器下发\n" +
+                "  这两个刻意不由构建器写：_forceRelay 强制全部连接走中继，对出货是错的，" +
+                "所以入库的场景必须是 false，勾它是一次运行的动作。");
         }
 
         /// <summary>
@@ -162,6 +198,22 @@ namespace DataChannelUnity.EditorTools
             // TimeManager and the byte meter — all three are here — and because it must exist for the
             // whole run rather than being attached when somebody remembers to.
             go.AddComponent<BilliardsDeviceReport>();
+
+            // ping and the Direct/Relayed readout. **This was missing, and its absence was invisible:**
+            // the component existed and worked, it simply was never in the scene, so #139's run showed
+            // no ping anywhere and that read as "the number cannot be obtained" rather than "nothing
+            // is displaying it". The map's own acceptance line is "read out whether this connection is
+            // direct or relayed" — that readout is this component.
+            var hud = go.AddComponent<ConnectionDiagnosticsHud>();
+            var hudSo = new SerializedObject(hud);
+            // Upper *right*: RoomPanel owns the upper left, BilliardsHud the lower left, and the
+            // report's own readout the lower right. Four panels, four corners, no overlap.
+            //
+            // Set by name rather than ordinal even though it matches the current default — a
+            // serialized value does not follow a changed default, so writing it here is what makes
+            // the corner a property of the built scene rather than of the field initialiser.
+            SetEnumByName(hudSo, "_corner", nameof(TextAnchor.UpperRight));
+            hudSo.ApplyModifiedPropertiesWithoutUndo();
 
             var timeManager = go.AddComponent<FishNet.Managing.Timing.TimeManager>();
             var so = new SerializedObject(timeManager);

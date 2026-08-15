@@ -941,7 +941,24 @@ namespace DataChannelUnity.Example
         private bool StartLocalLoopbackClient()
         {
             var connectionId = _nextConnectionId++;
+
+            // **loopback 永不走 RelayOnly，即使 _forceRelay 勾着。**
+            //
+            // 这条连接压根不过网络（两个 PeerConnection 在同一个进程里直接对接，连信令都不走），
+            // 所以「强制中继」对它没有任何意义 —— 而它有致命后果：`BuildConfig()` 只带
+            // Inspector 里的 `_iceServerUrls`，服务器签发的 TURN 凭据（#117 的时限 HMAC）
+            // 只进另外两个建 PC 的地方。RelayOnly 加零个 TURN 凭据 = 一个 relay 候选都收集不到，
+            // 于是 ICE 卡到 connectivity timer 过期、failed、closed。
+            //
+            // 实测过这条路的全貌（#139）：勾上 _forceRelay 之后 host 自己那条 client 起不来
+            // → 座位 0 一直空 → `TryBeginGame` 永不触发 → 阶段停在 Lobby → 拖动没有任何反应。
+            // 远端那条 client 同时是好的（`Relayed`，typ relay），所以症状看着像「游戏层坏了」，
+            // 而坏的是 host 自己的传输层。
+            //
+            // 这不削弱 _forceRelay 要验的东西：那个开关是为了让**远端**那条连接走中继，
+            // 以及让网络级断连真的断掉数据面 —— 两件都发生在远端那条上，与本机 loopback 无关。
             var cfg = BuildConfig();
+            cfg.TransportPolicy = IceTransportPolicy.All;
 
             // 两个 PeerConnection：serverSide 是 host 眼里的这条 client 连接，
             // clientSide 是本地 client 自己那条。

@@ -127,6 +127,13 @@ namespace DataChannelUnity.Example
         private readonly Dictionary<int, string> _remoteCandidates = new();
 
         private readonly List<long> _rttSamples = new();
+
+        /// <summary>非零样本数。判据只看这些 —— 理由在 <see cref="SampleRoundTripTime"/> 里。</summary>
+        private int _rttMeasuredSamples;
+
+        /// <summary>读到 0 的样本数：那是「还没量到」，不是「0 毫秒」。</summary>
+        private int _rttZeroSamples;
+
         private int _rttTickMultipleSamples;
         private float _rttSampleTimer;
 
@@ -328,9 +335,20 @@ namespace DataChannelUnity.Example
             long rtt = _manager.TimeManager.RoundTripTime;
             _rttSamples.Add(rtt);
 
+            // **0 单独数，不当成一次测量。** FishNet 在第一次 ping 往返回来之前这个值就是 0，
+            // 而 0 是任何数的整数倍 —— 全是 0 的一组样本会让下面那条判据成立，于是「RTT 从没量到」
+            // 会读成「RTT 是 tick 的整数倍」。#139 实测踩到：98 个样本 98 个「通过」，其中 min=0。
+            if (rtt <= 0)
+            {
+                _rttZeroSamples++;
+                return;
+            }
+
             double tickMs = _manager.TimeManager.TickDelta * 1000d;
             if (tickMs <= 0d)
                 return;
+
+            _rttMeasuredSamples++;
 
             double quotient = rtt / tickMs;
             // 半档以内算整数倍。档宽本身是 33 ms（TickRate 30），而 RTT 是整毫秒，所以
@@ -550,18 +568,34 @@ namespace DataChannelUnity.Example
                 return;
             }
 
+            // 全是 0 ＝ ping 一次都没往返回来。那是未观测，不是「判据成立」。
+            if (_rttMeasuredSamples == 0)
+            {
+                claim.Verdict = Verdict.NotObserved;
+                claim.Measured = $"{_rttSamples.Count} 个样本全是 0 ms —— ping 一次都没往返回来，" +
+                                 "RTT 未被测到（0 是任何数的整数倍，所以这不算判据成立）";
+                claims.Add(claim);
+                return;
+            }
+
             long min = long.MaxValue, max = long.MinValue, sum = 0;
             foreach (long sample in _rttSamples)
             {
+                if (sample <= 0)
+                    continue;
+
                 if (sample < min) min = sample;
                 if (sample > max) max = sample;
                 sum += sample;
             }
 
-            double mean = sum / (double)_rttSamples.Count;
-            claim.Measured = $"{_rttSamples.Count} 个样本：min={min}ms mean={mean:F1}ms max={max}ms，" +
-                             $"其中 {_rttTickMultipleSamples} 个是 tick 的整数倍；tick 档 {tickMs:F1}ms";
-            claim.Verdict = _rttTickMultipleSamples == _rttSamples.Count
+            double mean = sum / (double)_rttMeasuredSamples;
+            claim.Measured = $"{_rttMeasuredSamples} 个非零样本：min={min}ms mean={mean:F1}ms max={max}ms，" +
+                             $"其中 {_rttTickMultipleSamples} 个是 tick 的整数倍；tick 档 {tickMs:F1}ms" +
+                             (_rttZeroSamples > 0
+                                 ? $"（另有 {_rttZeroSamples} 个读到 0，是首次往返之前的采样，不计入判据）"
+                                 : "");
+            claim.Verdict = _rttTickMultipleSamples == _rttMeasuredSamples
                 ? Verdict.Holds
                 : Verdict.Violated;
             claims.Add(claim);
