@@ -195,6 +195,20 @@ namespace DataChannelUnity.Example
         private int _localSeatBeforeDrop = BilliardsRules.SeatNone;
         private bool _clientWasUp;
 
+        /// <summary>
+        /// 每个座位上**最后一个活着的** connection id，每帧记一次。
+        ///
+        /// 必须提前记，不能等断连事件：<see cref="BilliardsGame.ReleaseConnection"/> 先把
+        /// <c>ConnectionId</c> 置 −1，**再**发带 AwaitingReconnect 的状态消息。所以在
+        /// <see cref="OnStateChanged"/> 里问座位要 id，拿到的永远是 −1 —— 于是「id 必须变」
+        /// 那半条判据变成 −1→N，永真，判不出任何东西。#139 实测撞到：报告写
+        /// <c>connection -1→2</c> 而它照样判成立。
+        /// </summary>
+        private readonly int[] _lastLiveConnection =
+        {
+            -1, -1
+        };
+
         private string _writtenPath;
         private string _lastWriteError;
 
@@ -300,6 +314,7 @@ namespace DataChannelUnity.Example
             _sinceStart += Time.unscaledDeltaTime;
 
             ResolveNetworking();
+            TrackSeatConnections();
             TrackLocalClientDrop();
             SampleFps();
             SampleRoundTripTime();
@@ -461,6 +476,22 @@ namespace DataChannelUnity.Example
         /// 跟本机 client 的起落。这一端自己断过又回来，是 client 侧唯一能自证重连的事实：
         /// 它看不到别人的座位，但它知道自己拿回的座位号是不是原来那个。
         /// </summary>
+        /// <summary>
+        /// 每帧记一次每个座位上活着的 connection id。理由见 <see cref="_lastLiveConnection"/>。
+        /// </summary>
+        private void TrackSeatConnections()
+        {
+            if (_game == null || !IsHost)
+                return;
+
+            for (int seat = 0; seat < _lastLiveConnection.Length; seat++)
+            {
+                int id = _game.SeatConnectionId(seat);
+                if (id >= 0)
+                    _lastLiveConnection[seat] = id;
+            }
+        }
+
         private void TrackLocalClientDrop()
         {
             bool up = ClientUp;
@@ -486,9 +517,12 @@ namespace DataChannelUnity.Example
                 // 断连那一刻。host 能问出**哪个**座位被留住了，那才是要跟的那个座位；
                 // client 问不到（座位表是 host 侧的），它走 _localClientDropped 那条。
                 _heldSeat = FindHeldSeat();
-                _connectionBeforeDrop = _heldSeat == BilliardsRules.SeatNone
-                    ? -1
-                    : _game.SeatConnectionId(_heldSeat);
+
+                // 读**记下来的**那个，不是现在的：现在的已经是 −1 了（见 _lastLiveConnection）。
+                _connectionBeforeDrop =
+                    _heldSeat >= 0 && _heldSeat < _lastLiveConnection.Length
+                        ? _lastLiveConnection[_heldSeat]
+                        : -1;
                 _maskBeforeDrop = state.Pocketed;
             }
             else if (!nowWaiting && _waitingForReconnect && !state.HasFlag(BilliardsFlags.Abandoned))
@@ -890,13 +924,26 @@ namespace DataChannelUnity.Example
             }
 
             bool cameBack = _connectionAfterReturn >= 0;
-            bool idChanged = _connectionAfterReturn != _connectionBeforeDrop;
             bool maskSame = _maskBeforeDrop == _maskAfterReturn;
 
+            // 断连前那个 id 没记到，就**不要**拿它去比 —— −1 与任何真 id 都不同，那样比出来的
+            // 「变了」是算术的性质而不是观测。说出这半条没验到，别让它顺带通过。
+            bool haveBefore = _connectionBeforeDrop >= 0;
+            bool idChanged = haveBefore && _connectionAfterReturn != _connectionBeforeDrop;
+
+            string beforeText = haveBefore ? _connectionBeforeDrop.ToString() : "未记到";
             claim.Measured = $"座位 {_heldSeat} 被留住并接回：connection " +
-                             $"{_connectionBeforeDrop}→{_connectionAfterReturn}，" +
-                             $"落袋掩码 {_maskBeforeDrop:X4}→{_maskAfterReturn:X4}";
-            claim.Verdict = cameBack && idChanged && maskSame ? Verdict.Holds : Verdict.Violated;
+                             $"{beforeText}→{_connectionAfterReturn}，" +
+                             $"落袋掩码 {_maskBeforeDrop:X4}→{_maskAfterReturn:X4}" +
+                             (haveBefore ? "" : "（断连前的 connection id 没记到，" +
+                                                "「id 必须变」这半条未验证）");
+
+            claim.Verdict = !cameBack || !maskSame
+                ? Verdict.Violated
+                : haveBefore
+                    ? (idChanged ? Verdict.Holds : Verdict.Violated)
+                    // 座位回来了、掩码没变，但少一半判据 —— 那是未观测，不是成立。
+                    : Verdict.NotObserved;
             claims.Add(claim);
         }
 
