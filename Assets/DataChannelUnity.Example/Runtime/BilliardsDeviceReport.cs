@@ -172,12 +172,28 @@ namespace DataChannelUnity.Example
 
         // 重连那次：断连前后要对得上的三样（座位、分组、落袋掩码）。分组由座位派生（#132 预分组），
         // 所以座位没变就是分组没变 —— 不单独记一份会与掩码不一致的第二真相。
+        //
+        // **记的必须是「被留座的那个座位」，不是 LocalSeat。** 前一版记了 LocalSeat，而它在 host
+        // 上永远是 0（host 自己），于是这条 claim 量的是「我自己的座位有没有变」—— host 从来没断过，
+        // 所以它必然成立。#139 实测撞到这个假绿：报告写「座位 0→0 成立」，而日志里真正重连的是
+        // **座位 1**（`座位 1 留 30s 等重连` → `座位 1 被令牌取回 ← connection 2`）。
+        // 一条在没有观测到目标时也判成立的 claim，正是这份报告存在的目的要防的东西。
         private bool _reconnectObserved;
-        private int _seatBeforeDrop = BilliardsRules.SeatNone;
-        private int _seatAfterReturn = BilliardsRules.SeatNone;
+        private int _heldSeat = BilliardsRules.SeatNone;
+        private int _connectionBeforeDrop = -1;
+        private int _connectionAfterReturn = -1;
         private ushort _maskBeforeDrop;
         private ushort _maskAfterReturn;
         private bool _waitingForReconnect;
+
+        /// <summary>
+        /// 这一端自己掉过线又回来了没有。客户端**只能**从这个事实出发判重连 ——
+        /// 座位表是 host 侧的，client 问不到别人的座位。
+        /// </summary>
+        private bool _localClientDropped;
+
+        private int _localSeatBeforeDrop = BilliardsRules.SeatNone;
+        private bool _clientWasUp;
 
         private string _writtenPath;
         private string _lastWriteError;
@@ -284,6 +300,7 @@ namespace DataChannelUnity.Example
             _sinceStart += Time.unscaledDeltaTime;
 
             ResolveNetworking();
+            TrackLocalClientDrop();
             SampleFps();
             SampleRoundTripTime();
             SampleConnectionPaths();
@@ -423,6 +440,41 @@ namespace DataChannelUnity.Example
 
         private void OnBallClamped(BilliardsBall ball) => _containmentTrips++;
 
+        /// <summary>
+        /// 哪个座位正被留着等重连。只有 host 答得出来 —— 座位表是它的。
+        /// </summary>
+        private int FindHeldSeat()
+        {
+            if (_game == null || !IsHost)
+                return BilliardsRules.SeatNone;
+
+            for (int seat = 0; seat < BilliardsRules.SeatCount; seat++)
+            {
+                if (_game.IsSeatHeld(seat))
+                    return seat;
+            }
+
+            return BilliardsRules.SeatNone;
+        }
+
+        /// <summary>
+        /// 跟本机 client 的起落。这一端自己断过又回来，是 client 侧唯一能自证重连的事实：
+        /// 它看不到别人的座位，但它知道自己拿回的座位号是不是原来那个。
+        /// </summary>
+        private void TrackLocalClientDrop()
+        {
+            bool up = ClientUp;
+
+            if (_clientWasUp && !up)
+            {
+                _localClientDropped = true;
+                _localSeatBeforeDrop = _game == null ? BilliardsRules.SeatNone : _game.LocalSeat;
+                _maskBeforeDrop = _game == null ? _maskBeforeDrop : _game.State.Pocketed;
+            }
+
+            _clientWasUp = up;
+        }
+
         private void OnStateChanged(BilliardsState state)
         {
             _phase = state.Phase;
@@ -431,14 +483,20 @@ namespace DataChannelUnity.Example
 
             if (nowWaiting && !_waitingForReconnect)
             {
-                // 断连那一刻：座位与掩码是要与「回来之后」比的两个数。
-                _seatBeforeDrop = _game == null ? BilliardsRules.SeatNone : _game.LocalSeat;
+                // 断连那一刻。host 能问出**哪个**座位被留住了，那才是要跟的那个座位；
+                // client 问不到（座位表是 host 侧的），它走 _localClientDropped 那条。
+                _heldSeat = FindHeldSeat();
+                _connectionBeforeDrop = _heldSeat == BilliardsRules.SeatNone
+                    ? -1
+                    : _game.SeatConnectionId(_heldSeat);
                 _maskBeforeDrop = state.Pocketed;
             }
             else if (!nowWaiting && _waitingForReconnect && !state.HasFlag(BilliardsFlags.Abandoned))
             {
                 _reconnectObserved = true;
-                _seatAfterReturn = _game == null ? BilliardsRules.SeatNone : _game.LocalSeat;
+                _connectionAfterReturn = _heldSeat == BilliardsRules.SeatNone
+                    ? -1
+                    : _game.SeatConnectionId(_heldSeat);
                 _maskAfterReturn = state.Pocketed;
             }
 
@@ -780,32 +838,98 @@ namespace DataChannelUnity.Example
             claims.Add(claim);
         }
 
+        /// <summary>
+        /// 重连那次。**两端验的不是同一件事**，所以判据也不同：
+        ///
+        /// - host 跟的是**被留住的那个座位**：它是否被同一个座位号、不同的 connection id 接回，
+        ///   且落袋掩码没变。
+        /// - client 只能跟**自己**：它掉过线、回来之后拿到的座位号是不是原来那个。它问不到别人的
+        ///   座位（座位表是 host 侧的），所以一个**全程没断过**的 client 对这条只能是未观测 ——
+        ///   而前一版会让它报「我的座位没变，成立」。
+        /// </summary>
         private void AddReconnectClaim(List<Claim> claims)
         {
             var claim = new Claim
             {
                 Id = "reconnect",
-                Statement = "重连回到原座位，且局面与断连前一致",
-                Criterion = "座位号不变（分组由座位派生，所以分组同时不变）、落袋掩码断连前后一致",
-                Note = "connection id 一定会变（#120 从不复用），所以它不在判据里"
+                Statement = "掉线的那一端被接回原座位，且局面与断连前一致",
+                Criterion = "座位号不变（分组由座位派生，所以分组同时不变）、落袋掩码不变、" +
+                            "connection id **必须**变（#120 从不复用，所以不变就说明没真的重连过）",
+                Note = "host 跟被留住的那个座位；client 只能跟自己那一个。全程没断过的一端是未观测"
             };
 
+            if (IsHost)
+            {
+                AddHostReconnectClaim(claim, claims);
+                return;
+            }
+
+            AddClientReconnectClaim(claim, claims);
+        }
+
+        private void AddHostReconnectClaim(Claim claim, List<Claim> claims)
+        {
             if (!_reconnectObserved)
             {
                 claim.Verdict = Verdict.NotObserved;
                 claim.Measured = _waitingForReconnect
-                    ? "正在等重连，还没回来"
-                    : "这次运行里没有发生过断连与重连";
+                    ? $"座位 {_heldSeat} 正被留着等重连，还没回来"
+                    : "这次运行里没有座位被留过";
                 claims.Add(claim);
                 return;
             }
 
-            bool seatSame = _seatBeforeDrop == _seatAfterReturn;
+            if (_heldSeat == BilliardsRules.SeatNone)
+            {
+                // 标志立起来过而问不出哪个座位 —— 那说明两者不一致，说出来而不是判它成立。
+                claim.Verdict = Verdict.Violated;
+                claim.Measured = "等重连的标志立过，但当时没有任何座位处于留座状态 —— " +
+                                 "标志与座位表不一致";
+                claims.Add(claim);
+                return;
+            }
+
+            bool cameBack = _connectionAfterReturn >= 0;
+            bool idChanged = _connectionAfterReturn != _connectionBeforeDrop;
             bool maskSame = _maskBeforeDrop == _maskAfterReturn;
 
-            claim.Measured = $"座位 {_seatBeforeDrop}→{_seatAfterReturn}，" +
+            claim.Measured = $"座位 {_heldSeat} 被留住并接回：connection " +
+                             $"{_connectionBeforeDrop}→{_connectionAfterReturn}，" +
                              $"落袋掩码 {_maskBeforeDrop:X4}→{_maskAfterReturn:X4}";
-            claim.Verdict = seatSame && maskSame ? Verdict.Holds : Verdict.Violated;
+            claim.Verdict = cameBack && idChanged && maskSame ? Verdict.Holds : Verdict.Violated;
+            claims.Add(claim);
+        }
+
+        private void AddClientReconnectClaim(Claim claim, List<Claim> claims)
+        {
+            if (!_localClientDropped)
+            {
+                claim.Verdict = Verdict.NotObserved;
+                claim.Measured = "这一端自己没掉过线 —— 别人的座位它问不到，所以这条无从验证";
+                claims.Add(claim);
+                return;
+            }
+
+            int seatNow = _game == null ? BilliardsRules.SeatNone : _game.LocalSeat;
+
+            if (seatNow == BilliardsRules.SeatNone)
+            {
+                claim.Verdict = Verdict.Violated;
+                claim.Measured = $"掉线前是座位 {_localSeatBeforeDrop}，回来之后没有拿到任何座位";
+                claims.Add(claim);
+                return;
+            }
+
+            ushort maskNow = _game.State.Pocketed;
+            bool seatSame = seatNow == _localSeatBeforeDrop;
+            bool maskSame = maskNow == _maskBeforeDrop;
+
+            claim.Measured = $"本机掉线后回来：座位 {_localSeatBeforeDrop}→{seatNow}，" +
+                             $"落袋掩码 {_maskBeforeDrop:X4}→{maskNow:X4}" +
+                             (_game.LocalGameVoided ? "（但这一局已被告知作废）" : "");
+            claim.Verdict = seatSame && maskSame && !_game.LocalGameVoided
+                ? Verdict.Holds
+                : Verdict.Violated;
             claims.Add(claim);
         }
 
@@ -816,13 +940,22 @@ namespace DataChannelUnity.Example
         /// </summary>
         private void AddFpsClaim(List<Claim> claims)
         {
+            // 这条判据**只在真机 Player 上成立**。Editor 里有 Game view、Inspector、Console、
+            // 资源导入与 GC 一起跑，随便一个都会造出几十毫秒的长帧 —— #139 实测：Editor 里
+            // 平均 354 fps 而最低 15.1 fps，于是这条判成「不成立」，而那不是被测对象的性质。
+            // §8.2 那个 50 fps 是给 8.5 px 的球在手机上写的，所以在 Editor 里它是噪声。
+            bool meaningful = !Application.isEditor;
+
             var claim = new Claim
             {
                 Id = "frameRate",
                 Statement = "球在动的时候帧率没掉到会看出拖影的程度",
-                Criterion = $"Simulate 阶段最低 fps ≥ {_minimumFpsCriterion:F0}",
+                Criterion = meaningful
+                    ? $"Simulate 阶段最低 fps ≥ {_minimumFpsCriterion:F0}"
+                    : $"Simulate 阶段最低 fps ≥ {_minimumFpsCriterion:F0}（**在 Editor 里不判** —— " +
+                      "编辑器自身的长帧不是被测对象的性质）",
                 Note = "开球峰值 3.96 m/s；50 fps 下每帧约 1.4 球宽，30 fps 下 2.3 球宽（§8.2）。" +
-                       $"起头 {_fpsWarmupSeconds:F0} s 的帧不计入"
+                       $"起头 {_fpsWarmupSeconds:F0} s 的帧不计入。这条只在真机 Player 上有意义"
             };
 
             if (_shotFrames == 0 && _sessionFrames == 0)
@@ -847,8 +980,12 @@ namespace DataChannelUnity.Example
             }
 
             claim.Measured = $"{session}；球在跑的 {_shotFrames} 帧：" +
-                             $"mean={_shotFrames / _shotFrameSeconds:F1} min={_shotMinFps:F1}";
-            claim.Verdict = _shotMinFps >= _minimumFpsCriterion ? Verdict.Holds : Verdict.Violated;
+                             $"mean={_shotFrames / _shotFrameSeconds:F1} min={_shotMinFps:F1}" +
+                             (meaningful ? "" : "（Editor，不判）");
+
+            claim.Verdict = !meaningful
+                ? Verdict.NotObserved
+                : _shotMinFps >= _minimumFpsCriterion ? Verdict.Holds : Verdict.Violated;
             claims.Add(claim);
         }
 
