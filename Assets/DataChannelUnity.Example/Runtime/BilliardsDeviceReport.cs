@@ -1172,6 +1172,16 @@ namespace DataChannelUnity.Example
             sb.AppendLine($"  \"isEditor\": {(Application.isEditor ? "true" : "false")},");
             sb.AppendLine($"  \"persistentDataPath\": {Json(Application.persistentDataPath)},");
 
+            // 原生二进制的身份，与 transport 那条同一个论证、往下一层：托管层永远是本仓库
+            // 这一份，而**加载起来的是哪个 .so/.dll/.a 由 Plugins/ 决定**。拿旧二进制配新
+            // 托管层时，动态库平台不会在启动时报错 —— 要等真调到缺失的那个导出才抛
+            // EntryPointNotFoundException。所以「跑的是哪个 ABI」必须是报告里的一个字段，
+            // 而不是靠 logcat 捞那行 init 日志：Release 播放器的默认级别是 Warning，
+            // 那行是 Info，压根不会发（DataChannelLog.cs 的 #if / #12 的决议）。
+            //
+            // 0 = 原生从来没起来（dcu_init 失败或插件缺失），与 2/3 可区分。
+            sb.AppendLine($"  \"abiVersion\": {DataChannelRuntime.AbiVersion},");
+
             // 传输层的身份要写进去：FishNet 在组件缺失时会**静默**换成 Tugboat，那时每一个字节
             // 数字都还看着合理，但量的不是这个包。
             sb.AppendLine($"  \"transport\": {Json(_manager == null || _manager.TransportManager == null || _manager.TransportManager.Transport == null ? null : _manager.TransportManager.Transport.GetType().Name)},");
