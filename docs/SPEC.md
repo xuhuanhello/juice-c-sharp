@@ -598,7 +598,7 @@ Therefore the data segment copies live, open channels into a **reused `List` sna
 
 | Scenario | Action |
 |----------|--------|
-| **Edit mode** | Pump is **resident** — driven by `EditorApplication.update`, **not** `PlayerLoop` (see below); native init is **lazy**. `beforeAssemblyReload` records "was it initialised" in `SessionState`; `afterAssemblyReload` re-creates **only if it was** |
+| **Edit mode** | Pump is **resident** — driven by `EditorApplication.update`, **not** `PlayerLoop` (see below); native init is **lazy**. `beforeAssemblyReload` records "was it initialised" in `SessionState`; `afterAssemblyReload` re-creates **only if it was, and only when that reload is not the enter-play transition** (see below) |
 | `beforeAssemblyReload` (edit-mode recompile, and entering play mode with Reload Domain on) | `DisposeAllLive()` → `UnregisterPump()` → **`dcu_shutdown()`** |
 | `ExitingPlayMode` | `DisposeAllLive()` → `UnregisterPump()`, **no shutdown**. Nothing to re-install on `EnteredEditMode` — the edit-mode pump is a separate, always-subscribed `EditorApplication.update` handler |
 | Reload Domain **disabled** | `[RuntimeInitializeOnLoadMethod(SubsystemRegistration)]` → `DisposeAllLive()` + pump dedup, **no shutdown** |
@@ -606,6 +606,12 @@ Therefore the data segment copies live, open channels into a **reused `List` sna
 | Player `Application.quitting` | `DisposeAllLive()` only, **no shutdown** |
 
 **The edit-mode pump cannot be a `PlayerLoop` entry — `PlayerLoop` does not run in edit mode.** This was measured, not read off a doc: a pump entry inserted into the tree in edit mode was verifiably present *and* `Pump()` had not run for 934.8 s. An earlier version of this table said "`EnteredEditMode` → `RegisterPump()`", which cannot deliver the resident pump it was asking for. `EditorApplication.update` is the only mechanism that does; it is subscribed once from `[InitializeOnLoadMethod]` and skips itself while `isPlaying`, leaving play mode to the `PlayerLoop` entry so there is exactly one answer to "what is driving the pump right now".
+
+**`afterAssemblyReload` skips the enter-play transition**, guarded by `EditorApplication.isPlayingOrWillChangePlaymode`. With Reload Domain on, entering play mode fires that reload, and re-initialising there is immediately undone and redone: `ResetStaticsOnEnterPlayMode` (`SubsystemRegistration`) clears `_initAttempted`/`_nativeReady`, then `Bootstrap` (`BeforeSceneLoad`) calls `EnsureNative()` again — two `Native library initialized` lines in the Console for one entry into play mode. Native is **not** initialised twice (`dcu_init` is idempotent through `g_inited.exchange(true)`), so the cost is diagnostic noise only: the duplicate invites the reader to believe init really ran twice.
+
+The guard cannot be replaced by deleting the hook. `afterAssemblyReload` covers what `Bootstrap` cannot — **using the API in edit mode without ever entering play** (an EditorWindow driving a `PeerConnection`, or EditMode tests), where `RuntimeInitializeOnLoadMethod` does not fire at all. The two overlap on exactly one reload.
+
+**The predicate's values are measured, not inferred** (2022.3.62f3, Reload Domain on): in the main editor process, `afterAssemblyReload` reads `false` on an edit-mode recompile and `true` on the enter-play reload. **Measuring it requires attributing each sample to its process.** `AssetImportWorker` instances are separate Unity processes with their own domains, `[InitializeOnLoad]` runs in them, and they share the project's `Library/` — so a file-based probe collects their lines too. They have no play mode, so their predicate is always `false`; reading an unattributed log yields the opposite conclusion.
 
 Rationale for the two asymmetric ones:
 

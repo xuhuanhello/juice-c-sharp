@@ -90,14 +90,40 @@ namespace DataChannelUnity
         /// 域重建之后，**仅当之前 init 过**才重新初始化。
         /// </summary>
         /// <remarks>
+        /// <para>
         /// 无条件重建会让同一个编辑模式的状态取决于「你有没有编译过一次」——
         /// Unity 官方的 <c>ContextManager</c> 正是因为不记这个标志而有这个毛病：
         /// 冷启动编辑器没有 context，随便触发一次编译就有了。
         /// 补上标志位得到的才是它想要的「懒初始化 + 跨重载恢复」。
+        /// </para>
+        /// <para>
+        /// **进播放态引起的那次重载在这里不做恢复。** 那一次做了会被立刻撤销再重做：
+        /// <c>ResetStaticsOnEnterPlayMode</c>（<c>SubsystemRegistration</c>）紧接着把
+        /// <c>_initAttempted</c>/<c>_nativeReady</c> 清成 false，然后 <c>Bootstrap</c>
+        /// （<c>BeforeSceneLoad</c>）再 <c>EnsureNative()</c> 一次 —— 于是 Console 里
+        /// 出现两行 <c>Native library initialized</c>。原生侧没有双初始化
+        /// （<c>dcu_init</c> 靠 <c>g_inited.exchange(true)</c> 幂等），代价是诊断噪声：
+        /// 两行会让人以为真的初始化了两次。
+        /// </para>
+        /// <para>
+        /// **这道门不能换成删掉本方法。** 本方法覆盖 <c>Bootstrap</c> 到不了的场景 ——
+        /// 编辑模式下用 API、从不进播放态（EditorWindow 驱动一个 PeerConnection，或
+        /// EditMode 测试）：那条路上 <c>RuntimeInitializeOnLoadMethod</c> 根本不触发
+        /// （见 <c>MainThread</c> 的两个 Capture 入口）。两者只在这一次重载上重叠。
+        /// </para>
+        /// <para>
+        /// 谓词取值是**实测**的，不是推的（2022.3.62f3，Reload Domain 开）：主编辑器
+        /// 进程里，纯编辑模式重编时 <c>afterAssemblyReload</c> 读到 <c>false</c>，
+        /// 进播放态那次读到 <c>true</c>。量的时候必须按进程区分 ——
+        /// <c>AssetImportWorker</c> 是独立 Unity 实例、各有自己的域、
+        /// <c>[InitializeOnLoad]</c> 照样执行，而它们没有播放态，谓词恒为 <c>false</c>；
+        /// 不区分就会把 worker 的 false 读成主编辑器的答案，结论正好相反。
+        /// </para>
         /// </remarks>
         private static void OnAfterAssemblyReload()
         {
             if (!SessionState.GetBool(SessionKeyWasInitialized, false)) return;
+            if (EditorApplication.isPlayingOrWillChangePlaymode) return;
             EnsureNative();
         }
 
