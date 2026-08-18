@@ -1,23 +1,22 @@
 {
-  "abi_version": 2,
+  "abi_version": 3,
   "architectures": [
     "x86_64"
   ],
-  "built_at": "2026-08-05T03:26:21+00:00",
+  "built_at": "2026-08-18T19:01:49+00:00",
   "ci": {
     "event": "workflow_dispatch",
-    "ref": "refs/heads/main",
+    "ref": "refs/heads/feat/connection-path-abi3",
     "run_attempt": "1",
-    "run_id": "30972175512",
-    "run_url": "https://github.com/xuhuanhello/juice-c-sharp/actions/runs/30972175512",
+    "run_id": "32174052613",
+    "run_url": "https://github.com/xuhuanhello/juice-c-sharp/actions/runs/32174052613",
     "workflow": "Plugins matrix"
   },
   "platform": "linux",
   "plugin": "datachannel_unity",
   "schema": 1,
   "source": {
-    "commit": "8cf54c60a957194c24d5f2ce2c0c4f004cd017d1",
-    "dirty": false
+    "commit": "f1975e2652d3cd3e5390e9621788ceb7aaec4c11"
   },
   "toolchain": {
     "cmake": "3.31.6",
