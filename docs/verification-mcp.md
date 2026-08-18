@@ -17,6 +17,8 @@
 >
 > `refresh_unity` does **not** help; neither does re-importing the plugin.
 >
+> **Replace the plugin file — write to a temp name and `mv` over, or close the Editor first; never overwrite it in place while an Editor holds it.** On macOS, overwriting a dylib that a running Editor has mapped invalidates the file's kernel code-signature registration. The Editor keeps running on its in-memory copy, so nothing looks wrong — but from that moment **any process that maps the file's bytes is killed**: `git status` / `git commit` die with `SIGKILL (Code Signature Invalid)` the moment they hash the "modified" plugin, while `git log` / `git diff-files` stay alive (they never read the bytes), which points every finger except the right one. Measured 2026-08-19: repo-wide git kills — surviving `brew reinstall git`, hitting every git client identically — traced to exactly this. Recovery: restore a clean copy with `git checkout -- <plugin>` (a new inode carries a fresh registration), then restart the Editor.
+>
 > **Cheap machine check** before trusting any result — the Editor must have started *after* the plugin was written:
 >
 > ```csharp
@@ -325,6 +327,7 @@ Recorded in [#42](https://github.com/xuhuanhello/juice-c-sharp/issues/42) as the
 | Symptom | Action |
 |---------|--------|
 | Behaviour looks unchanged after a rebuild | The Editor is still running the **old** binary — restart it. See the prerequisite box at the top; this fails *silently* and looks like a pass |
+| `git status` / `git commit` killed (`SIGKILL (Code Signature Invalid)`), only in this repo, every git client | The plugin was overwritten **in place** while an Editor had it loaded — its signature registration is stale, and git dies hashing the file's content. `git checkout -- <plugin>` (new inode), restart the Editor. Prevention is in the prerequisite box: replace, never overwrite |
 | `DllNotFoundException` / native unavailable | Rebuild: `./native/scripts/build-macos.sh` (CMake entry, SPEC §9); confirm `.bundle` only under `Plugins/macOS/` |
 | `permission denied` running a script | The script lost its executable bit in git — `git update-index --chmod=+x native/scripts/<name>.sh`. **Do not `chmod` and move on**; that hides the same regression next time |
 | Audit fails on crypto dylibs | Product path must use subprojects MbedTLS static (never brew OpenSSL) |
@@ -334,7 +337,7 @@ Recorded in [#42](https://github.com/xuhuanhello/juice-c-sharp/issues/42) as the
 | MCP `no_unity_session` / multi-instance | Connect MCP for **this** project; `set_active_instance` from `mcpforunity://instances` |
 | Dual peer timeout in step 5 | Ensure `DataChannelRuntime.Pump()` is called in the wait loop (`execute_code` is not the PlayerLoop) |
 | Dual peer timeout in step 7 | The opposite — the pump should be running by itself. Suspect pump registration or a third-party `SetPlayerLoop` overwrite |
-| PlayMode run stalls, a case reports **`Cancelled by user`** when nobody cancelled | The Editor window is **unfocused**. `get_test_job` says so in `blocked_reason: editor_unfocused` + `stuck_suspected: true`, but the per-case message names the wrong cause — read those two fields before believing it. PlayMode needs focus unless `PlayerSettings.runInBackground` is on, and it is **off** in this project. Focus the Editor and re-run; do **not** flip `runInBackground` to work around it — that setting also changes shipped Player behaviour, so it is a product decision, not a test fixture |
+| PlayMode run stalls, a case reports **`Cancelled by user`** when nobody cancelled | The Editor window is **unfocused**. `get_test_job` says so in `blocked_reason: editor_unfocused` + `stuck_suspected: true`, but the per-case message names the wrong cause — read those two fields before believing it. PlayMode needs focus unless `PlayerSettings.runInBackground` is on. It is **on** in this project since `1e6b5b2` — decided as product behaviour for the FishNet example's two-instance testing (a backgrounded peer must keep ticking), not as a test fixture — so if you still hit this, first check the setting has not been reverted |
 
 ---
 
