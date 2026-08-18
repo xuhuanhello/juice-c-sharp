@@ -15,6 +15,7 @@
 //      等待回调收敛，而回调自己要进本表查句柄 —— 持锁销毁 = 自死锁。
 //      所有摘除路径都先把 shared_ptr move 出来、解锁、再让它在锁外析构。
 
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -28,6 +29,7 @@ class DcuHandleTable {
 public:
     int add_pc(std::shared_ptr<rtc::PeerConnection> pc) {
         std::lock_guard<std::mutex> lk(mu_);
+        guard_exhaustion();
         int h = next_++;
         pcs_.emplace(h, std::move(pc));
         return h;
@@ -35,6 +37,7 @@ public:
 
     int add_dc(std::shared_ptr<rtc::DataChannel> dc) {
         std::lock_guard<std::mutex> lk(mu_);
+        guard_exhaustion();
         int h = next_++;
         dcs_.emplace(h, std::move(dc));
         return h;
@@ -85,6 +88,17 @@ public:
     }
 
 private:
+    // #151：句柄空间 2^31，按进程生命周期设计。`next_` 到顶时再 ++ 是有符号溢出
+    // UB，回绕后「永不复用」在数学上失效 —— 与其未定义，不如响亮：到顶即抛，
+    // 经 dcu_wrap 落 DCU_ERR_FAILURE（回调路径由调用方自己接住，见 dcu_impl）。
+    // 量级注记：每秒 1000 次创建也要 ~25 天才耗尽，游戏客户端不可达。
+    void guard_exhaustion() const {
+        if (next_ == std::numeric_limits<int>::max())
+            throw std::runtime_error(
+                "dcu handle space exhausted: 2^31 handles were allocated in this process. "
+                "Handles are monotonic and never reused by design (stale-event safety).");
+    }
+
     template <typename Map> bool erase_from(Map &m, int h) {
         typename Map::mapped_type keep;
         {

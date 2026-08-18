@@ -172,6 +172,9 @@ namespace DataChannelUnity
         {
             MainThread.Assert("PeerConnection.SetRemoteDescription");
             ThrowIfDisposed();
+            // #147：answerer 的典型流程是「建 PC → 设远端 offer → 等事件」，此前这条
+            // 路上没有任何存活检查点 —— 泵被抹除时它永远等不到那条诊断。
+            DataChannelRuntime.CheckPumpLiveness("PeerConnection.SetRemoteDescription");
             if (sdp == null) throw new ArgumentNullException(nameof(sdp));
             if (type == null) throw new ArgumentNullException(nameof(type));
             var sdpB = Encoding.UTF8.GetBytes(sdp);
@@ -186,6 +189,7 @@ namespace DataChannelUnity
         {
             MainThread.Assert("PeerConnection.AddRemoteCandidate");
             ThrowIfDisposed();
+            DataChannelRuntime.CheckPumpLiveness("PeerConnection.AddRemoteCandidate"); // #147
             if (candidate == null) throw new ArgumentNullException(nameof(candidate));
             var cB = Encoding.UTF8.GetBytes(candidate);
             byte[] mB = mid == null ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(mid);

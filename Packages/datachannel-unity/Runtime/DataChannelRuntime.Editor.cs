@@ -97,13 +97,13 @@ namespace DataChannelUnity
         /// 补上标志位得到的才是它想要的「懒初始化 + 跨重载恢复」。
         /// </para>
         /// <para>
-        /// **进播放态引起的那次重载在这里不做恢复。** 那一次做了会被立刻撤销再重做：
-        /// <c>ResetStaticsOnEnterPlayMode</c>（<c>SubsystemRegistration</c>）紧接着把
-        /// <c>_initAttempted</c>/<c>_nativeReady</c> 清成 false，然后 <c>Bootstrap</c>
-        /// （<c>BeforeSceneLoad</c>）再 <c>EnsureNative()</c> 一次 —— 于是 Console 里
-        /// 出现两行 <c>Native library initialized</c>。原生侧没有双初始化
-        /// （<c>dcu_init</c> 靠 <c>g_inited.exchange(true)</c> 幂等），代价是诊断噪声：
-        /// 两行会让人以为真的初始化了两次。
+        /// **进播放态引起的那次重载在这里不做恢复。** #146 之前的理由是「做了会被
+        /// 立刻撤销再重做」—— <c>ResetStaticsOnEnterPlayMode</c> 清标志后
+        /// <c>Bootstrap</c> 会再 <c>EnsureNative()</c>，Console 出现两行
+        /// <c>Native library initialized</c>（#141 记的噪声）。#146 落地后
+        /// <c>Bootstrap</c> **不再加载 native**，这里的跳过依然正确：播放会话由
+        /// 首次构造 / <c>Preload()</c> 惰性加载，本方法若在此恢复反而会把
+        /// 「进播放不用包也加载」的旧行为带回来。
         /// </para>
         /// <para>
         /// **这道门不能换成删掉本方法。** 本方法覆盖 <c>Bootstrap</c> 到不了的场景 ——

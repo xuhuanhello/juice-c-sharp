@@ -1179,7 +1179,10 @@ namespace DataChannelUnity.Example
             // 而不是靠 logcat 捞那行 init 日志：Release 播放器的默认级别是 Warning，
             // 那行是 Info，压根不会发（DataChannelLog.cs 的 #if / #12 的决议）。
             //
-            // 0 = 原生从来没起来（dcu_init 失败或插件缺失），与 2/3 可区分。
+            // 0 = 写报告时原生尚未加载 —— #146 之后 AbiVersion 是被动探询（读取不
+            // 触发加载），可能是「插件缺失 / dcu_init 失败」，也可能是「这局压根没
+            // 建过连接」。报告随对局落盘、对局必然建 PC，所以实践里 0 仍指向前者；
+            // 与 2/3 可区分。
             sb.AppendLine($"  \"abiVersion\": {DataChannelRuntime.AbiVersion},");
 
             // 传输层的身份要写进去：FishNet 在组件缺失时会**静默**换成 Tugboat，那时每一个字节

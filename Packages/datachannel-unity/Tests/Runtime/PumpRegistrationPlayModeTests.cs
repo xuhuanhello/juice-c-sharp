@@ -28,6 +28,7 @@ namespace DataChannelUnity.Tests
         {
             // 缺席必须是失败，不是跳过（SPEC §11）：没有插件时不 Assert.Ignore，
             // 否则「压根没跑」和「跑过了，绿」在报告里长得一模一样。
+            DataChannelRuntime.Preload(); // #146 被动化后，读属性不再触发加载 —— 测试侧显式预热。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
                 "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor: "
                 + "Unity loads native plugins process-wide and never unloads them (docs/verification-mcp.md).");

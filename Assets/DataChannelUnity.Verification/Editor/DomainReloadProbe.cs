@@ -69,9 +69,14 @@ namespace DataChannelUnity.Verification
         [MenuItem(Menu + "1. 布置（创建对象，故意不 Dispose）")]
         public static void Plant()
         {
-            if (!DataChannelRuntime.IsNativeAvailable)
+            // #146：惰性范式下读属性不再触发加载，布置前显式预热。
+            try
             {
-                Debug.LogError("[Probe] 原生插件未加载，无法布置。");
+                DataChannelRuntime.Preload();
+            }
+            catch (DataChannelException e)
+            {
+                Debug.LogError("[Probe] 原生插件加载失败，无法布置：" + e.Message);
                 return;
             }
 

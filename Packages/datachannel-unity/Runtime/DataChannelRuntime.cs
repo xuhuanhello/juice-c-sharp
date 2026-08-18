@@ -19,15 +19,28 @@ namespace DataChannelUnity
         private const int ControlQueueDepthWarn = 1024;         // 与上游 RECV_QUEUE_LIMIT 同量级
         private const double PumpStaleSeconds = 5.0;            // 秒级；只在应用调 API 时查，绝不后台轮询
 
+        // #147：存活判定的帧推进门槛。健康稳态 delta ∈ {0,1}（脚本 Update 先于
+        // 尾插的 pump 条目，同帧调用可见 delta=1；LateUpdate/协程里调用可见 0），
+        // 3 留余量。帧没推进（编辑器暂停、移动端后台挂起、一切冻结形态）= 循环
+        // 本身没在跑，不是泵的故障 —— #145 实测：暂停 >5s 后一次 API 调用就把
+        // 唯一的重试额度烧在幻影上，之后真被抹除时得不到自愈。
+        private const long PumpStallFrames = 3;
+
         private static bool _nativeReady;
         private static bool _initAttempted;
         private static bool _pumpRegistered;
 
-        // pump 存活：单调计数 + 单调墙钟。计数只用于诊断文本，判定看时间戳。
+        // pump 存活：单调计数 + 单调墙钟 + 帧号。计数只用于诊断文本；判定看
+        // 时间戳（多久没跑）与帧号（循环是否真在推进）两个观测面（#147）。
         private static long _pumpTicks;
         private static long _lastPumpTimestamp;
+        private static long _lastPumpFrame;
         private static bool _pumpReregisterAttempted;
         private static bool _pumpRetryExhausted;
+
+        // #148：Pump 的重入守卫。常驻（非 Conditional）—— 它防的是 Release 下
+        // 也真实的数据损坏（复用缓冲被内层覆写，外层回调手里的 Span 变质）。
+        private static bool _pumping;
 
         private static byte[] _payloadBuf = new byte[65536];
         private static byte[] _payload2Buf = new byte[4096];
@@ -50,25 +63,59 @@ namespace DataChannelUnity
         private static readonly System.Collections.Generic.List<PeerConnection> PeerSnapshot =
             new System.Collections.Generic.List<PeerConnection>();
 
+        /// <summary>
+        /// 原生库**当前**是否已加载并初始化。**被动探询，读取不触发加载**（#146）。
+        /// </summary>
+        /// <remarks>
+        /// 未加载时如实返回 <c>false</c>；要加载，构造第一个
+        /// <see cref="PeerConnection"/>，或调用 <see cref="Preload"/>。
+        /// 旧语义（读取即尝试加载）在 0.4.0 移除 —— 惰性范式下「查询不改变系统状态」
+        /// 比「查询即答案」更值钱：一个诊断 HUD 读个属性就把原生库拉起来，
+        /// 恰好破坏范式要给的时机控制。
+        /// </remarks>
         public static bool IsNativeAvailable
         {
             get
             {
                 MainThread.Assert("DataChannelRuntime.IsNativeAvailable");
-                EnsureNative();
                 return _nativeReady;
             }
         }
 
+        /// <summary>
+        /// 已加载原生库的 ABI 版本。**被动探询：未加载时返回 0，不触发加载**（#146）。
+        /// </summary>
         public static int AbiVersion
         {
             get
             {
                 MainThread.Assert("DataChannelRuntime.AbiVersion");
-                EnsureNative();
                 if (!_nativeReady) return 0;
                 return NativeMethods.dcu_abi_version(out var v) == NativeMethods.Success ? v : 0;
             }
+        }
+
+        /// <summary>
+        /// 可选的显式预热：立即加载并初始化原生库。**不调用也完全可用** ——
+        /// 首次构造 <see cref="PeerConnection"/> 会自动加载（#146，与上游
+        /// <c>rtcPreload</c> 的「惰性 + 可选预热」同形）。
+        /// </summary>
+        /// <remarks>
+        /// 两类场景需要它：在加载画面里预热 DTLS/SCTP，别让「加入对局」那一下
+        /// 付首连延迟；以及排查崩溃时把原生加载钉到自选时刻做二分。
+        /// 幂等；主线程限定。**失败抛 <see cref="DataChannelException"/>** ——
+        /// 调用者显式要了，缺席就该是异常，而不是内部懒加载路径里的一行日志。
+        /// 失败的具体成因（插件缺失 / dcu_init 返回码）在抛出前已记入日志。
+        /// </remarks>
+        public static void Preload()
+        {
+            MainThread.Assert("DataChannelRuntime.Preload");
+            EnsureNative();
+            if (!_nativeReady)
+                throw new DataChannelException(
+                    "Preload failed: the native plugin could not be loaded or initialized. "
+                    + "The cause was logged just above (missing plugin binary, or a dcu_init failure). "
+                    + "Build and place the plugin per docs/SPEC.md.");
         }
 
         /// <summary>
@@ -93,8 +140,10 @@ namespace DataChannelUnity
             _pumpRegistered = false;
             _pumpTicks = 0;
             _lastPumpTimestamp = 0;
+            _lastPumpFrame = 0;
             _pumpReregisterAttempted = false;
             _pumpRetryExhausted = false;
+            _pumping = false;
             _grewPayload = _grewPayload2 = _grewMessage = _grewLog = false;
             // 上个域残留的泄漏记录不该报进新域 —— 那些对象的表项已经随静态字段一起没了。
             LeakTracker.Clear();
@@ -105,7 +154,12 @@ namespace DataChannelUnity
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         private static void Bootstrap()
         {
-            EnsureNative();
+            // **这里刻意不 EnsureNative**（#146）：native 的加载只经两条门 ——
+            // 首次构造 PeerConnection，或显式 Preload()。从不使用本包的应用不再
+            // 在启动付 dlopen + rtc::Preload；要确定性时机的应用自己选门。
+            // pump 接线保持自动（#146 决议一）：纯托管 PlayerLoop 条目，native
+            // 未加载时每帧只有一次时间戳、零 P/Invoke（Pump 对 !_nativeReady 直接
+            // 返回），且它是事件能送达的前提 —— 惰性化的是加载，不是接线。
             RegisterPump();
             Application.quitting -= OnApplicationQuitting;
             Application.quitting += OnApplicationQuitting;
@@ -154,8 +208,9 @@ namespace DataChannelUnity
                     _nativeReady = true;
                     // 存活判定的基准点。不设的话，EditMode 下第一次 new PeerConnection
                     // 会因为「pump 从来没跑过」被误报成死泵 —— 编辑模式本来就没有
-                    // PlayerLoop，那不是故障。
+                    // PlayerLoop，那不是故障。帧号同点设基准（#147）。
                     _lastPumpTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                    _lastPumpFrame = Time.frameCount;
                     NativeMethods.dcu_set_log_level((int)DataChannelLog.Level);
                     NativeMethods.dcu_abi_version(out var abi);
                     DataChannelLog.Emit(LogLevel.Info, "Native library initialized (abi=" + abi + ").");
@@ -315,10 +370,8 @@ namespace DataChannelUnity
         }
 
         /// <summary>
-        /// Drain native event queue and raise managed events on the calling thread (must be main thread).
-        /// </summary>
-        /// <summary>
-        /// 排空原生事件并在调用线程（必须是主线程）上派发。
+        /// 排空原生事件并在调用线程（必须是主线程）上派发。**不可重入**：
+        /// 在事件/消息回调里再调本方法会抛 <see cref="InvalidOperationException"/>（#148）。
         /// </summary>
         /// <remarks>
         /// 两段结构（SPEC §6）：先排空**控制**队列，再逐通道**拉取**消息。
@@ -332,27 +385,51 @@ namespace DataChannelUnity
         {
             MainThread.Assert("DataChannelRuntime.Pump");
 
-            // **存活戳记在最前面，且在 _nativeReady 检查之前。** 原生没就绪时 pump
-            // 照样是在跑的，那不是「泵死了」；把戳记放在 return 之后会让存活检测
-            // 去报一个根本不存在的故障。
-            var start = System.Diagnostics.Stopwatch.GetTimestamp();
-            _pumpTicks++;
-            _lastPumpTimestamp = start;
+            // #148：重入守卫，**常驻分支**（不用 Conditional —— 它防的是 Release 下
+            // 也真实的数据损坏：内层 pump 覆写复用的消息缓冲，外层回调手里的
+            // ReadOnlySpan 在回调期间变质）。重入按定义发生在本方法已在栈上时，
+            // 而本方法内所有进入用户代码的口子都有每订阅者隔离 —— 这个异常必然被
+            // 外层自己接住，变成一条带完整栈的 Error 日志：响亮、不崩，且让
+            // 「发一条、泵到回复为止」的同步自旋写法立刻失败而不是静默挂死。
+            if (_pumping)
+                throw new InvalidOperationException(
+                    "DataChannelRuntime.Pump() was called re-entrantly from inside a pump dispatch (an event or message callback). "
+                    + "Do not pump from callbacks: the outer pump is already dispatching and will continue draining after your callback returns. "
+                    + "A re-entrant pump would overwrite the shared message buffer while your ReadOnlySpan<byte> still points into it.");
 
-            if (!_nativeReady) return;
+            _pumping = true;
+            try
+            {
+                // **存活戳记在最前面，且在 _nativeReady 检查之前。** 原生没就绪时 pump
+                // 照样是在跑的，那不是「泵死了」；把戳记放在 return 之后会让存活检测
+                // 去报一个根本不存在的故障。帧号与时间戳同点记录（#147）：墙钟回答
+                // 「多久没跑」，帧号回答「循环是否真在推进」。
+                var start = System.Diagnostics.Stopwatch.GetTimestamp();
+                _pumpTicks++;
+                _lastPumpTimestamp = start;
+                _lastPumpFrame = Time.frameCount;
 
-            // 泄漏报告最先排，且**必须在派发之前** —— 它要摘 HandleTable 的表项，
-            // 那是一次字典改动，夹在派发中间就是在自己迭代的脚下拆桥。
-            LeakTracker.Drain();
-            // 日志先排：原生日志往往是后面那些事件的成因，先出来才有上下文。
-            DrainNativeLogs();
-            WarnIfControlQueueBacklogged();
-            DrainControlEvents();
-            DrainMessages();
+                if (!_nativeReady) return;
 
-            var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0
-                            / System.Diagnostics.Stopwatch.Frequency;
-            if (elapsedMs > SlowFrameMs) WarnSlowFrame(elapsedMs);
+                // 泄漏报告最先排，且**必须在派发之前** —— 它要摘 HandleTable 的表项，
+                // 那是一次字典改动，夹在派发中间就是在自己迭代的脚下拆桥。
+                LeakTracker.Drain();
+                // 日志先排：原生日志往往是后面那些事件的成因，先出来才有上下文。
+                DrainNativeLogs();
+                WarnIfControlQueueBacklogged();
+                DrainControlEvents();
+                DrainMessages();
+
+                var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0
+                                / System.Diagnostics.Stopwatch.Frequency;
+                if (elapsedMs > SlowFrameMs) WarnSlowFrame(elapsedMs);
+            }
+            finally
+            {
+                // try/finally 复位：派发中任何异常（含穿透隔离的未知路径）都不能
+                // 把守卫毒化成「永远拒绝泵」。
+                _pumping = false;
+            }
         }
 
         /// <summary>
@@ -421,13 +498,51 @@ namespace DataChannelUnity
         /// <c>EditorApplication.timeSinceStartup</c> —— 同一个时间戳每帧已经为慢帧告警取过。
         /// </para>
         /// </remarks>
+        /// <summary>存活判定的三值结论（#147）。</summary>
+        internal enum PumpLivenessVerdict
+        {
+            /// <summary>无可判定故障：不够陈旧，或循环本身没在推进（暂停/挂起等冻结形态）。</summary>
+            Silent = 0,
+            /// <summary>编辑模式：常驻 pump 缺席是已知限制，如实提示，不动重试状态机。</summary>
+            EditModeNotice = 1,
+            /// <summary>循环在推进而泵没跑 —— 真停摆，进入重试状态机。</summary>
+            Stalled = 2
+        }
+
+        /// <summary>
+        /// 纯谓词：不读不写任何状态，三个观测值进、一个结论出（#147）。
+        /// </summary>
+        /// <remarks>
+        /// 抽出来是为了托管档表测边界（delta 0/1/2 沉默、3 触发、5s 界）——
+        /// 「编辑器暂停」「移动端挂起」没法在测试进程里自演（#145 是真编辑器手测的），
+        /// 谓词表测 + 现有 PlayMode 集成测试合起来才是可自动化的覆盖。
+        /// 判序有意为之：编辑模式先于帧判定 —— 编辑模式下帧号不推进，
+        /// 若先查帧会把「常驻 pump 缺席」的如实提示也一并吞掉。
+        /// </remarks>
+        internal static PumpLivenessVerdict JudgePumpLiveness(double staleSeconds, long frameDelta, bool isPlaying)
+        {
+            if (staleSeconds < PumpStaleSeconds) return PumpLivenessVerdict.Silent;
+            if (!isPlaying) return PumpLivenessVerdict.EditModeNotice;
+            if (frameDelta < PumpStallFrames) return PumpLivenessVerdict.Silent;
+            return PumpLivenessVerdict.Stalled;
+        }
+
         internal static void CheckPumpLiveness(string api)
         {
             if (!_nativeReady || _lastPumpTimestamp == 0) return;
 
             var staleSeconds = (System.Diagnostics.Stopwatch.GetTimestamp() - _lastPumpTimestamp)
                                / (double)System.Diagnostics.Stopwatch.Frequency;
-            if (staleSeconds < PumpStaleSeconds) return;
+            // #147（依据 #145 的实测）：触发条件是「stale > 5s **且** 帧推进 ≥ 3」。
+            // 诊断的真实问题从来是**循环在跑而我们的条目没跑** —— 帧没推进（编辑器
+            // 暂停、移动端后台挂起、一切冻结形态）说明循环本身没在跑，不是泵的故障：
+            // 天然沉默，唯一的重试额度不再被幻影消耗。#145 实测过反例：暂停 >5s 后
+            // 一次 new PeerConnection 就把额度烧掉，之后真被第三方抹除时得不到自愈，
+            // 且报错把矛头指向不存在的第三方。帧门禁让下面那段「第三方抹了
+            // PlayerLoop」的文案只在它唯一成立的场景打出 —— 文案零改动（#147）。
+            var frameDelta = (long)Time.frameCount - _lastPumpFrame;
+            var verdict = JudgePumpLiveness(staleSeconds, frameDelta, Application.isPlaying);
+            if (verdict == PumpLivenessVerdict.Silent) return;
 
             // 编辑模式单独一条路径。**pump 在编辑模式确实没在跑，报出来没有错** ——
             // SPEC §6 要求编辑模式下 pump 常驻，而那条（连同五个生命周期场景）属于
@@ -446,7 +561,7 @@ namespace DataChannelUnity
             //
             // S8 落地后编辑模式有了常驻 pump，时间戳一直在更新，这条自然不再触发 ——
             // 不需要谁记得回来删掉一个临时分支。
-            if (!Application.isPlaying)
+            if (verdict == PumpLivenessVerdict.EditModeNotice)
             {
                 if (Throttle.Note("pump-edit-mode", staleSeconds, out var es, out var ep))
                     DataChannelLog.Emit(LogLevel.Warning,
@@ -542,7 +657,12 @@ namespace DataChannelUnity
 
         private static void DrainControlEvents()
         {
-            for (int safety = 0; safety < 256; safety++)
+            // #149：这里曾有一个 256/帧 的安全上限 —— 首个提交的无决议遗留，早于
+            // #38 定「两段都无预算」。事件不会丢（队列无界），但规格说排空就必须
+            // 排空；它护的威胁（派发中同步再生产事件的持续环）经 #149 审定不存在，
+            // 真出现时单帧挂死也比被上限掩成静默慢化更可查。终止条件三条不变：
+            // NOT_AVAIL / header.type == None / 非 Success。
+            while (true)
             {
                 var rc = NativeMethods.dcu_event_next(out var header,
                     _payloadBuf, _payloadBuf.Length, _payload2Buf, _payload2Buf.Length);

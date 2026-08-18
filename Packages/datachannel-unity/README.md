@@ -1,6 +1,6 @@
 # DataChannel Unity (`com.xuhuanhello.datachannel`)
 
-WebRTC **DataChannel** bindings for Unity: stable C ABI (`dcu_*`) over [libdatachannel](https://github.com/paullouisageneau/libdatachannel) (native) and [datachannel-wasm](https://github.com/paullouisageneau/datachannel-wasm) (WebGL).
+WebRTC **DataChannel** bindings for Unity: stable C ABI (`dcu_*`) over [libdatachannel](https://github.com/paullouisageneau/libdatachannel). WebGL (via [datachannel-wasm](https://github.com/paullouisageneau/datachannel-wasm)) is planned but **not shipped** — see `docs/SPEC.md` §9/§16.
 
 **Specification:** [`docs/SPEC.md`](../../docs/SPEC.md)
 
@@ -106,6 +106,10 @@ dc.Message += bytes => { /* ... */ };
 ```
 
 Events run on the **Unity main thread** (automatic PlayerLoop pump).
+
+Native loads **lazily** on the first `PeerConnection`. To front-load it at a moment
+you choose (e.g. behind a loading screen), call the optional
+`DataChannelRuntime.Preload()` — it throws on failure instead of logging.
 
 ## Sample
 

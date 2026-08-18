@@ -15,7 +15,7 @@
 
 ## Queues and delivery
 
-- **Event pump** — Per-frame main-thread routine with **two segments**: drain the control queue (`dcu_event_next`), then pull messages from each open channel (`dcu_dc_receive`). **Both drain fully; neither has a frame budget.** The pump is stateless and polls; there is no readiness event.
+- **Event pump** — Per-frame main-thread routine with **two segments**: drain the control queue (`dcu_event_next`), then pull messages from each open channel (`dcu_dc_receive`). **Both drain fully; neither has a frame budget.** The pump is stateless and polls; there is no readiness event. **Not re-entrant**: calling `Pump()` from inside a dispatch callback throws `InvalidOperationException`, always contained by the pump's own per-subscriber isolation (#148).
 - **Control queue** — Unbounded queue of connection/channel lifecycle events. **Control events are never dropped** — a lost `DcClosed` desynchronises the managed state machine permanently. Safe to leave unbounded because its rate follows the connection count, not peer traffic.
 - **Receive queue** — Upstream's per-channel message queue (1024 messages). Messages are **pulled**, never pushed into our own queue. When it fills, upstream's `push` blocks.
 - **Back-pressure** — What that blocking produces: SCTP's receive window closes and the peer slows down. Nothing is dropped, so `Reliable = true` stays true. **Draining is the correct operating point** — a frame budget would trigger back-pressure artificially early. **Does not hold on WebGL** (no receive queue exists there; the browser's `onmessage` cannot be blocked).
@@ -43,7 +43,7 @@
 ## Backends
 
 - **Native backend** — libdatachannel (ICE via libjuice by default), consumed through its C++ API.
-- **WebGL backend** — datachannel-wasm + browser WebRTC; C facade implements the same `dcu_*` ABI. **Same ABI, different behaviour** on the data path.
+- **WebGL backend** — datachannel-wasm + browser WebRTC; C facade implements the same `dcu_*` ABI. **Same ABI, different behaviour** on the data path. **Not shipped**: the facade is not implemented and no WebGL binary exists (SPEC §9 / §16).
 
 ## Out of package
 
@@ -64,6 +64,7 @@
 ## Managed API
 
 - **DataChannelUnity** — Public C# namespace for the UPM package.
+- **Lazy native load / `Preload()`** — The native library loads through exactly two gates: the first `PeerConnection` constructor, or the optional explicit `DataChannelRuntime.Preload()` (mirrors upstream `rtcPreload`; idempotent; throws on failure). `IsNativeAvailable` / `AbiVersion` are **passive probes** — reading them never triggers a load (#146). Pump wiring and the editor teardown safety net stay automatic; what is lazy is the load, not the plumbing.
 - **`DataChannelMessageHandler`** — The message event's delegate, `void(ReadOnlySpan<byte>)`. Custom rather than `Action<T>` because C# 9 cannot use a `ref struct` as a generic argument; Span rather than `byte[]`/`ArraySegment` so that reusing the pump's buffer is a compile error instead of silent corruption a frame later.
 - **Public surface is a P2P API, not a pipe** — the criterion for what stays public. Native handles, pump registration and redaction are `internal`.
 
@@ -72,6 +73,7 @@
 - **LogLevel** — Package logging verbosity; bridges libdatachannel logger; defaults Info in Editor/Development and Warning in release players; ICE credentials redacted.
 - **Log bridge** — Native thread → static trampoline (enqueue only, runs under upstream's lock) → bounded queue → main-thread pump → managed log. **Changing the level never detaches the bridge.**
 - **Throttled warning** — One message per category per 5 s, carrying occurrence count and peak. Used for slow pump frames (>4 ms), control-queue backlog (>1024) and dropped log lines.
+- **Pump-liveness frame gate** — The erased-pump diagnostic fires only when the loop advanced **≥ 3 frames** while **≥ 5 s** stale. A frozen loop (editor pause, mobile suspend) is not a pump fault: it stays silent and spends none of the single re-registration retry (#147, measured in #145). Checked on mutations (`PeerConnection` ctor, `CreateDataChannel`, `Send`, `SetRemoteDescription`, `AddRemoteCandidate`); queries stay pure.
 
 ## Verification
 

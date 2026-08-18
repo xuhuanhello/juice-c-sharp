@@ -59,13 +59,19 @@ namespace DataChannelUnity
         /// </remarks>
         public event DataChannelMessageHandler MessageReceived
         {
+            // #151：这对手写访问器是全库唯一有真实竞态危害的订阅口 —— 普通字段上的
+            // Combine/Remove + 快照重建，后台线程订阅会静默丢订阅。其余事件是编译器
+            // 生成的 Interlocked 访问器（违反主线程契约但机械上安全），不加断言 ——
+            // 执法点跟着危害走，不跟着仪式走。
             add
             {
+                MainThread.Assert("DataChannel.MessageReceived.add");
                 _messageReceived = (DataChannelMessageHandler)Delegate.Combine(_messageReceived, value);
                 RebuildMessageHandlers();
             }
             remove
             {
+                MainThread.Assert("DataChannel.MessageReceived.remove");
                 _messageReceived = (DataChannelMessageHandler)Delegate.Remove(_messageReceived, value);
                 RebuildMessageHandlers();
             }

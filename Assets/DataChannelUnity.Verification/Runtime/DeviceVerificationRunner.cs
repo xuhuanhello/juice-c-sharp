@@ -117,6 +117,9 @@ namespace DataChannelUnity.Verification
 
         private IEnumerator RunLoopback()
         {
+            // #146：惰性范式下第一阶段要自己显式预热（旧行为靠 Bootstrap 急切加载）。
+            // 后续阶段的 IsNativeAvailable 是被动检查，此时已加载，保持原样。
+            DataChannelRuntime.Preload();
             Require(DataChannelRuntime.IsNativeAvailable, "Native plugin not loaded. This is a failure, not a skip.");
 
             string gotA = null;

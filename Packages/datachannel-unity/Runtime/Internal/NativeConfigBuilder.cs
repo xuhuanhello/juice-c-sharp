@@ -41,13 +41,33 @@ namespace DataChannelUnity.Internal
 
         private void Build(PeerConnectionConfig config)
         {
+            // #151：明确无意义的输入在组装点就失败（缺席必须是失败）。
+            // 单侧端口设置（任一端为 0/Automatic）语义归上游，不校验。
+            if (config.PortRangeEnd != 0 && config.PortRangeBegin > config.PortRangeEnd)
+                throw new ArgumentException(
+                    "PortRangeBegin (" + config.PortRangeBegin + ") is greater than PortRangeEnd ("
+                    + config.PortRangeEnd + "). An inverted port range binds nothing and would fail "
+                    + "downstream as an unattributable ICE error. One-sided settings (either end 0/Automatic) "
+                    + "are passed to the backend as-is.",
+                    nameof(config));
+
             var servers = config.IceServers ?? new List<IceServer>();
             var serverStructs = new NativeMethods.IceServerNative[Math.Max(servers.Count, 0)];
 
             for (int i = 0; i < servers.Count; i++)
             {
-                var s = servers[i] ?? new IceServer();
-                var urls = s.Urls ?? new List<string>();
+                var s = servers[i];
+                // #151：空 IceServer 是最常见的构造笔误（new 了忘填 URL）。旧行为是
+                // 静默跳过 —— 配置 typo 无声消失。只在 C# 边界拦：label 那种「两层都校」
+                // 的判据是静默失败形态灾难性，空条目是惰性无害，不够格进 native 层。
+                if (s == null || s.Urls == null || s.Urls.Count == 0)
+                    throw new ArgumentException(
+                        "PeerConnectionConfig.IceServers[" + i + "] "
+                        + (s == null ? "is null" : "has no URLs")
+                        + ". An IceServer that names no server does nothing; this is almost always a "
+                        + "construction slip. Remove the entry or give it a stun:/turn: URL.",
+                        nameof(config));
+                var urls = s.Urls;
                 var urlPtrs = new IntPtr[urls.Count];
                 for (int u = 0; u < urls.Count; u++)
                     urlPtrs[u] = AllocUtf8(urls[u] ?? string.Empty);
