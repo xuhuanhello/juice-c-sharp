@@ -741,6 +741,7 @@ The `#if NET_STANDARD_2_1 || UNITY_2021_2_OR_NEWER` guard around the `ReadOnlySp
 | C# | `DataChannelLog.Level` property; `MessageLogged` event |
 | Defaults | Editor or Development Player → **Info**; non-Development Player → **Warning** |
 | Secrets | **Redact** ICE URLs containing credentials in logs |
+| Identity banner | `Native library initialized (abi=N)` bypasses the level gate — silenced only by `None`, emitted **at most once per process** (see *The identity-banner exception*) |
 | Stats v1 | `BufferedAmount`, plus the direct-vs-relayed verdict (*Connection path*); no RTT panel, no stats subsystem |
 
 ### The path a log line takes
@@ -767,6 +768,33 @@ DataChannelLog.Emit  → redaction → MessageLogged event + Debug.Log*
 `dcu_set_log_level` always passes the same static trampoline down to `rtcInitLogger`; **the callback parameter is never exposed to callers.** This structurally removes a trap in the upstream C API: `InitLogger` with an existing appender assigns `appender->callback = std::move(callback)`, so passing `nullptr` silently clears the callback, and `LogAppender::write` then falls back to `std::cout` (`src/global.cpp:59,65-80`) — bridge gone, credentials unredacted, zero diagnostics. Quieting the logs is done **only** through levels, including `LogLevel.None` → `RTC_LOG_NONE`.
 
 (Upstream writes to **stdout**, not stderr — plog's `ConsoleAppender` defaults to `streamStdOut`.)
+
+### The identity-banner exception
+
+**Decision:** [#140](https://github.com/xuhuanhello/juice-c-sharp/issues/140), landed by [#142](https://github.com/xuhuanhello/juice-c-sharp/issues/142)
+
+One managed line bypasses the level gate: the banner `Native library initialized (abi=N)`. It answers *"what is running"* where the levelled channel answers *"what happened"* — and at the release default (**Warning**), `Info = 4 > Warning = 3` used to drop it, leaving exactly the builds whose bug reports need the ABI number without it. With lazy loading (§6) it appears at first use, not at startup.
+
+Note the remit: the trampoline rule above — quieting only through levels — governs the **native bridge** (`dcu_set_log_level`). This exception lives entirely in the managed tier and never touches the bridge.
+
+Everything else about the line is ordinary. It passes redaction; it is dispatched through `MessageLogged` with `LogLevel.Info` as its honest severity (subscribers' own filtering stays theirs); it goes out through `Debug.Log`, not `LogWarning`/`LogError` — it is not an alert. The only level that silences it is **`LogLevel.None`**: `None` is absolute silence, the one value that expresses explicit user intent rather than a default guessed on the user's behalf.
+
+Membership in the bypass category is bounded by two conditions, **both required — failing either disqualifies**:
+
+1. **Emitted at most once per process.**
+2. **It answers "what is running", not "what happened".**
+
+Current membership: exactly this one line. This is a **newly established category, not membership in an existing one** — the package has no version-banner precedent (`package.json`'s version is never logged), so the boundary is written here rather than inferred by analogy. The first candidate has already been tried and refused: connection lifecycle transitions (`Connecting → Connected → …`) are per-connection, repeatable timeline events — condition 1 fails, and printing them unconditionally would flood release logs under frequent connections ([#140](https://github.com/xuhuanhello/juice-c-sharp/issues/140), booked from [#146](https://github.com/xuhuanhello/juice-c-sharp/issues/146)). See *Getting diagnostics out of a release player* below for what applications do instead.
+
+The once-per-process latch is **managed state at the emitting call site**. Native `dcu_init` idempotence does not implement it: [#141](https://github.com/xuhuanhello/juice-c-sharp/issues/141)'s duplicated banner occurred with `dcu_init` already idempotent, because what is idempotent there is initialization, not the log line. Initialization can legitimately run more than once per process (editor assembly-reload restore, shutdown → re-init), and the banner must not repeat with it — a repeat that used to be Editor-only Console noise would now reach **every adopter's release logs**. In the Editor, "process" reads as the scripting domain: a domain reload resets the latch with every other static; entering play mode without one does not. A banner silenced by `None` at init time stays spent — "at most once" is the promise, not "once, audibly".
+
+### Getting diagnostics out of a release player
+
+The release default (**Warning**) already carries every warning and error this package produces, plus the identity banner above. What it deliberately does not carry is the Info-level breadcrumb trail; the package-supported routes for applications that want one:
+
+- **Lifecycle breadcrumbs without touching the console:** subscribe the real events — `ConnectionStateChanged`, `DataChannelReceived`, per-channel `Open`/`Closed` — and feed the application's own log pipeline. Events are not log lines: they bypass no gate because they never pass through one, at zero Console cost. This is the production-telemetry answer.
+- **The full package log trail in the platform log (logcat / os_log):** set `DataChannelLog.Level = LogLevel.Info` at runtime — one line. A `[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]` hook is early enough to catch even the first line the package can emit (the package's own hooks run in that phase, ahead of `BeforeSceneLoad` — and loading is lazy anyway, §6).
+- **There is no "dispatch always, Console by level" split, on purpose.** `MessageLogged` receives what passes the gate; the level is the one volume knob ([#140](https://github.com/xuhuanhello/juice-c-sharp/issues/140) kept severity and verbosity on a single axis). An application routing `MessageLogged` into its own pipeline widens the stream by raising the level, and accepts the wider Console along with it — its subscriber filters from there.
 
 ### Initialization dependency is one-directional
 
@@ -1193,6 +1221,7 @@ Selection principle: **only decisions that measurement or research overturned an
 | Pump-liveness verdict boundaries: frame deltas 0/1/2 stay silent, 3 fires, edit mode precedes the frame check — the frozen-loop false positive that burned the one retry was measured, not inferred ([#145](https://github.com/xuhuanhello/juice-c-sharp/issues/145) / [#147](https://github.com/xuhuanhello/juice-c-sharp/issues/147)) | Managed (pure predicate) |
 | Upstream state/exception mapping; out-of-range raw values map to `Unknown` (never throw) | Native / EditMode |
 | Log bridge survives repeated `Level` changes (regression for the silent-detach trap, §7) | Native / EditMode |
+| The ABI banner passes the level gate at the release default (Warning) and emits **at most once per process** even when init legitimately runs twice — the gate dropped it exactly in the builds that need it, and the duplicate emission was real, not hypothetical ([#140](https://github.com/xuhuanhello/juice-c-sharp/issues/140) / [#141](https://github.com/xuhuanhello/juice-c-sharp/issues/141) / [#142](https://github.com/xuhuanhello/juice-c-sharp/issues/142)) | Native / EditMode |
 | Domain-reload lifecycle | Native — **manual step permitted** (see below) |
 
 Managed tier additionally covers: native-config marshalling alloc/free balance, `Dispose` idempotence for managed-only types, and ICE-credential redaction — the last **through the public logging entry point**, not by exposing internals. `Dispose` idempotence is deliberately split across two tiers rather than written as one contract, so that "Dispose idempotence is covered" cannot mask the native side being untested.

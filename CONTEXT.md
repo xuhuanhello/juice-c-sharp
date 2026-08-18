@@ -71,6 +71,7 @@
 ## Diagnostics
 
 - **LogLevel** — Package logging verbosity; bridges libdatachannel logger; defaults Info in Editor/Development and Warning in release players; ICE credentials redacted.
+- **Identity banner** — The one line allowed past the level gate: `Native library initialized (abi=N)`. Membership needs both boundaries at once — **at most once per process**, and answers *"what is running"* not *"what happened"*. Silenced only by `LogLevel.None`; dispatched to `MessageLogged` as `Info`; the once-per-process latch is managed state (native init idempotence covers init, not the log line). Membership today: exactly that one line (#140).
 - **Log bridge** — Native thread → static trampoline (enqueue only, runs under upstream's lock) → bounded queue → main-thread pump → managed log. **Changing the level never detaches the bridge.**
 - **Throttled warning** — One message per category per 5 s, carrying occurrence count and peak. Used for slow pump frames (>4 ms), control-queue backlog (>1024) and dropped log lines.
 - **Pump-liveness frame gate** — The erased-pump diagnostic fires only when the loop advanced **≥ 3 frames** while **≥ 5 s** stale. A frozen loop (editor pause, mobile suspend) is not a pump fault: it stays silent and spends none of the single re-registration retry (#147, measured in #145). Checked on mutations (`PeerConnection` ctor, `CreateDataChannel`, `Send`, `SetRemoteDescription`, `AddRemoteCandidate`); queries stay pure.

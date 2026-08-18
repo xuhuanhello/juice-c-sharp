@@ -32,6 +32,14 @@ or behaviour change → minor, `dcu_*` or public C# break → **major**.
 - **`MessageReceived` add/remove now asserts the main-thread contract** ([#151]) —
   it is the one subscription accessor where a background-thread subscribe could be
   silently lost.
+- **The ABI banner is visible at the release default level** ([#140], landed by
+  [#142]): `Native library initialized (abi=N)` no longer passes through the
+  log-level gate, so non-Development players (default `Warning`) finally show which
+  binary they run — previously the gate dropped it exactly in the builds whose bug
+  reports need it. It is emitted **at most once per process** (the managed latch
+  [#141] showed native init idempotence does not provide), still redacted, still
+  dispatched through `MessageLogged` (as `Info`), and silenced only by
+  `LogLevel.None`. Ordinary `Info` lines stay gated exactly as before.
 
 ### Fixed
 
@@ -60,6 +68,9 @@ or behaviour change → minor, `dcu_*` or public C# break → **major**.
   logs). Call it from a loading screen to keep first-connection latency out of the
   "join" click, or to pin the load moment while bisecting a crash.
 
+[#140]: https://github.com/xuhuanhello/juice-c-sharp/issues/140
+[#141]: https://github.com/xuhuanhello/juice-c-sharp/issues/141
+[#142]: https://github.com/xuhuanhello/juice-c-sharp/issues/142
 [#145]: https://github.com/xuhuanhello/juice-c-sharp/issues/145
 [#146]: https://github.com/xuhuanhello/juice-c-sharp/issues/146
 [#147]: https://github.com/xuhuanhello/juice-c-sharp/issues/147

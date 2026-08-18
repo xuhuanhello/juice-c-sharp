@@ -88,6 +88,32 @@ namespace DataChannelUnity
         }
 
         /// <summary>
+        /// 进程身份事实的出口：**绕过级别门禁**，其余处理照常（SPEC §7 的
+        /// identity-banner 例外，#140 / #142）。
+        /// </summary>
+        /// <remarks>
+        /// 它凭什么绕过门禁：分级通道回答「发生了什么」，本入口回答「跑的是什么」。
+        /// 成员资格由两条边界**同时成立**来定 —— ① 每进程至多发一次；
+        /// ② 回答「跑的是什么」而不是「发生了什么」。缺一不算。当前成员只有
+        /// ABI 横幅一行；「至多一次」的 latch 归发行的调用方持有（本类只管托管
+        /// 日志状态，不知道调用方的生命周期，见 SPEC §7 单向依赖）。
+        ///
+        /// 唯一让它闭嘴的档位是 <see cref="LogLevel.None"/>：None 是绝对静默，
+        /// 是唯一一档用户明确表达了意图的值，其余档位都是替他猜的默认（#140 Q3）。
+        /// 绕过的只有级别门禁，不是全部处理 —— 照常脱敏；照常经
+        /// <see cref="MessageLogged"/> 派发，级别参数填 <see cref="LogLevel.Info"/>
+        /// （那是它诚实的严重度，订阅者自己的过滤策略归订阅者）；走
+        /// <see cref="Debug.Log"/> 而非 LogWarning / LogError —— 它不是告警。
+        /// </remarks>
+        internal static void EmitProcessIdentity(string message)
+        {
+            if (_level == LogLevel.None) return;
+            message = RedactIceCredentials(message);
+            RaiseLogged(LogLevel.Info, message);
+            Debug.Log("[DataChannelUnity] " + message);
+        }
+
+        /// <summary>
         /// 派发 <see cref="MessageLogged"/>，**每订阅者隔离，且异常只能吞掉**。
         /// </summary>
         /// <remarks>

@@ -30,6 +30,14 @@ namespace DataChannelUnity
         private static bool _initAttempted;
         private static bool _pumpRegistered;
 
+        // ABI 横幅「每进程至多一次」的 latch（SPEC §7 identity-banner 例外，#140 / #142）。
+        // **刻意不进 ResetStaticsOnEnterPlayMode 的清单，也不随 ShutdownNative 复位**：
+        // 那两处复位的是「init 可以再跑」，而横幅的边界是每进程至多一次 —— init 在
+        // 同一进程里合法地多跑是真实发生过的（#141 的两行）。原生 g_inited 的幂等
+        // 挡不住它：幂等的是 init，不是这行日志。域重载清空静态量，latch 随域自然
+        // 复位 —— 那就是「进程」在 Editor 里的读法。
+        private static bool _abiBannerEmitted;
+
         // pump 存活：单调计数 + 单调墙钟 + 帧号。计数只用于诊断文本；判定看
         // 时间戳（多久没跑）与帧号（循环是否真在推进）两个观测面（#147）。
         private static long _pumpTicks;
@@ -145,6 +153,8 @@ namespace DataChannelUnity
             _pumpRetryExhausted = false;
             _pumping = false;
             _grewPayload = _grewPayload2 = _grewMessage = _grewLog = false;
+            // _abiBannerEmitted 刻意不在这份清单里：横幅每进程至多一次（SPEC §7），
+            // 播放会话不是进程边界。
             // 上个域残留的泄漏记录不该报进新域 —— 那些对象的表项已经随静态字段一起没了。
             LeakTracker.Clear();
             // 同理：别让上个域的节流窗口把新域的第一条告警压掉。
@@ -212,8 +222,12 @@ namespace DataChannelUnity
                     _lastPumpTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                     _lastPumpFrame = Time.frameCount;
                     NativeMethods.dcu_set_log_level((int)DataChannelLog.Level);
-                    NativeMethods.dcu_abi_version(out var abi);
-                    DataChannelLog.Emit(LogLevel.Info, "Native library initialized (abi=" + abi + ").");
+                    if (!_abiBannerEmitted)
+                    {
+                        _abiBannerEmitted = true;
+                        NativeMethods.dcu_abi_version(out var abi);
+                        DataChannelLog.EmitProcessIdentity("Native library initialized (abi=" + abi + ").");
+                    }
                 }
                 else
                 {
@@ -338,6 +352,7 @@ namespace DataChannelUnity
             catch (Exception e) { DataChannelLog.Emit(LogLevel.Error, "dcu_shutdown threw", e); }
 
             // 允许之后重新 init：域重载后 EnsureNative 得能再走一遍。
+            // _abiBannerEmitted 不复位：re-init 是新的初始化，不是新的进程。
             _nativeReady = false;
             _initAttempted = false;
         }
