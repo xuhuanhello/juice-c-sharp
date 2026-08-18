@@ -162,3 +162,8 @@ Assets/Resources/SignalingConfig.json.meta
 
 # Python 字节码缓存（native/scripts 被直接运行时产生）。
 __pycache__/
+
+# 验证会话的截图证据归 ticket（wayfinder 的资产挂 issue 链接），不入库。
+# 27fb73b 曾误入库一批并顺手把 png 送进了 LFS，随后移除 —— 这两行防复发。
+Assets/Screenshots/
+Assets/Screenshots.meta
