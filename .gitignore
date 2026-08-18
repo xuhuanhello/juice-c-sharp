@@ -159,3 +159,6 @@ deploy/signal/certs/
 # 入库的是 Assets/DataChannelUnity.Example/SignalingConfig.example.json。
 Assets/Resources/SignalingConfig.json
 Assets/Resources/SignalingConfig.json.meta
+
+# Python 字节码缓存（native/scripts 被直接运行时产生）。
+__pycache__/
