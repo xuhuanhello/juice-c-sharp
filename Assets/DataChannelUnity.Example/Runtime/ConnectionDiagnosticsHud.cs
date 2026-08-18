@@ -58,7 +58,12 @@ namespace DataChannelUnity.Example
                 // 「client 那端更快」，其实两个数量的是两条不同的连接。所以标签必须说清是谁的。
                 bool onHost = _networkManager.IsServerStarted && _networkManager.IsClientStarted;
                 string whose = onHost ? "本机 loopback，非对手" : "本机到 host";
-                _sb.AppendLine($"ping   {tm.RoundTripTime} ms   ({whose}；量化到 tick，1 档 = {tickMs:F0} ms)");
+                // 显示保底 1 ms：局域网直连时真实 RTT 低于一个 tick 量子，FishNet 的读数
+                // 是诚实的 0 —— 但面板上「ping 0 ms」读起来像坏了（实测就被当成 bug 问过）。
+                // 保底只属于这块给人看的面板；BilliardsDeviceReport 照实记 0 并把全 0 判成
+                // 「未观测」，那边是测量纪律，不许跟着改。
+                long shownRtt = tm.RoundTripTime < 1 ? 1 : tm.RoundTripTime;
+                _sb.AppendLine($"ping   {shownRtt} ms   ({whose}；量化到 tick，1 档 = {tickMs:F0} ms)");
                 if (onHost)
                     _sb.AppendLine("       ↑ host 上这个数恒为一档，不反映对手延迟");
                 _sb.AppendLine($"tick   {tm.Tick}   @ {tm.TickRate}/s");
