@@ -27,8 +27,21 @@ namespace DataChannelUnity.Example
         [SerializeField] private NetworkManager _networkManager;
         [SerializeField] private DataChannelTransport _transport;
 
+        /// <summary>
+        /// 左上这块的屏幕矩形。手势层要让开它；IMGUI 没有可查询的布局，所以两边读同一组常量。
+        /// </summary>
+        internal static Rect ScreenRect => new Rect(PanelX, PanelY, PanelWidth, PanelHeight);
+
+        private const float PanelX = 10f;
+        private const float PanelY = 10f;
+        private const float PanelWidth = 360f;
+        private const float PanelHeight = 360f;
+        private const float RelayButtonHeight = 80f;
+
         private string _codeInput = "";
         private GUIStyle _label;
+        private GUIStyle _hint;
+        private GUIStyle _relayButton;
 
         /// <summary>
         /// 两端各自最后一次上报的连接状态。
@@ -83,20 +96,32 @@ namespace DataChannelUnity.Example
         {
             if (_networkManager == null || _transport == null) return;
 
-            _label ??= new GUIStyle(GUI.skin.label) { fontSize = 13, normal = { textColor = Color.white } };
+            _label ??= new GUIStyle(GUI.skin.label) { fontSize = 16, normal = { textColor = Color.white } };
+            _hint ??= new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 14,
+                wordWrap = true,
+                normal = { textColor = new Color(0.85f, 0.85f, 0.85f) },
+            };
+            _relayButton ??= new GUIStyle(GUI.skin.button)
+            {
+                fontSize = 22,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter,
+            };
 
-            const int w = 300, h = 170;
-            GUILayout.BeginArea(new Rect(10, 10, w, h), GUI.skin.box);
+            GUILayout.BeginArea(ScreenRect, GUI.skin.box);
 
             // 「彻底停着」才显示建房/进房。Starting 也算已经在动，否则连按钮会在连接中途仍然可按。
             bool serverIdle = _serverState == LocalConnectionState.Stopped;
             bool clientIdle = _clientState == LocalConnectionState.Stopped;
+            bool idle = serverIdle && clientIdle;
 
-            if (serverIdle && clientIdle)
+            if (idle)
             {
                 GUILayout.Label("① 一端建房（当 host），另一端输码加入", _label);
 
-                if (GUILayout.Button("建房并当 host"))
+                if (GUILayout.Button("建房并当 host", GUILayout.Height(44)))
                 {
                     // host = server + client 同时起（契约 4.4）。先 server，因为
                     // StartClient 要靠 _serverStartRequested 判断走 loopback 还是 wss。
@@ -106,8 +131,8 @@ namespace DataChannelUnity.Example
 
                 GUILayout.Space(6);
                 GUILayout.Label("② 或者输房间码加入：", _label);
-                _codeInput = GUILayout.TextField(_codeInput ?? "", 10);
-                if (GUILayout.Button("加入房间"))
+                _codeInput = GUILayout.TextField(_codeInput ?? "", 10, GUILayout.Height(36));
+                if (GUILayout.Button("加入房间", GUILayout.Height(44)))
                 {
                     if (string.IsNullOrWhiteSpace(_codeInput))
                     {
@@ -121,6 +146,8 @@ namespace DataChannelUnity.Example
                         _networkManager.ClientManager.StartConnection();
                     }
                 }
+
+                DrawForceRelayButton(idle);
             }
             else
             {
@@ -165,7 +192,7 @@ namespace DataChannelUnity.Example
                 string label = anyStopping ? "正在断开…" : anyStarted ? "断开" : "取消连接";
 
                 GUI.enabled = anythingUp && !anyStopping;
-                if (GUILayout.Button(label))
+                if (GUILayout.Button(label, GUILayout.Height(44)))
                 {
                     if (_clientState != LocalConnectionState.Stopped)
                         _networkManager.ClientManager.StopConnection();
@@ -173,9 +200,35 @@ namespace DataChannelUnity.Example
                         _networkManager.ServerManager.StopConnection(true);
                 }
                 GUI.enabled = true;
+
+                DrawForceRelayButton(idle);
             }
 
             GUILayout.EndArea();
+        }
+
+        /// <summary>
+        /// 做成一整块按钮而不是 IMGUI 默认那颗小勾：SE 3 横屏上默认 Toggle 大约 20 px，
+        /// 手指点不中。已经连上时灰掉 —— 策略只在建 PC 时读，改了当前局也不会变。
+        /// </summary>
+        private void DrawForceRelayButton(bool idle)
+        {
+            GUILayout.Space(10);
+            Color prev = GUI.backgroundColor;
+            GUI.backgroundColor = _transport.ForceRelay
+                ? new Color(0.18f, 0.62f, 0.34f)
+                : new Color(0.42f, 0.42f, 0.42f);
+            GUI.enabled = idle;
+            string caption = _transport.ForceRelay ? "强制中继：开" : "强制中继：关";
+            if (GUILayout.Button(caption, _relayButton, GUILayout.Height(RelayButtonHeight)) && idle)
+                _transport.ForceRelay = !_transport.ForceRelay;
+            GUI.enabled = true;
+            GUI.backgroundColor = prev;
+            GUILayout.Label(
+                idle
+                    ? "两端都要开才走中继，开完再进房。本机 loopback 不受影响。"
+                    : (_transport.ForceRelay ? "本局已强制中继（断开后才能改）" : "本局允许直连（断开后才能改）"),
+                _hint);
         }
     }
 }

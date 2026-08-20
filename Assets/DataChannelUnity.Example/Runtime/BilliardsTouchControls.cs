@@ -244,9 +244,9 @@ namespace DataChannelUnity.Example
             if (PowerBarRect().Contains(guiPoint))
                 return false;
 
-            // RoomPanel（左上 300×170）与 BilliardsHud（左下）都要让出去，否则点「断开」或者
-            // 「再来一局」会顺手转一下瞄准。数值与那两块重复，是因为 IMGUI 没有可查询的布局。
-            if (new Rect(10f, 10f, 300f, 170f).Contains(guiPoint))
+            // RoomPanel 与 BilliardsHud 都要让出去，否则点「断开」或者「再来一局」会顺手转
+            // 一下瞄准。面板尺寸读 RoomPanel.ScreenRect，不再抄一份。
+            if (RoomPanel.ScreenRect.Contains(guiPoint))
                 return false;
 
             float hudHeight = 150f;

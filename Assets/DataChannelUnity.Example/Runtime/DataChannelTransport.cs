@@ -786,6 +786,10 @@ namespace DataChannelUnity.Example
                 {
                     _clientPeer = null;
                     peer.Dispose();
+                    // P2P 掉了，纯 client 的信令也该拆：否则 EnsureSignaling 看见
+                    // `_signaling != null` 就直接 return，再点「加入房间」不会发 join-room，
+                    // 永远停在 Starting。飞行模式把 WebSocket 掐死后就是这条路（#139 真机）。
+                    DisposeSignalingIfIdle();
                 }
             }
 
@@ -803,8 +807,18 @@ namespace DataChannelUnity.Example
         private List<string> _iceServerUrls = new List<string>();
 
         [SerializeField]
-        [Tooltip("勾上＝强制走 TURN 中继（IceTransportPolicy.RelayOnly）。同机两端永远是 Direct，靠这个开关才能在不换网络的前提下验到 Relayed 那条分支。")]
+        [Tooltip("勾上＝强制走 TURN 中继（IceTransportPolicy.RelayOnly）。同机两端永远是 Direct，靠这个开关才能在不换网络的前提下验到 Relayed 那条分支。真机上请用 RoomPanel 的勾，不要靠 Inspector —— 打包后改不了。")]
         private bool _forceRelay;
+
+        /// <summary>
+        /// 强制远端连接走 TURN。进房那一刻读取；已经建好的 PC 不会跟着改。
+        /// 本机 loopback 不受影响。同一局域网下必须两端都开，只开一侧拦不住 host–host。
+        /// </summary>
+        public bool ForceRelay
+        {
+            get => _forceRelay;
+            set => _forceRelay = value;
+        }
 
         private PeerConnectionConfig BuildConfig()
         {
@@ -875,6 +889,15 @@ namespace DataChannelUnity.Example
         /// </summary>
         private bool EnsureSignaling(string joinCode)
         {
+            // SignalingClient 用过一次就不能再 Connect（_ws != null 会抛）。飞行模式把
+            // 套接字掐成 Close/Abort 之后对象还在，这里必须丢掉再建，否则 join-room
+            // 永远发不出去，面板停在「连接中」。
+            if (_signaling != null && !_signaling.IsConnected)
+            {
+                Debug.LogWarning("[DataChannelTransport] 信令还在但 WebSocket 已不是 Open，丢掉再连。");
+                DropSignaling();
+            }
+
             if (_signaling != null) return true;
 
             string url;
@@ -1016,6 +1039,8 @@ namespace DataChannelUnity.Example
                 _pendingClientState.Enqueue(LocalConnectionState.Stopped);
                 return false;
             }
+
+            Debug.Log($"[DataChannelTransport] 正在加入房间 {_joinRoomCode.Trim()}…");
             return true;
         }
         #endregion
@@ -1298,6 +1323,11 @@ namespace DataChannelUnity.Example
         private void DisposeSignalingIfIdle()
         {
             if (_serverStartRequested || _clientPeer != null) return;
+            DropSignaling();
+        }
+
+        private void DropSignaling()
+        {
             _signaling?.Dispose();
             _signaling = null;
             _peerIdToConnectionId.Clear();

@@ -94,8 +94,8 @@ namespace DataChannelUnity.EditorTools
             Debug.LogWarning(
                 "[Billiards] 重建把验证用的开关退回了代码默认值 —— 要跑验证的话现在重新设：\n" +
                 $"  DataChannelTransport._forceRelay = {(forceRelay != null && forceRelay.boolValue)}" +
-                "   ← 单机验 Relayed 分支与真断连需要勾上（勾上后**远端**那条走 TURN；" +
-                "本机 loopback 刻意不受它管，否则 host 自己起不来）\n" +
+                "   ← 入库必须是关；真机用 RoomPanel 左上的勾，不要靠 Inspector（打包后改不了）。" +
+                "两端都勾才走中继；本机 loopback 刻意不受它管，否则 host 自己起不来\n" +
                 $"  DataChannelTransport._iceServerUrls = {(iceUrls == null ? 0 : iceUrls.arraySize)} 条" +
                 "   ← 留空即可，TURN 凭据由信令服务器下发\n" +
                 "  这两个刻意不由构建器写：_forceRelay 强制全部连接走中继，对出货是错的，" +
