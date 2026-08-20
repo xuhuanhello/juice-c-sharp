@@ -1,6 +1,6 @@
 {
   "name": "com.xuhuanhello.datachannel",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "displayName": "DataChannel Unity",
   "description": "WebRTC DataChannel bindings for Unity (libdatachannel + datachannel-wasm) with a stable C ABI and C# API.",
   "unity": "2022.3",

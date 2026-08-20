@@ -7,6 +7,8 @@ or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-21
+
 ### Changed
 
 - **Native crash symbols live in `Symbols~/`, mirroring `Plugins/`.** Unity
@@ -17,6 +19,9 @@ or behaviour change → minor, `dcu_*` or public C# break → **major**.
   Compile always carries `-g` / `/Zi` so a Linux or macOS twin can actually
   restore line numbers. GitHub Release assets are an optional duplicate, not
   the lookup path.
+- **Native plugins rebuilt from `main`**
+  ([run 32388151832](https://github.com/xuhuanhello/juice-c-sharp/actions/runs/32388151832)).
+  `Report~/` names `refs/heads/main` and `source.commit` `fd06a25`.
 
 ## [0.5.0] — 2026-08-20
 
@@ -269,6 +274,7 @@ has since been removed from the schema (it was constant across everything the la
 gate reads, and therefore carried no information); it disappears on the next binary
 refresh rather than being edited by hand, because CI artifacts are not hand-edited.
 
+[0.6.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.6.0
 [0.5.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.3.0
