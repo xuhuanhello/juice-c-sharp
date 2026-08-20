@@ -12,3 +12,9 @@ set(DCU_EXPORT_LINK_OPTIONS
   "LINKER:--version-script=${DCU_EXPORT_FILE}"
   "LINKER:--exclude-libs,ALL"
 )
+
+# gcc 的 Release 默认没有 -g；全局加了 -g 之后这里必须剥，否则 Plugins/ 会
+# 带着 DWARF 进采用者的 Player。未剥离副本在 Symbols~/。
+set(DCU_STRIP_DEBUG ON)
+set(DCU_STRIP_ARGS "--strip-debug")
+set(DCU_STAGE_PDB OFF)

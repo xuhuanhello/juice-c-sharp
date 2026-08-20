@@ -59,14 +59,24 @@ Binaries land **in batches**, not all at once (SPEC §10). Desktop — macOS uni
 
 Binaries go into `Plugins/` as **ordinary git objects — never Git LFS** (SPEC §10: an LFS-tracked plugin reaches adopters as a 132-byte pointer file, silently, and that is how v0.1.0 shipped broken).
 
-Before committing any batch to `Plugins/` + `Report~/`, all of this must be true:
+Before committing any batch to `Plugins/` + `Report~/` + `Symbols~/`, all of this must be true:
 
 1. **CI green for every platform in the batch** — build, exported-symbol diff, dependency allowlist. Take the artifacts from a `push`-to-`main` run or from `plugins-matrix.yml`.
 2. **A real-device smoke result for every platform in the batch**, and the result XML attached to that platform's ticket. See below.
 3. **The build record came from CI.** `gen_support_table.py --check` rejects `ci: null` and rejects a `pull_request` run — do not work around either. A locally produced record has no run URL and its commit describes the checkout rather than what was compiled; a `pull_request` commit is a synthetic merge ref that stops existing once the PR merges.
 4. **Regeneration diffs clean** — `gen_plugin_meta.py --check` and `gen_support_table.py --check`. Both run in CI, so this is really a "do not commit while red" reminder.
 
-Unpack the CI artifact at the package root: the zip already contains `Plugins/…` and `Report~/…` in the shape they land in. The Android `.so` in that zip is DWARF-stripped. The matching unstripped file is the `datachannel_unity-android-unstripped` artifact (and the GitHub Release asset) — that is what goes to Bugly / Firebase / Play Console, not into `Plugins/`.
+Unpack the CI artifact at the package root: the zip already contains `Plugins/…`, `Report~/…` and `Symbols~/…` in the shape they land in. `Plugins/` is what Unity packs into the Player. `Symbols~/` is what goes to a crash reporter (Bugly / Firebase / Play Console / `llvm-symbolizer`), matched by build-id to that same compile:
+
+| Platform | Upload from `Symbols~/` |
+|----------|-------------------------|
+| Android | `Android/arm64-v8a/libdatachannel_unity.so` (unstripped) |
+| Linux | `Linux/x86_64/libdatachannel_unity.so` (unstripped) |
+| macOS | `macOS/datachannel_unity.dylib` (unstripped; `dsymutil` if a `.dSYM` is required) |
+| Windows | `Windows/x86_64/datachannel_unity.pdb` (and the dll beside it if the tool wants both) |
+| iOS | Prefer the Xcode app dSYM. `Symbols~/iOS/libdatachannel_unity.a` is the plugin archive with DWARF, identical to `Plugins/iOS/` on purpose — that `.a` is not stripped, so Xcode can fold it into the dSYM |
+
+A GitHub Release attachment is an optional duplicate of `Symbols~/`, not the source of truth. After the first `Symbols~/` batch lands, `gen_support_table.py --check` is invoked with `--symbols-root` so a landed binary without a twin is a red gate, not a missing download.
 
 ### The per-platform on-device smoke
 

@@ -63,6 +63,16 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 # 显式写出来，是为了让这条约定不依赖某个编译器版本的默认值。
 add_compile_options($<$<COMPILE_LANG_AND_ID:C,AppleClang,Clang,GNU>:-fno-common>)
 
+# Release 也带行号。崩溃还原要的是**同一次编译**的调试信息，不是把 DWARF 留在
+# 采用者的 Player 里。Clang/GNU 的 Release 默认没有 -g（NDK Clang 是例外，会编进
+# 完整 .debug_*）；MSVC 的 Release 默认不写 PDB。Plugins/ 是否剥掉，由平台文件的
+# DCU_STRIP_DEBUG 决定；未剥离副本进 Symbols~/。这是全局约定，与 -fno-common 同理：
+# 它描述「本工程的代码怎么编」，不是某平台的特例。
+add_compile_options($<$<COMPILE_LANG_AND_ID:C,AppleClang,Clang,GNU>:-g>)
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,AppleClang,Clang,GNU>:-g>)
+add_compile_options($<$<COMPILE_LANG_AND_ID:C,MSVC>:/Zi>)
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/Zi>)
+
 # 本工程只暂存 Unity 插件，跳过嵌套的 install/export 规则
 # （libdatachannel 的 install(EXPORT) 在 MbedTLS 不同属一个 export set 时会失败）
 set(CMAKE_SKIP_INSTALL_RULES ON)
@@ -82,6 +92,10 @@ set(DCU_PLUGIN_ROOT "${NATIVE_ROOT}/../Packages/datachannel-unity/Plugins"
 # 不必铸 GUID、不必带 .meta。规矩是「Plugins/ 里只放二进制和它的 .meta」。
 set(DCU_REPORT_ROOT "${NATIVE_ROOT}/../Packages/datachannel-unity/Report~"
     CACHE PATH "Packages/datachannel-unity/Report~ 的路径")
+# 未剥离 / PDB 与 Plugins/ 路径镜像（SPEC §10）。同样用 `~`：进 UPM，不进
+# Player，不铸 GUID。GitHub Release 上的拷贝是可选重复，不是权威来源。
+set(DCU_SYMBOLS_ROOT "${NATIVE_ROOT}/../Packages/datachannel-unity/Symbols~"
+    CACHE PATH "Packages/datachannel-unity/Symbols~ 的路径")
 
 # ---------- 前置检查 ----------
 # 上游 checkout：缺失时 fetch-deps.sh 能补
@@ -160,15 +174,37 @@ include("${DCU_PLATFORM_FILE}")
 # 空的 DCU_ARTIFACT_NAME 会让 audit 去查一个目录，报出的错与真正的原因无关。
 foreach(_req IN ITEMS
     DCU_PLATFORM_KEY DCU_PLUGIN_REL DCU_ARTIFACT_NAME
-    DCU_EXPORT_FILE DCU_EXPORT_LINK_OPTIONS)
+    DCU_EXPORT_FILE DCU_EXPORT_LINK_OPTIONS
+    DCU_STRIP_DEBUG DCU_STAGE_PDB)
   if(NOT DEFINED ${_req})
     message(FATAL_ERROR
       "${DCU_PLATFORM_FILE} does not set ${_req}.\n"
       "  Every platform file must set: DCU_PLATFORM_KEY, DCU_PLUGIN_REL, "
-      "DCU_ARTIFACT_NAME, DCU_EXPORT_FILE, DCU_EXPORT_LINK_OPTIONS.\n"
-      "  Optional: DCU_EXTRA_LINK_LIBRARIES, DCU_EXTRA_LINK_OPTIONS, DCU_REQUIRE_PAGE_ALIGN.")
+      "DCU_ARTIFACT_NAME, DCU_EXPORT_FILE, DCU_EXPORT_LINK_OPTIONS, "
+      "DCU_STRIP_DEBUG, DCU_STAGE_PDB.\n"
+      "  Optional: DCU_EXTRA_LINK_LIBRARIES, DCU_EXTRA_LINK_OPTIONS, "
+      "DCU_REQUIRE_PAGE_ALIGN, DCU_LIBRARY_TYPE, DCU_STRIP_ARGS "
+      "(required when DCU_STRIP_DEBUG is ON).")
   endif()
 endforeach()
+if(DCU_STRIP_DEBUG)
+  if(NOT DEFINED DCU_STRIP_ARGS)
+    message(FATAL_ERROR
+      "${DCU_PLATFORM_FILE} sets DCU_STRIP_DEBUG but not DCU_STRIP_ARGS.\n"
+      "  ON means Plugins/ is stripped after the Symbols~/ copy; the args are "
+      "the strip invocation (GNU/llvm --strip-debug, Apple -S).")
+  endif()
+  if(NOT CMAKE_STRIP)
+    message(FATAL_ERROR
+      "DCU_STRIP_DEBUG is ON for '${DCU_PLATFORM_KEY}' but CMAKE_STRIP is empty.\n"
+      "  Missing strip cannot be a silent skip: the shipped plugin would keep DWARF.")
+  endif()
+endif()
+if(DCU_STAGE_PDB AND NOT MSVC)
+  message(FATAL_ERROR
+    "${DCU_PLATFORM_FILE} sets DCU_STAGE_PDB, but the compiler is not MSVC.\n"
+    "  PDB is the MSVC debug format; other toolchains keep line info in the binary.")
+endif()
 message(STATUS
   "Platform: ${DCU_PLATFORM_KEY} → Plugins/${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}")
 
@@ -231,6 +267,11 @@ endif()
 target_link_options(datachannel_unity PRIVATE
   ${DCU_EXPORT_LINK_OPTIONS}
   ${DCU_EXTRA_LINK_OPTIONS}
+)
+# MSVC Release 默认不写 PDB。/Zi 编进了对象，还要链接器把它们收进 .pdb，
+# 否则 DCU_STAGE_PDB 去拷一个不存在的文件 —— 缺席必须是失败。
+target_link_options(datachannel_unity PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/DEBUG:FULL>
 )
 
 # 白名单变了就必须重链。少了这条，改 expected-symbols.txt 会重新配置、
@@ -311,24 +352,31 @@ if(DCU_STAGE_PLUGIN)
     )
   endif()
 
-  # 入库的插件是 Release 形态：去掉 DWARF，留下 .dynsym（导出门禁和运行都靠它）。
-  # NDK Clang 的 Release 仍会编进完整 .debug_*（实测 Android .so 24 MB 里 21 MB
-  # 是 DWARF）；gcc 的 Linux Release 不会。崩溃监控要的是**同一份编译**的未剥离
-  # 副本，不是把 debug 塞进采用者的 APK。未剥离拷贝留在构建目录，CI 当独立
-  # artifact 上传，不进 Plugins/。
-  if(DCU_PLATFORM_KEY STREQUAL "android")
-    if(NOT CMAKE_STRIP)
-      message(FATAL_ERROR
-        "Android needs CMAKE_STRIP (NDK llvm-strip) to remove DWARF from the shipped .so.\n"
-        "  The toolchain file should set it; if it did not, the NDK is incomplete.")
-    endif()
+  # 崩溃符号：先把暂存后、剥离前的文件拷进 Symbols~/（与 Plugins/ 路径镜像），
+  # 再按平台数据剥 Plugins/。两步必须拆开，才是同一次编译的两份。
+  # 剥不剥、怎么剥、要不要 PDB，都是平台文件的数据（DCU_STRIP_DEBUG /
+  # DCU_STRIP_ARGS / DCU_STAGE_PDB），不是这里的 if(android)。
+  set(DCU_STAGED_PLUGIN "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}")
+  set(DCU_STAGE_SYMBOLS_ARGS
+    --binary        "${DCU_STAGED_PLUGIN}"
+    --symbols-root  "${DCU_SYMBOLS_ROOT}"
+    --rel           "${DCU_PLUGIN_REL}"
+    --artifact-name "${DCU_ARTIFACT_NAME}"
+  )
+  if(DCU_STAGE_PDB)
+    list(APPEND DCU_STAGE_SYMBOLS_ARGS --pdb "$<TARGET_PDB_FILE:datachannel_unity>")
+  endif()
+  add_custom_command(TARGET datachannel_unity POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}"
+            "${NATIVE_ROOT}/scripts/stage_symbols.py"
+            ${DCU_STAGE_SYMBOLS_ARGS}
+    COMMENT "Staging unstripped copy → Symbols~/${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}"
+    VERBATIM
+  )
+  if(DCU_STRIP_DEBUG)
     add_custom_command(TARGET datachannel_unity POST_BUILD
-      COMMAND "${CMAKE_COMMAND}" -E copy
-              "$<TARGET_FILE:datachannel_unity>"
-              "${CMAKE_BINARY_DIR}/${DCU_ARTIFACT_NAME}.unstripped"
-      COMMAND "${CMAKE_STRIP}" --strip-debug
-              "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}"
-      COMMENT "Preserving unstripped copy; stripping DWARF from staged Android plugin"
+      COMMAND "${CMAKE_STRIP}" ${DCU_STRIP_ARGS} "${DCU_STAGED_PLUGIN}"
+      COMMENT "Stripping debug from staged plugin (Symbols~/ keeps the unstripped copy)"
       VERBATIM
     )
   endif()

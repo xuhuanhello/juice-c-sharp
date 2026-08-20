@@ -865,6 +865,13 @@ Packages/datachannel-unity/
       libdatachannel_unity.a
       webrtc.jslib                         # no websocket.jslib
   Report~/                        # one build record per shipped binary (§10)
+  Symbols~/                       # unstripped twins, same rel paths as Plugins/ (§10)
+    Android/arm64-v8a/libdatachannel_unity.so
+    Linux/x86_64/libdatachannel_unity.so
+    macOS/datachannel_unity.dylib
+    Windows/x86_64/datachannel_unity.dll
+    Windows/x86_64/datachannel_unity.pdb
+    iOS/libdatachannel_unity.a
   Samples~/                       # preferred for dual-peer sample
 ```
 
@@ -890,7 +897,7 @@ Packages/datachannel-unity/
 **These are allowlists on purpose, not denylists.** The dependency table is the only observable evidence that static linking actually took effect — a build script saying so is not evidence, and this repository has been burned exactly there (§10: a CI job installed brew OpenSSL and was, in fact, broken). A denylist only stops the shapes already encountered. A legitimate new system dependency from upstream is added to the list **with its reason**, in the script.
 
 - Explicit `.meta` for every plugin; do not rely on folder magic alone. Every `.meta` under `Plugins/` is **generated and diffed in CI** — see §10 and §11 for the mechanism and its limits.
-- **`Plugins/` holds binaries and their `.meta`, nothing else.** Build records live in `Report~/` (§10). A pure build record is not an asset, and minting a GUID for a file that nothing will ever reference is issuing an ID card to a non-asset.
+- **`Plugins/` holds binaries and their `.meta`, nothing else.** Build records live in `Report~/` (§10). Crash-symbol files live in `Symbols~/` (§10). Neither is an asset, and minting a GUID for a file that nothing will ever reference is issuing an ID card to a non-asset.
 - **Binaries are committed directly to git, not through LFS** (§10 — LFS silently breaks the UPM git-URL install, which is this package's only delivery path). `.meta` files are ordinary git as well. Every landed artifact is a single file, so `.gitattributes` matches **by extension**; the path-matching rules and the `Info.plist` exception that the `.bundle` once required are gone with it.
 - Self-contained: crypto + backend deps **static-linked** into the plugin (see §3 linking rules).
 - **Linux's `lib` prefix is not cosmetic** — `libdatachannel_unity.so` is what `DllImport("datachannel_unity")` resolves to on ELF, and it is why the Linux artifact name differs from Windows' and macOS'.
@@ -949,7 +956,7 @@ macOS needs no `-DCMAKE_OSX_ARCHITECTURES`: `native/CMakeLists.txt` defaults it 
 | **MbedTLS** | Built from **subprojects source** with `MBEDTLS_USER_CONFIG_FILE` → `MBEDTLS_SSL_DTLS_SRTP`; static `.a` only; injected as `MbedTLS::MbedTLS` into libdatachannel (**not** brew find_package) |
 | **libdatachannel** | `USE_MBEDTLS=ON`, `BUILD_SHARED_LIBS=OFF`, `NO_MEDIA/NO_WEBSOCKET`, hidden visibility |
 | **Exports** | `expected-symbols.txt` is the single hand-written list; the per-platform link-time files are **generated** from it (`gen_exports.py`) and git-ignored, so an ABI change is one file plus `DCU_ABI_VERSION` and cannot drift (§3, §11) |
-| **Install** | `stage_plugin.py` (POST_BUILD) stages one artifact per platform into UPM `Plugins/` — universal `.dylib`, `.dll`, `lib….so` (§8) |
+| **Install** | `stage_plugin.py` (POST_BUILD) stages one artifact per platform into UPM `Plugins/` — universal `.dylib`, `.dll`, `lib….so` (§8). `stage_symbols.py` copies the same file into `Symbols~/` before any strip |
 | **Generated alongside** | `gen_plugin_meta.py` writes the artifact's `.meta`, `gen_build_info.py` writes its build record into `Report~/` (§10) — same POST_BUILD chain, same Python-called-from-CMake shape |
 | **Scripts must be executable in git** | `git update-index --chmod=+x`; CI **asserts** this rather than running a fallback `chmod` (§11) |
 
@@ -974,7 +981,7 @@ Verification of the switch: the produced binary was **byte-identical** to the pr
 
 ### Tooling and declared floors
 
-**The post-build tools are Python, invoked from CMake `POST_BUILD`** — `stage_plugin.py`, `audit_plugin.py`, `gen_plugin_meta.py`, `gen_build_info.py`. A `cmake -P` script was chosen first and then reversed on measurement: in script mode CMake defines **none** of `CMAKE_NM` / `CMAKE_OBJDUMP` / `CMAKE_LINKER` — not even `CMAKE_SYSTEM_NAME` — because `CMakeFindBinUtils` runs at configure time inside `project()`. Its one remaining advantage over a shell script (immunity to CRLF and to the executable-bit trap on Windows) Python has too, with better text handling. Tool paths are passed in from CMake either way.
+**The post-build tools are Python, invoked from CMake `POST_BUILD`** — `stage_plugin.py`, `stage_symbols.py`, `audit_plugin.py`, `gen_plugin_meta.py`, `gen_build_info.py`. A `cmake -P` script was chosen first and then reversed on measurement: in script mode CMake defines **none** of `CMAKE_NM` / `CMAKE_OBJDUMP` / `CMAKE_LINKER` — not even `CMAKE_SYSTEM_NAME` — because `CMakeFindBinUtils` runs at configure time inside `project()`. Its one remaining advantage over a shell script (immunity to CRLF and to the executable-bit trap on Windows) Python has too, with better text handling. Tool paths are passed in from CMake either way.
 
 Two constraints that came out of the same investigation and still hold:
 
@@ -1058,7 +1065,7 @@ The desktop three did not arrive by copying a template platform one after anothe
 - **`defaults.run.shell: bash` on every job that runs shell.** Windows runners default to `pwsh`, where the assertion above is a *syntax error* — and an assertion that cannot run is **always false**, the same disease from the other side.
 - **CRLF is fixed in `.gitattributes`, not in the workflow.** Runner images carry a system-level `core.autocrlf=true` that `actions/checkout` does not override, which turns `set -o pipefail` into `invalid option name` and makes `versions.lock` parse as `v0.24.5\r`. A repository rule also protects local Windows developers; a job-level setting protects only CI.
 - **No Unity job, and the workflow says why in place.** A licensed Unity job was removed rather than left permanently skipped ([#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43), §11) — a job that will never be enabled is a gate-shaped thing that is not a gate. The comment left in its place exists so the next person does not reach for a licence again.
-- **Artifacts upload with their build record.** Uploading the binary alone leaves the maintainer holding no provenance, and a locally regenerated record has `ci: null`, which the landing gate below (correctly) rejects — so a CI artifact would be impossible to land. Both paths share the package root as their common ancestor, so the zip contains `Plugins/…` and `Report~/…` — exactly the shape it has to be unpacked into.
+- **Artifacts upload with their build record and their `Symbols~/` twin.** Uploading the binary alone leaves the maintainer holding no provenance, and a locally regenerated record has `ci: null`, which the landing gate below (correctly) rejects — so a CI artifact would be impossible to land. The three paths share the package root as their common ancestor, so the zip contains `Plugins/…`, `Report~/…` and `Symbols~/…` — exactly the shape it has to be unpacked into.
 
 ### Landing binaries: in batches, not all at once
 
@@ -1085,20 +1092,32 @@ Committing the bytes directly is also **verifiable here**, which the alternative
 
 Two consequences worth stating:
 
-- **`-filter` is the operative attribute.** Unity's `.gitattributes` template routes `*.dll` / `*.so` / `*.a` through an `[attr]lfs` macro that expands to `filter=lfs diff=lfs merge=lfs -text`. The `binary` macro is only `-diff -merge -text` and **does not touch `filter`**. Marking the plugin paths `binary` alone leaves `.dll` and `.so` in LFS while `.dylib` — absent from the template — appears fixed. That asymmetry is why this first read as "only Windows is broken".
-- **A gate now asserts what git stores**, not what is on disk: every landed binary's blob must begin with the right magic (`MZ`, `\x7fELF`, Mach-O, `!<arch>`). Nothing else could have caught this — every other check reads the working tree, where the developer's smudge filter has already substituted the real bytes, and the audit inspects a freshly built artifact rather than the landed one. It asserts what the artifact **is** rather than how the filter is configured, because an attribute check would pass on an empty file or a truncated one.
+- **`-filter` is the operative attribute.** Unity's `.gitattributes` template routes `*.dll` / `*.so` / `*.a` / `*.pdb` through an `[attr]lfs` macro that expands to `filter=lfs diff=lfs merge=lfs -text`. The `binary` macro is only `-diff -merge -text` and **does not touch `filter`**. Marking the plugin paths `binary` alone leaves `.dll` and `.so` in LFS while `.dylib` — absent from the template — appears fixed. That asymmetry is why this first read as "only Windows is broken". `Symbols~/` needs the same unset, including `*.pdb` (which never lives under `Plugins/`).
+- **A gate now asserts what git stores**, not what is on disk: every landed binary's blob must begin with the right magic (`MZ`, `\x7fELF`, Mach-O, `!<arch>`). The same assertion covers `Symbols~/` twins (and Windows PDBs) once `--symbols-root` is passed. Nothing else could have caught this — every other check reads the working tree, where the developer's smudge filter has already substituted the real bytes, and the audit inspects a freshly built artifact rather than the landed one. It asserts what the artifact **is** rather than how the filter is configured, because an attribute check would pass on an empty file or a truncated one.
 
 History keeps the old LFS objects; nothing is rewritten. New commits simply store the bytes.
 
 **Refresh policy: on release only.** A full-matrix refresh was measured at roughly **20 MB** ([#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54)) — five times smaller than the estimate that had made storage look like a constraint, so quota does not drive this. What does drive it is that every refresh is permanent history; tying refreshes to releases keeps that history meaningful.
 
-~~**Do not strip.**~~ **Overturned.** That sentence treated "symbols inside the shipped plugin" and "symbols for a crash reporter" as the same file. They are not. A store app ships a **Release** binary with DWARF removed (`strip --strip-debug`); Bugly / Firebase / Play Console take a **separate** unstripped copy (or a `.sym` / `.dSYM` produced from it) of the **same compile**, matched by build-id. You do not ship a debug `.so` to users, and you do not need DWARF in the playable binary to upload symbols.
+~~**Do not strip.**~~ **Overturned.** That sentence treated "symbols inside the shipped plugin" and "symbols for a crash reporter" as the same file. They are not. A store app ships a **Release** binary with DWARF removed (`strip --strip-debug` / Apple `strip -S`); Bugly / Firebase / Play Console / `llvm-symbolizer` take a **separate** unstripped copy (or a `.sym` / `.dSYM` / PDB produced from it) of the **same compile**, matched by build-id. You do not ship a debug `.so` to users, and you do not need DWARF in the playable binary to upload symbols.
 
-The NDK Clang Release build embeds full `.debug_*`; gcc's Linux Release does not. That is why the Android `.so` was 24 MB, of which 21 MB was DWARF, while Linux stayed ~3 MB. Putting that in `Plugins/` puts it in every adopter's APK.
+The NDK Clang Release build embeds full `.debug_*`; gcc's Linux Release does not unless `-g` is passed. That is why the Android `.so` was 24 MB, of which 21 MB was DWARF, while Linux stayed ~3 MB. Putting that in `Plugins/` puts it in every adopter's APK / Player.
 
-**Shipped plugin:** DWARF stripped on Android ELF. The export surface (`.dynsym` / the `dcu_*` list) is untouched; the audit still runs on the stripped file.
+**This is not Android-only.** Every shipped platform keeps a debug-info twin of the same compile. The formats differ because the toolchains differ; the lookup rule does not.
 
-**Unstripped copy:** `${CMAKE_BINARY_DIR}/<artifact>.unstripped`, uploaded as a CI artifact / GitHub Release asset. That is what an adopter uploads to a crash platform. It is **not** in `Plugins/`, so it does not enter the UPM git-URL install.
+**Shipped plugin (`Plugins/`):** debug stripped on the dynamic plugins that Unity packs into the Player — Android ELF, Linux ELF, macOS dylib. The export surface (`.dynsym` / the `dcu_*` list) is untouched; the audit still runs on the stripped file. **iOS static `.a` is not stripped:** DWARF in that archive is what Xcode folds into the adopter's app dSYM, and stripping the shipped `.a` leaves the adopter with addresses only. **Windows DLL is not stripped:** line numbers live in the PDB, which never enters `Plugins/`.
+
+**Unstripped twin (`Symbols~/`):** same relative path as `Plugins/` (`Plugins/Android/arm64-v8a/libdatachannel_unity.so` → `Symbols~/Android/arm64-v8a/libdatachannel_unity.so`). Windows also has `datachannel_unity.pdb` beside the dll. The directory uses the same `~` suffix as `Report~/` and `Samples~`: Unity's asset database ignores it, so the files ship with a git-URL UPM install, do not appear in the Project window, and do not enter the Player. No `.meta`, no GUID.
+
+~~**Unstripped copy:** `${CMAKE_BINARY_DIR}/<artifact>.unstripped`, uploaded as a CI artifact / GitHub Release asset. That is what an adopter uploads to a crash platform. It is **not** in `Plugins/`, so it does not enter the UPM git-URL install.~~ **Overturned.** Putting the file only on GitHub Releases makes the adopter leave the package they already installed and hunt a Release asset that may or may not match the git pin. The canonical copy lives in the package, in a directory Unity will not import. A GitHub Release attachment is an optional duplicate, not a source of truth.
+
+**Strip policy is platform data, not a CMake `if`.** Each `native/platforms/*.cmake` sets `DCU_STRIP_DEBUG`, `DCU_STRIP_ARGS` (when stripping), and `DCU_STAGE_PDB`. Missing `CMAKE_STRIP` on a platform that strips is a configure-time hard failure. The POST_BUILD order is stage → copy to `Symbols~/` → maybe strip `Plugins/` → provenance → audit.
+
+**Compile always carries line info** (`-g` for Clang/GNU, `/Zi` + `/DEBUG:FULL` for MSVC), including into mbedtls and libdatachannel. Without that, a Linux/macOS "unstripped" copy is identical to the shipped plugin and cannot restore line numbers.
+
+**Landing:** every landed `Plugins/` binary has a git-tracked twin under `Symbols~/` at the same relative path (Windows also the `.pdb`). `gen_support_table.py --symbols-root` asserts it the same way `--report-root` asserts provenance — derived from the binary's own path, so there is no second list to edit. The files are ordinary git objects, not LFS, for the same reason as `Plugins/` (a pointer file is silent corruption).
+
+The clone of the UPM package grows by the unstripped copies (Android DWARF alone was ~24 MB). The Player / APK does not. That trade is accepted: the alternative is sending the adopter to GitHub.
 
 ### Provenance: one build record per shipped binary
 
@@ -1106,7 +1125,7 @@ Every landed binary has a JSON build record in **`Packages/datachannel-unity/Rep
 
 ~~The build record sits in the same directory as the binary.~~ **Overturned ([#65](https://github.com/xuhuanhello/juice-c-sharp/issues/65)).** #54 justified the same directory by a use case that does not hold: **no adopter goes rummaging through `Plugins/` for a json file on a hunch.** The real path is a maintainer pointing at it, and the README saying where it is. So: **`Plugins/` holds binaries and their `.meta`, nothing else** (§8), and a pure build record — which no asset will ever reference — does not get a `.meta`, because minting a GUID is issuing an ID card to a non-asset.
 
-`~` makes Unity's asset database ignore the directory outright (the same mechanism as `Samples~`), so the records ship with the package without appearing in the Project window.
+`~` makes Unity's asset database ignore the directory outright (the same mechanism as `Samples~`), so the records ship with the package without appearing in the Project window. `Symbols~/` uses the same suffix for the same reason.
 
 **The unforgeable pairing survives the move intact.** The gate still derives the expected record from *the binary's own path*; only the derivation changed by one line. That derivation lives in exactly one place, `gen_plugin_meta.report_name`, shared by the writer (`gen_build_info.py`) and the reader (`gen_support_table.py --check`), so there is no second table for the two ends to disagree about. The record's file name also appears as a **`Build record` column in the generated support table** — for the same reason the platform rows are generated at all: a hand-written "where is the record for my platform" list is one more thing that goes stale on the day a platform lands and nobody remembers the README.
 
@@ -1126,7 +1145,7 @@ Every landed binary has a JSON build record in **`Packages/datachannel-unity/Rep
 | Gate | Requirement |
 |------|-------------|
 | **PR** | ~~At least one mac build + audit~~ → **one representative of each of the three toolchain shapes**: macOS (Mach-O / clang / `nm`+`otool`), Windows x64 (PE / MSVC / `dumpbin`), Linux x64 (ELF / gcc / `readelf`). Plus the local checklist in `CONTRIBUTING.md` (not automated — §11) |
-| **Release / maintainer binary commit** | The landing conditions above, for every platform in the batch; artifacts → maintainer commit to `Plugins/` + `Report~/` (plain git, no LFS) |
+| **Release / maintainer binary commit** | The landing conditions above, for every platform in the batch; artifacts → maintainer commit to `Plugins/` + `Report~/` + `Symbols~/` (plain git, no LFS) |
 
 **The PR criterion is new information, not platform count.** A change to `CMakeLists.txt` or `dcu.h` can perfectly well be green on macOS and red on Windows or Linux, and the full matrix only runs weekly — worst case is seven days broken with a pile of commits on top. Conversely a second platform of the *same* shape (Android is ELF like Linux, iOS is Mach-O like macOS) adds nearly nothing on a PR, so those stay in the full matrix.
 
@@ -1387,6 +1406,7 @@ libdatachannel is **MPL-2.0** (use ≥ 0.18; avoid historical LGPL lines). datac
       Editor/               ← build-time platform guard (§10)
       Plugins/              ← binaries + their .meta, nothing else (§8; not LFS)
       Report~/              ← one build record per shipped binary (§10)
+      Symbols~/             ← unstripped twins, same rel paths as Plugins/ (§10)
       Samples~/
       Tests/                ← three test assemblies (§11)
   native/

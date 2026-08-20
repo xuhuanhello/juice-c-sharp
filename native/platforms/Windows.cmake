@@ -25,3 +25,8 @@ set(DCU_ARTIFACT_NAME "datachannel_unity.dll")
 # （#47 实测）。真正的导出闸门是 dcu.h 里的 DCU_API（__declspec(dllexport)）。
 set(DCU_EXPORT_FILE "${DCU_GEN_EXPORTS_DIR}/windows-exports.def")
 set(DCU_EXPORT_LINK_OPTIONS "/DEF:${DCU_EXPORT_FILE}")
+
+# 行号在 PDB 里，不在 DLL 里。不要 llvm-strip / strip 这颗 DLL。
+# PDB 只进 Symbols~/，不进 Plugins/（Unity 不打包它，铸 .meta 也没有消费者）。
+set(DCU_STRIP_DEBUG OFF)
+set(DCU_STAGE_PDB ON)

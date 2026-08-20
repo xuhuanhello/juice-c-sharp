@@ -208,3 +208,10 @@ Packages/datachannel-unity/Plugins/**/*.so         -filter binary
 Packages/datachannel-unity/Plugins/**/*.a          -filter binary
 # *.jslib 是 JS 文本，本来就不该进 LFS
 Packages/datachannel-unity/Plugins/**/*.jslib      text eol=lf
+# Symbols~/ 是同一批采用者会拿到的文件（崩溃还原），同样不能走 LFS。
+# 模板另有 `*.pdb lfs`；Windows 的 PDB 只住在这里，Plugins/ 里没有。
+Packages/datachannel-unity/Symbols~/**/*.dll       -filter binary
+Packages/datachannel-unity/Symbols~/**/*.dylib     -filter binary
+Packages/datachannel-unity/Symbols~/**/*.so        -filter binary
+Packages/datachannel-unity/Symbols~/**/*.a         -filter binary
+Packages/datachannel-unity/Symbols~/**/*.pdb       -filter binary
