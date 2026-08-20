@@ -7,6 +7,13 @@ or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`PeerConnection.TryGetConnectionPath` no longer throws after `Dispose`.** It is
+  a diagnostic probe (same as `DataChannel.State` reporting Closed). Exiting Play
+  Mode disposes the PC while the example's `Update` / `OnGUI` still sample the
+  path; `ThrowIfDisposed` turned that into an exception storm.
+
 ## [0.6.0] — 2026-08-21
 
 ### Changed

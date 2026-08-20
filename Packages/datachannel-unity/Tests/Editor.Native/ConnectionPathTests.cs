@@ -86,6 +86,28 @@ namespace DataChannelUnity.Tests
         }
 
         /// <summary>
+        /// 已经 Dispose 的 PC 上，路径查询仍返回 <c>false</c>，不抛
+        /// <see cref="ObjectDisposedException"/>。
+        /// </summary>
+        /// <remarks>
+        /// 这和尚未连接是同一类探针：退出 Play Mode 时 Transport 先拆 PC，
+        /// 示例的 <c>Update</c> / <c>OnGUI</c> 同一帧还在采样。做成异常会让每个
+        /// 诊断调用方包 try/catch —— 正是 <c>DataChannel.State</c> 在 Dispose
+        /// 后报 Closed 而不是抛的同一条理由。
+        /// </remarks>
+        [Test]
+        public void AfterDispose_ReturnsFalse()
+        {
+            var pc = new PeerConnection(new PeerConnectionConfig());
+            pc.Dispose();
+
+            Assert.IsFalse(pc.TryGetConnectionPath(out _, out var sdp),
+                "已释放的 PC 上路径查询必须返回 false，不能抛 ObjectDisposedException："
+                + "诊断探针恰好在对象被拆掉时最常被读。");
+            Assert.IsNull(sdp, "返回 false 时 SDP 出参必须是 null。");
+        }
+
+        /// <summary>
         /// 本机回环必然是直连：两端同在一台机器上，host 候选就能打通，
         /// 不存在中继的可能。
         /// </summary>

@@ -1427,6 +1427,8 @@ namespace DataChannelUnity.Example
                 : (_serverPeers.TryGetValue(connectionId, out var p) ? p : null);
 
             if (peer?.Pc == null) return false;
+            // Pc 还在字典里不等于还能问：退出 Play 时 Shutdown 已经 Dispose 了 PC。
+            // 路径查询是探针，disposed 时 PeerConnection.TryGetConnectionPath 返回 false。
             return peer.Pc.TryGetConnectionPath(out path, out remoteCandidateSdp);
         }
 

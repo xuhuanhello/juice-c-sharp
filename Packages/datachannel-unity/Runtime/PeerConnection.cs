@@ -42,6 +42,7 @@ namespace DataChannelUnity
         private IPeerConnectionObserver _observer;
 
         internal int NativeHandle { get; }
+        internal bool IsDisposed => _disposed;
         public ConnectionState ConnectionState { get; private set; } = ConnectionState.New;
         public GatheringState GatheringState { get; private set; } = GatheringState.New;
 
@@ -249,10 +250,15 @@ namespace DataChannelUnity
         public bool TryGetConnectionPath(out ConnectionPath path, out string remoteCandidateSdp)
         {
             MainThread.Assert("PeerConnection.TryGetConnectionPath");
-            ThrowIfDisposed();
 
             path = default;
             remoteCandidateSdp = null;
+
+            // Dispose 后返回 false，不抛。这是探针，不是命令 —— 与尚未连接时
+            // 返回 false 同一条路。ThrowIfDisposed 会让退出 Play 时还在采样的
+            // Update / OnGUI 变成异常风暴（示例的 DeviceReport 和 HUD 都是这样）。
+            if (_disposed)
+                return false;
 
             // **这里没有状态门禁，是故意的。** 它在原生侧，用的是活状态；托管侧的
             // ConnectionState 是事件缓存，拿它做门禁会拒掉真正已连接的连接（实测过：
