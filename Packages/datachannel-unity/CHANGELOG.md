@@ -7,6 +7,21 @@ or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-20
+
+### Changed
+
+- **The shipped Android `.so` no longer contains DWARF.** NDK Clang's Release
+  build embeds full `.debug_*` (24 MB on disk, 21 MB of it debug). Store apps
+  ship a stripped Release binary; Bugly / Firebase / Play Console take a
+  **separate** unstripped copy of the same compile. `strip --strip-debug` runs
+  on the staged plugin; the unstripped file is a CI artifact and a GitHub
+  Release asset, not in `Plugins/`. Linux was already free of DWARF.
+- **Native plugins rebuilt from `main`**
+  ([run 32385550254](https://github.com/xuhuanhello/juice-c-sharp/actions/runs/32385550254)).
+  `Report~/` now names `refs/heads/main` and `source.commit` `fd6525d`. Tag
+  `v0.4.0` remains on the feature branch; pin this one.
+
 ## [0.4.0] — 2026-08-20
 
 ### Changed
@@ -243,6 +258,7 @@ has since been removed from the schema (it was constant across everything the la
 gate reads, and therefore carried no information); it disappears on the next binary
 refresh rather than being edited by hand, because CI artifacts are not hand-edited.
 
+[0.5.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.2.0
