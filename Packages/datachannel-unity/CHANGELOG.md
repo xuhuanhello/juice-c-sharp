@@ -5,7 +5,9 @@ All notable changes to this package are documented here. The format follows
 in [`docs/SPEC.md`](../../docs/SPEC.md) §3 — upstream patch → patch, upstream minor
 or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
-## [Unreleased] — 0.4.0
+## [Unreleased]
+
+## [0.4.0] — 2026-08-20
 
 ### Changed
 
@@ -43,6 +45,10 @@ or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
 ### Fixed
 
+- **The connection-path gate moved to native** ([#123]): managed
+  `ConnectionState` is an event cache and refused a connection that was already
+  up (9/10 of first reads after the channel opened). Native reads
+  `rtc::PeerConnection::state()`.
 - **Pump-liveness false positives on frozen loops no longer burn the self-heal**
   ([#147], measured in [#145]): the "a third party rebuilt the PlayerLoop" diagnostic
   now requires the loop to have advanced ≥ 3 frames while ≥ 5 s stale. Pausing the
@@ -62,12 +68,20 @@ or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
 ### Added
 
+- **`dcu_pc_connection_path` / `PeerConnection.TryGetConnectionPath`** ([#123],
+  [#118]): ABI 2 → 3 (20 → 21 exports). Answers whether the selected ICE pair is
+  Direct or Relayed. The verdict is synthesized in native (`local is relay ||
+  remote is relay`) — judging only the remote candidate would mis-report the TURN
+  side as Direct. C# is a two-value enum with no `Unknown`; the call returns
+  `false` until the connection is up.
 - **`DataChannelRuntime.Preload()`** ([#146]): optional explicit warm-up, mirroring
   upstream `rtcPreload`'s "lazy by default, preload if you care" shape — idempotent,
   main-thread-only, throws `DataChannelException` on failure (the lazy path only
   logs). Call it from a loading screen to keep first-connection latency out of the
   "join" click, or to pin the load moment while bisecting a crash.
 
+[#118]: https://github.com/xuhuanhello/juice-c-sharp/issues/118
+[#123]: https://github.com/xuhuanhello/juice-c-sharp/issues/123
 [#140]: https://github.com/xuhuanhello/juice-c-sharp/issues/140
 [#141]: https://github.com/xuhuanhello/juice-c-sharp/issues/141
 [#142]: https://github.com/xuhuanhello/juice-c-sharp/issues/142
@@ -229,6 +243,8 @@ has since been removed from the schema (it was constant across everything the la
 gate reads, and therefore carried no information); it disappears on the next binary
 refresh rather than being edited by hand, because CI artifacts are not hand-edited.
 
+[0.4.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.4.0
+[0.3.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/xuhuanhello/juice-c-sharp/releases/tag/v0.1.0
