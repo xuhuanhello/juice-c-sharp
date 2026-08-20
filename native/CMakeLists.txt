@@ -311,6 +311,28 @@ if(DCU_STAGE_PLUGIN)
     )
   endif()
 
+  # 入库的插件是 Release 形态：去掉 DWARF，留下 .dynsym（导出门禁和运行都靠它）。
+  # NDK Clang 的 Release 仍会编进完整 .debug_*（实测 Android .so 24 MB 里 21 MB
+  # 是 DWARF）；gcc 的 Linux Release 不会。崩溃监控要的是**同一份编译**的未剥离
+  # 副本，不是把 debug 塞进采用者的 APK。未剥离拷贝留在构建目录，CI 当独立
+  # artifact 上传，不进 Plugins/。
+  if(DCU_PLATFORM_KEY STREQUAL "android")
+    if(NOT CMAKE_STRIP)
+      message(FATAL_ERROR
+        "Android needs CMAKE_STRIP (NDK llvm-strip) to remove DWARF from the shipped .so.\n"
+        "  The toolchain file should set it; if it did not, the NDK is incomplete.")
+    endif()
+    add_custom_command(TARGET datachannel_unity POST_BUILD
+      COMMAND "${CMAKE_COMMAND}" -E copy
+              "$<TARGET_FILE:datachannel_unity>"
+              "${CMAKE_BINARY_DIR}/${DCU_ARTIFACT_NAME}.unstripped"
+      COMMAND "${CMAKE_STRIP}" --strip-debug
+              "${DCU_PLUGIN_ROOT}/${DCU_PLUGIN_REL}/${DCU_ARTIFACT_NAME}"
+      COMMENT "Preserving unstripped copy; stripping DWARF from staged Android plugin"
+      VERBATIM
+    )
+  endif()
+
   # 溯源信息：写进 Report~/，文件名由平台目录拍平而来（#65 推翻 #54 的「同目录」）。
   # 报 bug 时要能反查这份二进制的来历，靠的就是它 —— 但反查是维护者指路、对方照路径
   # 取文件，所以文件在不在 Unity 的资产树里无关紧要，README 里写着它在哪才要紧。

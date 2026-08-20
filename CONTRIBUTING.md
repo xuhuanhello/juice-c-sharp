@@ -66,7 +66,7 @@ Before committing any batch to `Plugins/` + `Report~/`, all of this must be true
 3. **The build record came from CI.** `gen_support_table.py --check` rejects `ci: null` and rejects a `pull_request` run — do not work around either. A locally produced record has no run URL and its commit describes the checkout rather than what was compiled; a `pull_request` commit is a synthetic merge ref that stops existing once the PR merges.
 4. **Regeneration diffs clean** — `gen_plugin_meta.py --check` and `gen_support_table.py --check`. Both run in CI, so this is really a "do not commit while red" reminder.
 
-Unpack the CI artifact at the package root: the zip already contains `Plugins/…` and `Report~/…` in the shape they land in.
+Unpack the CI artifact at the package root: the zip already contains `Plugins/…` and `Report~/…` in the shape they land in. The Android `.so` in that zip is DWARF-stripped. The matching unstripped file is the `datachannel_unity-android-unstripped` artifact (and the GitHub Release asset) — that is what goes to Bugly / Firebase / Play Console, not into `Plugins/`.
 
 ### The per-platform on-device smoke
 

@@ -1090,7 +1090,15 @@ Two consequences worth stating:
 
 History keeps the old LFS objects; nothing is rewritten. New commits simply store the bytes.
 
-**Refresh policy: on release only, and do not strip.** A full-matrix refresh was measured at roughly **20 MB** ([#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54)) — five times smaller than the estimate that had made storage look like a constraint, so quota does not drive this. What does drive it is that every refresh is permanent history; tying refreshes to releases keeps that history meaningful. Stripping is declined for the opposite reason it is usually adopted: the size it would save is not needed, and symbols are what make a crash report from an adopter actionable.
+**Refresh policy: on release only.** A full-matrix refresh was measured at roughly **20 MB** ([#54](https://github.com/xuhuanhello/juice-c-sharp/issues/54)) — five times smaller than the estimate that had made storage look like a constraint, so quota does not drive this. What does drive it is that every refresh is permanent history; tying refreshes to releases keeps that history meaningful.
+
+~~**Do not strip.**~~ **Overturned.** That sentence treated "symbols inside the shipped plugin" and "symbols for a crash reporter" as the same file. They are not. A store app ships a **Release** binary with DWARF removed (`strip --strip-debug`); Bugly / Firebase / Play Console take a **separate** unstripped copy (or a `.sym` / `.dSYM` produced from it) of the **same compile**, matched by build-id. You do not ship a debug `.so` to users, and you do not need DWARF in the playable binary to upload symbols.
+
+The NDK Clang Release build embeds full `.debug_*`; gcc's Linux Release does not. That is why the Android `.so` was 24 MB, of which 21 MB was DWARF, while Linux stayed ~3 MB. Putting that in `Plugins/` puts it in every adopter's APK.
+
+**Shipped plugin:** DWARF stripped on Android ELF. The export surface (`.dynsym` / the `dcu_*` list) is untouched; the audit still runs on the stripped file.
+
+**Unstripped copy:** `${CMAKE_BINARY_DIR}/<artifact>.unstripped`, uploaded as a CI artifact / GitHub Release asset. That is what an adopter uploads to a crash platform. It is **not** in `Plugins/`, so it does not enter the UPM git-URL install.
 
 ### Provenance: one build record per shipped binary
 

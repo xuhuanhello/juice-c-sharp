@@ -211,6 +211,13 @@ jobs:
             ${{ matrix.build_info_path }}
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v6
+        if: matrix.platform == 'android'
+        with:
+          name: datachannel_unity-android-unstripped
+          path: native/build/ci/libdatachannel_unity.so.unstripped
+          if-no-files-found: error
+
   static-checks:
     name: Script syntax and generated files
     runs-on: ubuntu-22.04
