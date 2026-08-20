@@ -18,7 +18,7 @@ extern "C" {
 #  define DCU_API __attribute__((visibility("default")))
 #endif
 
-#define DCU_ABI_VERSION 2
+#define DCU_ABI_VERSION 3
 
 /*
  * 调用约定（SPEC §4）
@@ -79,6 +79,12 @@ extern "C" {
  * 也绝不冒充某个既有成员。 */
 #define DCU_STATE_UNKNOWN -1
 
+/* 这条连接实际走的路。**两值，没有 Unknown 档** —— 判定只在有选中候选对时
+ * 才有意义，没有的时候由返回码 DCU_ERR_NOT_AVAIL 表达，而不是多一个枚举值
+ * 去混淆「没查到」与「查到了但不知道」。 */
+#define DCU_PATH_DIRECT 0
+#define DCU_PATH_RELAYED 1
+
 typedef enum dcu_event_type {
     DCU_EVENT_NONE = 0,
     DCU_EVENT_LOCAL_DESCRIPTION = 1,
@@ -132,14 +138,25 @@ typedef struct dcu_dc_init {
 /* --- 全局 ---------------------------------------------------------------- */
 
 DCU_API int dcu_abi_version(int *out_version);
+
+/* 幂等。**失败可重试**（#150）：失败路径回滚初始化标志，下一次调用会真的重来，
+ * 而不是把失败闩成永久成功。若上一次 dcu_shutdown 的清理仍在后台收尾（见下），
+ * 返回 DCU_ERR_FAILURE 并记日志 —— 等收尾完成后重试即可成功。
+ *
+ * 句柄空间注记（#151）：句柄单调分配、永不复用，空间 2^31；耗尽时创建类调用
+ * 返回 DCU_ERR_FAILURE（每秒 1000 次创建也要 ~25 天，按进程生命周期设计）。 */
 DCU_API int dcu_init(void);
 
 /* 关闭并回收。**out_undestroyed 带出调用此刻仍未被销毁的对象数**（PC + DC 合计），
- * 计数由 dcu 层自己的句柄表给出，不依赖上游、也不依赖日志桥。
+ * 计数由 dcu 层自己的句柄表给出，不依赖上游、也不依赖日志桥。含销毁窗口内
+ * 漏进表里的入向通道 —— 它们被二次清扫就地销毁并计入（#150）。
  *
  * 为什么要自己数：上游 rtcCleanup() 返回 void，而且**自己 try/catch 吞掉了两条最有
  * 价值的诊断** —— "N objects were not properly destroyed" 与 "Cleanup timeout"
  * （capi.cpp:1754-1768），两条都只进 plog。于是它在死锁时也报成功。
+ *
+ * 超时语义（#150）：等待上游 Cleanup 至多 10 秒，超时返回 DCU_ERR_FAILURE ——
+ * 此时清理仍在后台进行，其完成之前 dcu_init 会 fail-fast 而不是与收尾竞态。
  *
  * 未初始化时填 0 并返回 DCU_OK。返回码与计数分开：计数走 out 参数，
  * 返回值只表示成败（SPEC §4 的调用约定，没有任何函数的返回值兼作数据）。 */
@@ -167,6 +184,45 @@ DCU_API int dcu_pc_add_remote_candidate(int pc, const char *cand, int cand_len,
                                         const char *mid, int mid_len);
 DCU_API int dcu_pc_create_data_channel(int pc, const char *label, int label_len,
                                        const dcu_dc_init *init, int *out_dc);
+
+/* 判定这条连接走的是直连还是中继，并带出**远端**候选的 SDP 原文。
+ *
+ * out_verdict 取 DCU_PATH_DIRECT / DCU_PATH_RELAYED。判定在此处合成 —— 与
+ * dcu_dc_state 同理，调用方不该自己拼判据，因为判据不直观：
+ *
+ *   local 是 relay || remote 是 relay
+ *
+ * **两端都要看，远端单独不够。** 走中继时，靠 TURN 那一侧看到的是「自己的
+ * local 是 relay、对面的 remote 是 host」；只判远端会把这一侧报成直连。
+ *
+ * **只带远端 SDP，不带本地。** 本地那条在非中继路径上不是真实路径 ——
+ * libjuice 只为本地中继候选建带 local 的候选对（agent.c 的
+ * agent_add_candidate_pairs_for_remote，上游注释：local non-relayed candidates
+ * are undifferentiated for sending），其余情况 pair->local 为 NULL，而
+ * agent_get_selected_candidate_pair 会回退到 local.candidates[0] —— 优先级排序
+ * 后的第一条，通常是 host。所以一条 srflx 路径的本地会被报成 host。判定内部
+ * 读它、且只在 == relay 这个方向上采信，是安全的；把它交给调用方不是。
+ *
+ * 缓冲语义：长度先填**精确值**再判容量，不足返回 DCU_ERR_TOO_SMALL（此时
+ * verdict 已写入）。与 dcu_log_next 的队列语义**不同构**：这里是活查询，
+ * 没有队首可消费 —— 重试是重新查询，两次调用之间连接状态可能变化，
+ * 结果（verdict 与 SDP）不保证相同。
+ *
+ * 状态不是 Connected、或此刻没有选中候选对时，返回 DCU_ERR_NOT_AVAIL。
+ *
+ * **状态门禁在本函数内，调用方不必自己兜。** 上游的 agent->selected_pair 从不
+ * 被清空（唯一写入点在 agent.c 提名成功处；三个失败路径清的是另一个字段
+ * selected_entry，注释 disallow sending），所以上游那个 getter 在失败之后仍会
+ * 返回成功并带回上一次的对。本函数先查一次 rtc::PeerConnection::state() —— 那是
+ * std::atomic<State> 的一次原子读，活的、无锁 —— 状态不对就报「无」。
+ *
+ * 门禁**不放在托管侧**是实测的结论：C# 的 ConnectionState 是事件缓存，落后到下
+ * 一次泵派发为止，而通道的 State 是活查询、会先变 Open；拿缓存做门禁会拒掉一个
+ * 真正已连接的连接。
+ *
+ * 残留窗口一处，不改上游消不掉：读状态与取候选对是两步，其间连接可能在别的线程
+ * 上失败，那一瞬会读到上一次的对。微秒级，非帧级。 */
+DCU_API int dcu_pc_connection_path(int pc, int *out_verdict, void *buf, int cap, int *out_len);
 
 /* --- DataChannel --------------------------------------------------------- */
 

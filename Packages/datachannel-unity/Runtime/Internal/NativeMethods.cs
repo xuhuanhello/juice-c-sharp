@@ -127,6 +127,14 @@ namespace DataChannelUnity.Internal
         public static extern int dcu_pc_create_data_channel(
             int pc, byte[] label, int label_len, ref DcInitNative init, out int dc);
 
+        // 判定这条连接走的是直连还是中继，并带出远端候选的 SDP。缓冲语义：
+        // 长度先填精确值再判容量（TooSmall 时 verdict 已写入）；这是**活查询**，
+        // 没有队首可消费 —— 重试是重新查询，结果可能随连接状态变化。
+        // 未连接或无选中候选对时返回 ErrNotAvail。判据在 native 侧合成，见 dcu.h。
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int dcu_pc_connection_path(
+            int pc, out int verdict, byte[] buf, int cap, out int len);
+
         /// <summary>
         /// 发送。**声明成 <see cref="IntPtr"/> 不是 ABI 变更** —— C 侧
         /// <c>dcu_dc_send(int, const void*, int)</c> 一字未动，改的只是这里的封送方式。

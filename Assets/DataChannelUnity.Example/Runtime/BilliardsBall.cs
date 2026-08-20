@@ -1,0 +1,291 @@
+using UnityEngine;
+
+namespace DataChannelUnity.Example
+{
+    /// <summary>
+    /// One ball. Number 0 is the cue ball; 1..15 are the object balls.
+    ///
+    /// Leaving the table is structurally impossible rather than a rule (#132): the rails are thick,
+    /// collision detection is continuous, and anything that still escapes sideways is snapped back
+    /// silently — not a foul, not a pocket. The reason is not tidiness: a ball on the floor can never
+    /// be pocketed, clearing your group is a precondition for winning, so one lost ball means the
+    /// game can no longer be decided at all. That is exactly the load-bearing condition of the map.
+    ///
+    /// Gravity is on and no axis is frozen. Freezing Y was the earlier design, and it forced pockets
+    /// to be gaps in the cushion, which needed mouth intervals, segmented rails and an exemption
+    /// inside the containment clamp — three pieces of per-tick machinery to imitate falling. The
+    /// mistake underneath was reading "cannot fly off the table" and "cannot fall through it" as one
+    /// constraint when they are different directions: only the first is ours to enforce.
+    /// </summary>
+    [RequireComponent(typeof(Rigidbody))]
+    public sealed class BilliardsBall : MonoBehaviour
+    {
+        [SerializeField] private int _number;
+
+        private Rigidbody _body;
+
+        /// <summary>0 for the cue ball, 1..15 for object balls.</summary>
+        public int Number => _number;
+
+        public bool IsCueBall => _number == 0;
+
+        /// <summary>Set by the host when this ball drops. Clients see it park; nothing else.</summary>
+        public bool IsPocketed { get; private set; }
+
+        /// <summary>
+        /// Resolved on demand rather than only in Awake: whoever collects the balls may run its
+        /// own Awake first, and Unity gives no ordering guarantee between the two.
+        /// </summary>
+        public Rigidbody Body
+        {
+            get
+            {
+                if (_body == null)
+                {
+                    _body = GetComponent<Rigidbody>();
+                    ConfigureBody();
+                }
+
+                return _body;
+            }
+        }
+
+        public Vector3 Velocity => Body.velocity;
+
+        public Vector3 AngularVelocity => Body.angularVelocity;
+
+        /// <summary>
+        /// Raised when this ball touches another. Arguments are (this, other).
+        ///
+        /// Reported per ball rather than watched centrally because PhysX only offers the callback on
+        /// the colliding body — and it is the sole source of #132's first observable, "which ball did
+        /// the cue strike first". Cushions and cloth are filtered out here: they have no
+        /// <see cref="BilliardsBall"/>, so a contact with one raises nothing.
+        /// </summary>
+        public event System.Action<BilliardsBall, BilliardsBall> BallContact;
+
+        private void Awake()
+        {
+            _ = Body;
+        }
+
+        private void OnCollisionEnter(Collision collision)
+        {
+            // Only ball-to-ball matters. The rigidbody test comes first because it is a field read
+            // and it rejects the common case for free: rails and slate are static colliders, so
+            // collision.rigidbody is null for them, and they account for most contacts in a shot.
+            // GetComponent then runs only for the handful that really are ball-to-ball.
+            if (collision.rigidbody == null)
+                return;
+
+            var other = collision.rigidbody.GetComponent<BilliardsBall>();
+            if (other != null)
+                BallContact?.Invoke(this, other);
+        }
+
+        internal void SetNumber(int number) => _number = number;
+
+        /// <summary>
+        /// Gravity on, nothing frozen. Balls rest on a real surface and fall through the pocket
+        /// notches, so whether a ball drops or rattles on the jaw is settled by the solver rather
+        /// than by a rule of ours. Containment is only about not leaving the table sideways, which
+        /// is a separate direction from falling — conflating the two is what produced the earlier
+        /// design where pockets had to be gaps in the cushion.
+        ///
+        /// Continuous dynamic collision detection is not optional here. Physics runs on the FishNet
+        /// tick (PhysicsMode.TimeManager), so a step is 33 ms at TickRate 30 — a ball at 3 m/s
+        /// covers 10 cm per step, nearly two ball diameters. Discrete detection tunnels, and with a
+        /// real floor it would tunnel *through the slate* as well as through rails.
+        /// </summary>
+        private void ConfigureBody()
+        {
+            _body.useGravity = true;
+            _body.constraints = RigidbodyConstraints.None;
+            _body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            _body.interpolation = RigidbodyInterpolation.Interpolate;
+
+            // PhysX does not model rolling resistance: a sphere on a plane rolls forever no matter
+            // how much surface friction there is. It has to be added by hand — see ApplyRollingResistance,
+            // which the rack calls once per physics step. drag/angularDrag are therefore zero: they
+            // are *linear* dampers, so they decay speed exponentially, and this used to be
+            // drag = 0.12 / angularDrag = 1.4 standing in for rolling resistance (#137 measured what
+            // that cost: distance came out proportional to power instead of power squared, so the
+            // power-to-distance mapping — which is all of position play — had the wrong exponent).
+            _body.drag = 0f;
+            _body.angularDrag = 0f;
+
+            // Unity's default cap is 50 rad/s, and a rolling ball needs omega = v/r. With r = 28.5 mm
+            // that is only 1.43 m/s — below it a ball can roll, above it the cap holds omega down and
+            // the ball *slides* instead. A 4 m/s break needs 140 rad/s, so before #137 raised this
+            // every ball spent the first 1.7 s of every break sliding, where cloth sliding friction
+            // dominates and any rolling-resistance term is nearly mute. 400 rad/s covers 11 m/s of
+            // rolling plus headroom for spin picked up in collisions.
+            _body.maxAngularVelocity = 400f;
+
+            // #131: the project-wide sleepThreshold (0.005) corresponds to ~0.1 m/s, which is
+            // 1.75 ball diameters per second — visibly still rolling. Lower it per body so PhysX
+            // agrees with our own stop criterion instead of fighting it. The global setting in
+            // ProjectSettings is shared with the rest of the repo and is deliberately untouched.
+            _body.sleepThreshold = 0.0001f;
+        }
+
+        /// <summary>
+        /// Places the ball at rest. Used for the rack, the head spot, and parking.
+        ///
+        /// The height is forced to the surface rather than taken from the caller: callers work in
+        /// table coordinates where Y carries no meaning, and now that Y is a real degree of freedom
+        /// a caller's stray zero would drop the ball through the slate.
+        /// </summary>
+        public void PlaceAt(Vector3 position)
+        {
+            var onSurface = new Vector3(position.x, BilliardsTable.BallY, position.z);
+            Body.position = onSurface;
+            transform.position = onSurface;
+            Stop();
+        }
+
+        public void Stop()
+        {
+            Body.velocity = Vector3.zero;
+            Body.angularVelocity = Vector3.zero;
+        }
+
+        /// <summary>
+        /// One physics step of rolling resistance: a constant deceleration opposing travel, which is
+        /// what a ball on cloth actually experiences and what PhysX does not provide (#137).
+        ///
+        /// **Both halves are required.** Decelerating only the linear velocity leaves the ball
+        /// spinning, cloth friction converts that spin straight back into travel, and the shot never
+        /// satisfies the stop criterion — measured: every constant-deceleration run hit the 15 s
+        /// backstop until the angular half was added. So omega is pulled down alongside v to keep the
+        /// rolling relation omega = v/r.
+        ///
+        /// The coefficient is larger than a textbook rolling-resistance figure for cloth (~0.01)
+        /// because it is the only dissipation term in the model: ball-to-ball friction, cushion
+        /// friction and the sliding-to-rolling transition all land on it. What #137 bought is not a
+        /// true coefficient but the right *shape* — distance now goes as power squared, so doubling
+        /// power sends the ball four times as far rather than twice.
+        /// </summary>
+        public void ApplyRollingResistance(float deceleration, float deltaTime)
+        {
+            if (IsPocketed) return;
+
+            var travel = new Vector3(Body.velocity.x, 0f, Body.velocity.z);
+            float step = deceleration * deltaTime;
+
+            // Below one step's worth of speed, decelerating would overshoot into reversal. Park it
+            // instead — the vertical component is left alone so a ball falling into a pocket keeps
+            // falling. Zeroing spin here matters: without it a stopped ball keeps rotating and cloth
+            // friction pushes it off again.
+            if (travel.magnitude <= step)
+            {
+                Body.velocity = new Vector3(0f, Body.velocity.y, 0f);
+                Body.angularVelocity = Vector3.zero;
+                return;
+            }
+
+            Body.AddForce(-travel.normalized * deceleration, ForceMode.Acceleration);
+
+            float rollingSpin = (travel.magnitude - step) / BilliardsTable.BallRadius;
+            Vector3 spin = Body.angularVelocity;
+            if (spin.magnitude > rollingSpin && spin.magnitude > 1e-3f)
+                Body.angularVelocity = spin.normalized * rollingSpin;
+        }
+
+        public void Strike(Vector3 impulse)
+        {
+            Body.WakeUp();
+            Body.AddForce(impulse, ForceMode.Impulse);
+        }
+
+        /// <summary>
+        /// Host-side: park this ball off the table. The ball stays spawned, so once it settles its
+        /// NetworkTransform reports no change and costs nothing per tick (#131 §5).
+        /// </summary>
+        /// <remarks>
+        /// The body is made kinematic, and that is what actually delivers the "costs nothing" half.
+        /// The parking row sits beside the table with no surface under it, which was free when Y was
+        /// frozen and is not now that gravity is on: a parked ball fell indefinitely — measured at
+        /// −98 m and still accelerating through 36 m/s — because containment deliberately ignores
+        /// pocketed balls, so nothing caught it.
+        ///
+        /// The visible cost was bandwidth, not appearance. A falling ball changes Y by far more than
+        /// the 1 mm sensitivity threshold every tick, so each parked ball kept sending a Y delta
+        /// (about 7 bytes/tick) for the rest of the match — the exact opposite of what #131 chose
+        /// parking for, and invisible on screen because it happens off-camera.
+        ///
+        /// Kinematic rather than gravity-off: with no colliders and no gravity a ball is still
+        /// simulated and can still be moved by a stray impulse, whereas a kinematic body stays where
+        /// it is put. A floor under the parking row would also work but adds geometry that exists
+        /// only to catch something that should not be moving at all.
+        /// </remarks>
+        public void Pocket()
+        {
+            if (IsPocketed)
+                return;
+
+            IsPocketed = true;
+            foreach (Collider c in GetComponents<Collider>())
+                c.enabled = false;
+
+            PlaceAt(BilliardsTable.ParkingSlot(_number));
+            Body.isKinematic = true;
+        }
+
+        /// <summary>Host-side: return this ball to play. Used when the rack is reset.</summary>
+        public void Restore(Vector3 position)
+        {
+            IsPocketed = false;
+            foreach (Collider c in GetComponents<Collider>())
+                c.enabled = true;
+
+            // Before PlaceAt: a kinematic body ignores the velocity reset that PlaceAt performs, so
+            // restoring in the other order would return the ball to play still carrying whatever it
+            // was doing when it dropped.
+            Body.isKinematic = false;
+            PlaceAt(position);
+        }
+
+        /// <summary>
+        /// Last line of the containment guarantee, checked by the host each tick. Returns true when
+        /// it had to intervene, which is worth logging: it means the rails were beaten and the
+        /// physics configuration — not the rules — needs looking at.
+        ///
+        /// Horizontal only. Falling is not containment's business: a ball dropping below the surface
+        /// is going into a pocket, which is the one exit the table is supposed to have. Only upward
+        /// travel is corrected, because a ball gaining height on a flat surface means something has
+        /// gone wrong and losing it would deadlock the game — clearing your group is a precondition
+        /// for winning, so one lost ball means the game can never be decided.
+        /// </summary>
+        public bool ClampIntoPlay()
+        {
+            if (IsPocketed)
+                return false;
+
+            Vector3 p = Body.position;
+
+            // A ball on its way into a pocket is legitimately outside the playing rectangle.
+            // Clamping it would push it back out of the hole it just fell into.
+            if (p.y < -BilliardsTable.BallRadius)
+                return false;
+
+            float x = Mathf.Clamp(p.x, -BilliardsTable.MaxX, BilliardsTable.MaxX);
+            float z = Mathf.Clamp(p.z, -BilliardsTable.MaxZ, BilliardsTable.MaxZ);
+            bool movedHorizontally = !Mathf.Approximately(x, p.x) || !Mathf.Approximately(z, p.z);
+
+            bool tooHigh = p.y > BilliardsTable.MaxY;
+            if (!movedHorizontally && !tooHigh)
+                return false;
+
+            Body.position = new Vector3(x, tooHigh ? BilliardsTable.BallY : p.y, z);
+            Vector3 v = Body.velocity;
+            if (tooHigh)
+                v.y = 0f;
+            if (movedHorizontally)
+                v *= 0.25f;
+            Body.velocity = v;
+
+            return true;
+        }
+    }
+}

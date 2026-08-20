@@ -143,3 +143,27 @@ Packages/datachannel-unity/Plugins/iOS/**/*.a
 Packages/datachannel-unity/Plugins/WebGL/**
 !Packages/datachannel-unity/Plugins/WebGL/.gitkeep
 !Packages/datachannel-unity/Plugins/**/.gitkeep
+
+# 示例配套设施的本地配置（#117 / #122）。
+# TURN_SECRET 在这里，coturn 与信令服务器共用同一份 —— 抄两遍就会有对不上的
+# 那天，而症状是一片莫名的 401/438。入库的是 .env.example。
+deploy/.env
+
+# 证书与私钥（#121）。docker-compose 的 SIGNAL_TLS_DIR 默认指向这里，所以
+# 不挡的话「把证书放进默认位置」就等于把私钥提交上去 —— 那是个只会犯一次
+# 但无法挽回的错误（推上去就得重新签发）。
+deploy/signal/certs/
+
+# 客户端的信令地址（#117）。**它不是秘密** —— 客户端一个秘密都不持有，
+# 凭据由信令服务器签发下发。不入库的理由是「每套部署各一份」，不是保密。
+# 入库的是 Assets/DataChannelUnity.Example/SignalingConfig.example.json。
+Assets/Resources/SignalingConfig.json
+Assets/Resources/SignalingConfig.json.meta
+
+# Python 字节码缓存（native/scripts 被直接运行时产生）。
+__pycache__/
+
+# 验证会话的截图证据归 ticket（wayfinder 的资产挂 issue 链接），不入库。
+# 27fb73b 曾误入库一批并顺手把 png 送进了 LFS，随后移除 —— 这两行防复发。
+Assets/Screenshots/
+Assets/Screenshots.meta

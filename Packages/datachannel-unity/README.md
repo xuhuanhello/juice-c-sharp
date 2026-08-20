@@ -1,6 +1,6 @@
 # DataChannel Unity (`com.xuhuanhello.datachannel`)
 
-WebRTC **DataChannel** bindings for Unity: stable C ABI (`dcu_*`) over [libdatachannel](https://github.com/paullouisageneau/libdatachannel) (native) and [datachannel-wasm](https://github.com/paullouisageneau/datachannel-wasm) (WebGL).
+WebRTC **DataChannel** bindings for Unity: stable C ABI (`dcu_*`) over [libdatachannel](https://github.com/paullouisageneau/libdatachannel). WebGL (via [datachannel-wasm](https://github.com/paullouisageneau/datachannel-wasm)) is planned but **not shipped** — see `docs/SPEC.md` §9/§16.
 
 **Specification:** [`docs/SPEC.md`](../../docs/SPEC.md)
 
@@ -41,10 +41,10 @@ text editor.
 Add to `Packages/manifest.json` — **pin a tag**:
 
 ```json
-"com.xuhuanhello.datachannel": "https://github.com/xuhuanhello/juice-c-sharp.git?path=Packages/datachannel-unity#v0.3.0"
+"com.xuhuanhello.datachannel": "https://github.com/xuhuanhello/juice-c-sharp.git?path=Packages/datachannel-unity#v0.4.0"
 ```
 
-Without the `#v0.3.0` suffix, UPM tracks the default branch: the package can change under you between two `Library/` resolves, and the binary you tested against is not necessarily the one that ships. Pin, and bump deliberately — see [`CHANGELOG.md`](./CHANGELOG.md).
+Without the `#v0.4.0` suffix, UPM tracks the default branch: the package can change under you between two `Library/` resolves, and the binary you tested against is not necessarily the one that ships. Pin, and bump deliberately — see [`CHANGELOG.md`](./CHANGELOG.md).
 
 For local development against a checkout of this repository:
 
@@ -106,6 +106,10 @@ dc.Message += bytes => { /* ... */ };
 ```
 
 Events run on the **Unity main thread** (automatic PlayerLoop pump).
+
+Native loads **lazily** on the first `PeerConnection`. To front-load it at a moment
+you choose (e.g. behind a loading screen), call the optional
+`DataChannelRuntime.Preload()` — it throws on failure instead of logging.
 
 ## Sample
 

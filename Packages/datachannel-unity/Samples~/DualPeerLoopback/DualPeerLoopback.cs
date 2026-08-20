@@ -23,9 +23,15 @@ namespace DataChannelUnity.Samples
         IEnumerator Start()
         {
             DataChannelLog.Level = LogLevel.Info;
-            if (!DataChannelRuntime.IsNativeAvailable)
+            // #146：native 是惰性加载的，读 IsNativeAvailable 不再触发加载 ——
+            // 示例在自选时刻显式预热，失败时异常消息点名修法。
+            try
             {
-                Debug.LogError("DualPeerLoopback: native plugin missing. Run native/scripts/build-*.sh");
+                DataChannelRuntime.Preload();
+            }
+            catch (DataChannelException e)
+            {
+                Debug.LogError("DualPeerLoopback: native plugin missing. Run native/scripts/build-*.sh — " + e.Message);
                 yield break;
             }
 

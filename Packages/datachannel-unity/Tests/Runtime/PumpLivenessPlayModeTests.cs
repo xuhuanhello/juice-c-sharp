@@ -41,6 +41,7 @@ namespace DataChannelUnity.Tests
         [SetUp]
         public void Setup()
         {
+            DataChannelRuntime.Preload(); // #146 被动化后，读属性不再触发加载 —— 测试侧显式预热。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
                 "Native plugin not loaded. This is a failure, not a skip.");
             _captured.Clear();

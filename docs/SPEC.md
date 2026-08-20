@@ -165,7 +165,9 @@ Releases are **git tags** (`v<version>`), because that is what a UPM git-URL ins
 
 **Decision:** [#7](https://github.com/xuhuanhello/juice-c-sharp/issues/7), logging extension [#12](https://github.com/xuhuanhello/juice-c-sharp/issues/12), create config [#9](https://github.com/xuhuanhello/juice-c-sharp/issues/9), event contract [#30](https://github.com/xuhuanhello/juice-c-sharp/issues/30), error codes and enums [#31](https://github.com/xuhuanhello/juice-c-sharp/issues/31), event semantics [#32](https://github.com/xuhuanhello/juice-c-sharp/issues/32), log queue [#33](https://github.com/xuhuanhello/juice-c-sharp/issues/33)
 
-**ABI version: `DCU_ABI_VERSION` = 2.** Version 1 was the pre-hardening surface; the changes below are breaking, and since the package is unreleased there is no compatibility shim. Exported symbols: **19** (enumerated below and mirrored in `native/exports/expected-symbols.txt`, §11).
+**ABI version: `DCU_ABI_VERSION`, defined in [`dcu.h`](../native/dcu/include/dcu.h) — deliberately not restated here.** Version 1 was the pre-hardening surface and the version-2 changes were breaking; the package is unreleased, so there is no compatibility shim at any version. The exported set is enumerated below and diffed against `native/exports/expected-symbols.txt` (§11).
+
+> This sentence used to carry two literals, `2` and `19`, and **both had drifted** — the header was at 3 and the list at 21. It is the same defect as the *Exported surface* heading below, which was fixed in [#123](https://github.com/xuhuanhello/juice-c-sharp/issues/123) while this line was missed one paragraph away. `docs/verification-mcp.md` §4 already tells its reader to compare against the header rather than a number in prose; a spec that then prints the number anyway hands them a second, unchecked source to be wrong.
 
 ### Principles
 
@@ -238,15 +240,17 @@ The same rule read on the control queue is stronger and cheaper: dropping a `DcC
 
 **WebGL cannot honour the back-pressure guarantee** — see §8.
 
-### Exported surface (19)
+### Exported surface
+
+> **The count lives in [`native/exports/expected-symbols.txt`](../native/exports/expected-symbols.txt), not here.** This heading used to carry a literal (`19`) and it had already drifted — the list held 20 before `dcu_pc_connection_path` and 21 after, while the heading still said 19 through both. A number in prose that nothing checks is the same defect `docs/verification-mcp.md` §33 bans, one file over. The tables below name the symbols; the audit script diffs them.
 
 **Global**
 
 | Symbol | Notes |
 |--------|-------|
 | `dcu_abi_version(int *out_version)` | |
-| `dcu_init(void)` | Idempotent |
-| `dcu_shutdown(int *out_undestroyed)` | Returns the count of **objects still alive** through the out parameter, maintained by the dcu layer itself (incremented on create, decremented on destroy). Upstream's `rtcCleanup()` returns `void` and swallows its own two most valuable diagnostics — "N objects were not properly destroyed" and "Cleanup timeout" — into plog (`capi.cpp:1754-1768`), so it currently reports success even when it deadlocks |
+| `dcu_init(void)` | Idempotent; **failure rolls back the init latch, so init is retryable** — a thrown `Preload`/`InitLogger` no longer latches as permanent success. While a timed-out shutdown's `Cleanup` is still finishing in the background, `dcu_init` **fail-fasts** with `FAILURE` instead of racing it ([#150](https://github.com/xuhuanhello/juice-c-sharp/issues/150)) |
+| `dcu_shutdown(int *out_undestroyed)` | Returns the count of **objects still alive** through the out parameter, maintained by the dcu layer itself (incremented on create, decremented on destroy). Upstream's `rtcCleanup()` returns `void` and swallows its own two most valuable diagnostics — "N objects were not properly destroyed" and "Cleanup timeout" — into plog (`capi.cpp:1754-1768`), so it currently reports success even when it deadlocks. **A second table sweep right after the first** catches incoming channels adopted by in-flight `onDataChannel` callbacks during teardown — uncaught they both leak *and* stall `Cleanup` into its timeout — destroying them and counting them into the bill; the `Cleanup` future is kept so the 10 s timeout path gates the next `dcu_init` ([#150](https://github.com/xuhuanhello/juice-c-sharp/issues/150)) |
 | `dcu_set_log_level(int level)` | §7; **never** detaches the log bridge |
 | `dcu_log_next(...)` | Drains one bridged log line into caller buffers |
 | `dcu_event_next(dcu_event_header *out_header, void *buf, int cap, void *buf2, int cap2)` | Single atomic dequeue: fills header + payloads and pops, or reports `TOO_SMALL` / `NOT_AVAIL` without popping |
@@ -263,6 +267,7 @@ The same rule read on the control queue is stronger and cheaper: dropping a `DcC
 | `dcu_pc_set_remote_description(int pc, const char *sdp, int sdp_len, const char *type, int type_len)` | |
 | `dcu_pc_add_remote_candidate(int pc, const char *cand, int cand_len, const char *mid, int mid_len)` | `mid` optional |
 | `dcu_pc_create_data_channel(int pc, const char *label, int label_len, const dcu_dc_init *init, int *out_dc)` | Rejects labels > **65535** bytes (see *Label bound*) |
+| `dcu_pc_connection_path(int pc, int *out_verdict, void *buf, int cap, int *out_len)` | Direct-vs-relayed verdict, composed natively; carries the **remote** candidate SDP. See *Connection path* |
 
 **DataChannel**
 
@@ -296,6 +301,24 @@ The same rule read on the control queue is stronger and cheaper: dropping a `DcC
 **`DcClosed` may arrive with no preceding `DcOpen`.** If a channel opens and closes inside the race window, only `DcClosed` is delivered. This is forced, not chosen: `isOpen()` is `!mIsClosed && mIsOpen`, and the C++ surface does not expose `mIsOpen`, so "opened then closed" is indistinguishable from "never opened". Synthesising `DcOpen` would be fabrication.
 
 **Draining before close.** Before dispatching `DcClosed` for a channel, its receive queue must be drained; otherwise messages that arrived before the close are lost or reordered. The handle is still resolvable at that point.
+
+#### Connection path
+
+**Decision:** [#118](https://github.com/xuhuanhello/juice-c-sharp/issues/118), on the research in [#114](https://github.com/xuhuanhello/juice-c-sharp/issues/114); corrected during implementation in [#123](https://github.com/xuhuanhello/juice-c-sharp/issues/123).
+
+`dcu_pc_connection_path` answers one question — **is this connection direct or relayed** — and carries the remote candidate's SDP alongside. It exists because a consumer finally needed it: the acceptance line of the FishNet example map ([#113](https://github.com/xuhuanhello/juice-c-sharp/issues/113)) is two devices on different networks *plus* being able to read which path they took. Upstream has the same capability but only as a **test diagnostic** — its consumers are libdatachannel's own `connectivity` / `turn_connectivity` tests and the C API; none of the four reference bindings surveyed wrap it.
+
+**The verdict is composed natively, and the criterion is `local is relay || remote is relay`.** Both ends must be examined: on a relayed path, the peer sitting behind the TURN allocation sees *its own* local candidate as relayed while the remote is the other side's host candidate. Judging the remote alone reports that peer as direct.
+
+**The local candidate type is deliberately not exposed.** On any non-relayed path it is not the real path: libjuice only builds a candidate pair carrying a local end for *local relayed* candidates (upstream comment: `local non-relayed candidates are undifferentiated for sending`), and the getter substitutes `local.candidates[0]` — the priority-sorted first entry, normally a host candidate — otherwise. So an srflx path reports its local end as host. Reading it *inside* the verdict, and only in the `== relay` direction, is sound; handing it to callers is not.
+
+**No event, and no stats subsystem.** Upstream has no pair-changed callback, and ICE never re-nominates after nomination (RFC 8445 §8.1.1, implemented verbatim in libjuice). Synthesising an event would cost a background polling thread, which §7's "never poll in the background" forbids. All four reference bindings are pull-only; `com.unity.webrtc`, which *does* own a full stats subsystem and a candidate-pair Editor panel, polls it at 1 s.
+
+**The state gate belongs in `dcu`, not in managed code.** Upstream's selected pair is **never cleared** — one assignment site at nomination, while all three failure paths clear a *different* field — so its getter keeps returning the last pair after a failure. `dcu_pc_connection_path` therefore checks `rtc::PeerConnection::state()` first (an `std::atomic<State>` load: live, lock-free) and reports "none" unless `Connected`.
+
+> **[#118](https://github.com/xuhuanhello/juice-c-sharp/issues/118) originally put that gate in managed code, and measurement overturned it.** ~~C# checks `ConnectionState` before crossing the ABI~~ — `PeerConnection.ConnectionState` is **event-cached** while `DataChannel.State` is a **live query**, so a wait loop exits on `Open` while the `Connected` event is still queued, and the gate rejects a genuinely connected connection. Measured at **9 of 10 rounds**. The reason #118 chose managed was that `conn_lock`'s cost was unmeasured — but that lock lives in libjuice's pair getter, one layer below `state()`, so the concern never applied to the gate. Regression test: `RightAfterChannelOpens_BeforeStateEventDispatched_CanStillAnswer`, which deliberately omits a `Pump()` and **retries until it observes the lagging moment**, because that moment appears only ~9 times in 10 and the test would otherwise pass having verified nothing.
+
+One window remains and cannot be closed without changing upstream: reading the state and fetching the pair are two steps, and the connection can fail between them on another thread. Microseconds, not frames.
 
 #### Message semantics
 
@@ -357,6 +380,8 @@ Symbol names may be refined in implementation PRs; **surface expansion requires 
 
 Applications may still embed credentials in `urls` themselves; the API does not forbid it, and log redaction covers that shape (§7).
 
+**An `IceServer` with no URLs is rejected at construction** (C# `ArgumentException`, [#151](https://github.com/xuhuanhello/juice-c-sharp/issues/151)). It used to be silently skipped — a `new IceServer()` whose URL was never filled in simply vanished from the config, which is a construction slip hidden exactly the way "absence must be failure" forbids. Rejection is C#-only: the label bound's two-layer precedent applies to catastrophic silent failures, and an empty entry is inert.
+
 **TURN credentials must not enter Unity assets.** `IceServer` is deliberately **not** `[Serializable]` (§6), so it cannot be filled in via the Inspector and cannot land in a `.unity` / `.prefab` file that ships inside the build and is trivially extracted. The intended source is the signaling server at runtime — commonly short-lived REST credentials. An application that genuinely wants Inspector-authored configuration must write its own DTO, and that extra step is exactly the point at which someone has to think about where the credential came from.
 
 ### Additional create fields
@@ -364,7 +389,7 @@ Applications may still embed credentials in `urls` themselves; the API does not 
 | Field | Semantics |
 |-------|-----------|
 | `transport_policy` | `All` \| `RelayOnly` |
-| `port_range_begin` / `port_range_end` | `0` = automatic |
+| `port_range_begin` / `port_range_end` | `0` = automatic. **An inverted range (`begin > end`, with `end ≠ 0`) is rejected at both layers** — C# `ArgumentException` / `DCU_ERR_INVALID` ([#151](https://github.com/xuhuanhello/juice-c-sharp/issues/151)); it binds nothing and used to surface as an unattributable ICE failure. One-sided settings pass through: their semantics belong upstream |
 | `bind_address` | Optional; libjuice; **ignored on WebGL** |
 | `enable_ice_tcp` | bool; WebGL may no-op |
 | `enable_ice_udp_mux` | bool; libjuice; **ignored on WebGL** |
@@ -402,11 +427,11 @@ Applications may still embed credentials in `urls` themselves; the API does not 
 |--------|-----------|
 | `PeerConnection.NativeHandle` / `DataChannel.NativeHandle` | **internal** — directly contradicts "application code never sees `dcu_*`"; every legitimate operation has a managed method, so exposing it only invites storing it, passing it around, and using it after `Dispose`. Diagnostics are served by `ToString()` |
 | `DataChannelRuntime.RegisterPump()` / `UnregisterPump()` | **internal** — these implement a precise five-scenario lifecycle choreography plus liveness self-healing; leaving them public invites applications to fight it |
-| `DataChannelRuntime.EnsureNative()` | **internal** — redundant with `IsNativeAvailable`, whose getter calls it |
+| `DataChannelRuntime.EnsureNative()` | **internal** — the lazy-load gate behind the `PeerConnection` constructor; the explicit public entry is `Preload()` ([#146](https://github.com/xuhuanhello/juice-c-sharp/issues/146)) |
 | `DataChannelLog.RedactIceCredentials(string)` | **internal** — redaction is the library's job, not the caller's |
-| `DataChannelRuntime.Pump()` / `IsNativeAvailable` / `AbiVersion`, `DataChannel.Peer` | **public** |
+| `DataChannelRuntime.Pump()` / `Preload()` / `IsNativeAvailable` / `AbiVersion`, `DataChannel.Peer` | **public** |
 
-`Pump()` stays public for tests and custom loops, but its XML docs must state the main-thread requirement and that it stamps the liveness counter.
+`Pump()` stays public for tests and custom loops, but its XML docs must state the main-thread requirement, that it stamps the liveness counter, and that it is **not re-entrant** — calling it from inside a dispatch callback throws `InvalidOperationException`, which is always contained by the pump's own per-subscriber isolation ([#148](https://github.com/xuhuanhello/juice-c-sharp/issues/148); the alternative, a silent early-return, turns the synchronous "send, then pump until the reply" anti-pattern into an undiagnosable hang instead of an immediate loud failure).
 
 ### Naming
 
@@ -487,7 +512,18 @@ Removing leak diagnostics **entirely** was considered and rejected, even though 
 - All public **events** and **observer** callbacks run on the **Unity main thread**.
 - **Every public API — including `Dispose` — is main-thread-only**, asserted in Editor / Development builds. Nearly all of Unity is main-thread-only, so this is a zero-learning-cost contract. The alternative ("`Dispose` just marks; the pump does the work later") fails exactly when it is needed most: in edit mode, at application quit, and after a domain reload, the pump may not run again.
 - The package installs a **PlayerLoop** pump. **Registration failure throws** rather than warning: a package that thinks it is pumping but is not is the worst possible state.
-- `DataChannelRuntime.Pump()` stays public for tests and custom loops.
+- `DataChannelRuntime.Pump()` stays public for tests and custom loops, and is **not re-entrant** (throws; see *What is public*).
+
+#### Initialisation is lazy; `Preload()` is the optional explicit gate
+
+**Decision:** [#146](https://github.com/xuhuanhello/juice-c-sharp/issues/146), on the research in [#144](https://github.com/xuhuanhello/juice-c-sharp/issues/144); it superseded the eager `Bootstrap` load, which had no decision behind it and contradicted the editor side's lazy restore.
+
+The native library loads through exactly **two gates**: the first `PeerConnection` constructor, or an explicit `DataChannelRuntime.Preload()`. `Bootstrap` wires the pump and the quit hook only — an application that ships the package but never uses it pays no dlopen and no `rtc::Preload` at startup, and a crash bisection can pin the load to a chosen moment.
+
+- **`Preload()`** mirrors upstream `rtcPreload`'s "lazy by default, warm up if you care" shape: idempotent, main-thread-only, and it **throws** `DataChannelException` on failure — the caller asked explicitly, so absence is an exception, not the lazy path's log line. Use case: front-load DTLS/SCTP init behind a loading screen instead of paying it on the "join" click.
+- **`IsNativeAvailable` / `AbiVersion` are passive probes**: they report the current state and never trigger a load (`false` / `0` before the first gate). A side-effecting getter would hand the load timing to whichever diagnostic HUD reads it first — the exact control the lazy paradigm exists to give back.
+- **What stays automatic is not negotiable:** pump wiring (managed-only, one timestamp per frame and zero P/Invoke while native is unloaded — and it is the precondition for events arriving at all) and the editor teardown safety net (§ *Editor and application lifecycle*; a forgotten user call must not cost an editor crash).
+- The evidence base ([#144](https://github.com/xuhuanhello/juice-c-sharp/issues/144)): upstream itself is lazy-init with optional preload; `com.unity.webrtc` walked mandatory-`Initialize()` to deprecation to deletion; Mirror/NGO/FishNet all auto-wire the environment and keep explicit calls for session start; W3C `RTCPeerConnection` is construct-and-go. A mandatory-init paradigm was rejected on that record, and attribute-enforced init gating is a negative-ROI path in 2022.3 (`[ModuleInitializer]` unsupported; weaving/analyzer costs exceed the runtime guard they would replace).
 
 #### The pump has two segments, and both drain fully
 
@@ -516,7 +552,7 @@ Internal constants; **no configuration surface** (a knob has to be given semanti
 |--------|-----------|
 | Slow pump frame | **4 ms** (of a 16.7 ms frame at 60 fps). `Stopwatch.GetTimestamp()` twice per frame; always compiled in |
 | Control-queue backlog | depth > **1024** — same order as upstream's `RECV_QUEUE_LIMIT`; reaching it means the pump is not running or a callback is stuck |
-| Pump liveness | Each `Pump()` stamps a monotonic counter and a wall-clock timestamp. `PeerConnection` creation, `CreateDataChannel` and `Send` check "how long since the last pump"; past a seconds-scale threshold, log an error naming the likely cause and fix, then **re-register once** |
+| Pump liveness | Each `Pump()` stamps a monotonic counter, a wall-clock timestamp **and `Time.frameCount`**. `PeerConnection` creation, `CreateDataChannel`, `Send`, `SetRemoteDescription` and `AddRemoteCandidate` check "how long since the last pump"; it fires only when **stale > 5 s _and_ the loop advanced ≥ 3 frames since the last pump** ([#147](https://github.com/xuhuanhello/juice-c-sharp/issues/147)). Past that, log an error naming the likely cause and fix, then **re-register once** |
 | Throttling | One warning per category per **5 s**, carrying the occurrence count and peak for the period |
 
 The liveness check is not about registration failing at startup (nearly impossible) but about being **erased afterwards**: any third-party package that rebuilds from `GetDefaultPlayerLoop()` and calls `SetPlayerLoop` drops our entry while our `_pumpRegistered` flag still says `true`. That is not hypothetical here — R3, already vendored in this repository, inserts into the PlayerLoop.
@@ -525,7 +561,11 @@ The liveness check is not about registration failing at startup (nearly impossib
 
 **Re-registration is attempted exactly once** ([#45](https://github.com/xuhuanhello/juice-c-sharp/issues/45), narrowing the original "self-heal"). If the entry is erased again, log that retrying has stopped and leave it erased. Repeated silent re-insertion is a tug-of-war with another package over shared state — the same shape as the auto-unsubscribe idea rejected under *Exception isolation* below: **silently changing state that someone else established is worse than a loud log.**
 
-The threshold must not be measured in `Time.frameCount` — unreliable in edit mode, where the pump is resident. Use a **monotonic wall clock**: `Stopwatch.GetTimestamp()`, which the slow-frame warning already samples twice per frame, so it costs nothing extra and needs no `#if UNITY_EDITOR` fork for `EditorApplication.timeSinceStartup`. The two were **measured to be equivalent** across a play/stop cycle — neither is reset by entering or leaving play mode, and the elapsed interval agrees to within the printed precision (28.16 s vs 28.1 s over one cycle). Check only when the application calls an API; never poll in the background.
+The **staleness half** must not be measured in `Time.frameCount` — unreliable in edit mode, where the pump is resident. Use a **monotonic wall clock**: `Stopwatch.GetTimestamp()`, which the slow-frame warning already samples twice per frame, so it costs nothing extra and needs no `#if UNITY_EDITOR` fork for `EditorApplication.timeSinceStartup`. The two were **measured to be equivalent** across a play/stop cycle — neither is reset by entering or leaving play mode, and the elapsed interval agrees to within the printed precision (28.16 s vs 28.1 s over one cycle). Check only when the application calls an API; never poll in the background.
+
+**Frozen loops are not pump faults — the frame-advance gate** ([#147](https://github.com/xuhuanhello/juice-c-sharp/issues/147), measured in [#145](https://github.com/xuhuanhello/juice-c-sharp/issues/145)). Staleness alone cannot tell "our entry was erased" from "the whole loop is frozen" — editor pause, mobile background suspend, any freeze. [#145](https://github.com/xuhuanhello/juice-c-sharp/issues/145) measured the failure: pausing >5 s and then calling one API fired the "a third party rebuilt the PlayerLoop" error (misattributed — nothing was erased) **and burned the single re-registration retry**, so a later genuine erasure got no self-heal at all. The question the diagnostic actually asks is *"is the loop running while our entry is not?"* — so, in play mode, firing additionally requires `Time.frameCount` to have advanced **≥ 3 frames** since the last pump (healthy steady state is 0–1: script `Update` runs before the tail-inserted pump entry). A frozen loop therefore stays silent and spends nothing; the error text needs no change because it now only prints in the one scenario where it is true. `Time.frameCount` is safe in *this* half because the edit-mode branch is evaluated first. The verdict is a **pure predicate** (`staleSeconds`, `frameDelta`, `isPlaying` → Silent / EditModeNotice / Stalled) precisely because the frozen-loop scenarios cannot be self-hosted in a test process — the managed tier table-tests the boundaries, the PlayMode tier keeps the genuine-erasure integration path honest.
+
+The checked call set deliberately includes `SetRemoteDescription` and `AddRemoteCandidate`: the answerer's flow — create a PC, set the remote offer, wait for events — previously crossed **no** checkpoint after construction, so an erased pump produced exactly the "looks like it cannot connect" failure this mechanism exists to name, with the diagnostic never firing ([#147](https://github.com/xuhuanhello/juice-c-sharp/issues/147)). Read-only queries stay checkpoint-free: mutations check, queries stay pure — the same philosophy as the passive probes above.
 
 **Edit mode takes a separate branch, and it is a warning, not an error.** Until the resident edit-mode pump exists (the lifecycle work in §14 step 5), the pump genuinely does not run in edit mode — so reporting it is *correct*, but treating it as "a third party erased us" is not, for three measured reasons:
 
@@ -575,7 +615,7 @@ Therefore the data segment copies live, open channels into a **reused `List` sna
 
 | Scenario | Action |
 |----------|--------|
-| **Edit mode** | Pump is **resident** — driven by `EditorApplication.update`, **not** `PlayerLoop` (see below); native init is **lazy**. `beforeAssemblyReload` records "was it initialised" in `SessionState`; `afterAssemblyReload` re-creates **only if it was** |
+| **Edit mode** | Pump is **resident** — driven by `EditorApplication.update`, **not** `PlayerLoop` (see below); native init is **lazy**. `beforeAssemblyReload` records "was it initialised" in `SessionState`; `afterAssemblyReload` re-creates **only if it was, and only when that reload is not the enter-play transition** (see below) |
 | `beforeAssemblyReload` (edit-mode recompile, and entering play mode with Reload Domain on) | `DisposeAllLive()` → `UnregisterPump()` → **`dcu_shutdown()`** |
 | `ExitingPlayMode` | `DisposeAllLive()` → `UnregisterPump()`, **no shutdown**. Nothing to re-install on `EnteredEditMode` — the edit-mode pump is a separate, always-subscribed `EditorApplication.update` handler |
 | Reload Domain **disabled** | `[RuntimeInitializeOnLoadMethod(SubsystemRegistration)]` → `DisposeAllLive()` + pump dedup, **no shutdown** |
@@ -583,6 +623,12 @@ Therefore the data segment copies live, open channels into a **reused `List` sna
 | Player `Application.quitting` | `DisposeAllLive()` only, **no shutdown** |
 
 **The edit-mode pump cannot be a `PlayerLoop` entry — `PlayerLoop` does not run in edit mode.** This was measured, not read off a doc: a pump entry inserted into the tree in edit mode was verifiably present *and* `Pump()` had not run for 934.8 s. An earlier version of this table said "`EnteredEditMode` → `RegisterPump()`", which cannot deliver the resident pump it was asking for. `EditorApplication.update` is the only mechanism that does; it is subscribed once from `[InitializeOnLoadMethod]` and skips itself while `isPlaying`, leaving play mode to the `PlayerLoop` entry so there is exactly one answer to "what is driving the pump right now".
+
+**`afterAssemblyReload` skips the enter-play transition**, guarded by `EditorApplication.isPlayingOrWillChangePlaymode`. With Reload Domain on, entering play mode fires that reload, and re-initialising there would be immediately undone by `ResetStaticsOnEnterPlayMode` (`SubsystemRegistration`) — and, since [#146](https://github.com/xuhuanhello/juice-c-sharp/issues/146), never redone eagerly: `Bootstrap` no longer loads native, so the play session initialises lazily at first use. (Before #146 the undo-redo produced two `Native library initialized` lines per entry into play — the diagnostic noise booked as [#141](https://github.com/xuhuanhello/juice-c-sharp/issues/141); measured after landing: entering play prints **zero** init lines, the first `PeerConnection` prints exactly one. The skip also matters for a second reason now: restoring here would resurrect "entering play loads native even if unused".)
+
+The guard cannot be replaced by deleting the hook. `afterAssemblyReload` covers what `Bootstrap` cannot — **using the API in edit mode without ever entering play** (an EditorWindow driving a `PeerConnection`, or EditMode tests), where `RuntimeInitializeOnLoadMethod` does not fire at all. The two overlap on exactly one reload.
+
+**The predicate's values are measured, not inferred** (2022.3.62f3, Reload Domain on): in the main editor process, `afterAssemblyReload` reads `false` on an edit-mode recompile and `true` on the enter-play reload. **Measuring it requires attributing each sample to its process.** `AssetImportWorker` instances are separate Unity processes with their own domains, `[InitializeOnLoad]` runs in them, and they share the project's `Library/` — so a file-based probe collects their lines too. They have no play mode, so their predicate is always `false`; reading an unattributed log yields the opposite conclusion.
 
 Rationale for the two asymmetric ones:
 
@@ -695,7 +741,8 @@ The `#if NET_STANDARD_2_1 || UNITY_2021_2_OR_NEWER` guard around the `ReadOnlySp
 | C# | `DataChannelLog.Level` property; `MessageLogged` event |
 | Defaults | Editor or Development Player → **Info**; non-Development Player → **Warning** |
 | Secrets | **Redact** ICE URLs containing credentials in logs |
-| Stats v1 | `BufferedAmount` only; no selected-pair / RTT panel |
+| Identity banner | `Native library initialized (abi=N)` bypasses the level gate — silenced only by `None`, emitted **at most once per process** (see *The identity-banner exception*) |
+| Stats v1 | `BufferedAmount`, plus the direct-vs-relayed verdict (*Connection path*); no RTT panel, no stats subsystem |
 
 ### The path a log line takes
 
@@ -721,6 +768,33 @@ DataChannelLog.Emit  → redaction → MessageLogged event + Debug.Log*
 `dcu_set_log_level` always passes the same static trampoline down to `rtcInitLogger`; **the callback parameter is never exposed to callers.** This structurally removes a trap in the upstream C API: `InitLogger` with an existing appender assigns `appender->callback = std::move(callback)`, so passing `nullptr` silently clears the callback, and `LogAppender::write` then falls back to `std::cout` (`src/global.cpp:59,65-80`) — bridge gone, credentials unredacted, zero diagnostics. Quieting the logs is done **only** through levels, including `LogLevel.None` → `RTC_LOG_NONE`.
 
 (Upstream writes to **stdout**, not stderr — plog's `ConsoleAppender` defaults to `streamStdOut`.)
+
+### The identity-banner exception
+
+**Decision:** [#140](https://github.com/xuhuanhello/juice-c-sharp/issues/140), landed by [#142](https://github.com/xuhuanhello/juice-c-sharp/issues/142)
+
+One managed line bypasses the level gate: the banner `Native library initialized (abi=N)`. It answers *"what is running"* where the levelled channel answers *"what happened"* — and at the release default (**Warning**), `Info = 4 > Warning = 3` used to drop it, leaving exactly the builds whose bug reports need the ABI number without it. With lazy loading (§6) it appears at first use, not at startup.
+
+Note the remit: the trampoline rule above — quieting only through levels — governs the **native bridge** (`dcu_set_log_level`). This exception lives entirely in the managed tier and never touches the bridge.
+
+Everything else about the line is ordinary. It passes redaction; it is dispatched through `MessageLogged` with `LogLevel.Info` as its honest severity (subscribers' own filtering stays theirs); it goes out through `Debug.Log`, not `LogWarning`/`LogError` — it is not an alert. The only level that silences it is **`LogLevel.None`**: `None` is absolute silence, the one value that expresses explicit user intent rather than a default guessed on the user's behalf.
+
+Membership in the bypass category is bounded by two conditions, **both required — failing either disqualifies**:
+
+1. **Emitted at most once per process.**
+2. **It answers "what is running", not "what happened".**
+
+Current membership: exactly this one line. This is a **newly established category, not membership in an existing one** — the package has no version-banner precedent (`package.json`'s version is never logged), so the boundary is written here rather than inferred by analogy. The first candidate has already been tried and refused: connection lifecycle transitions (`Connecting → Connected → …`) are per-connection, repeatable timeline events — condition 1 fails, and printing them unconditionally would flood release logs under frequent connections ([#140](https://github.com/xuhuanhello/juice-c-sharp/issues/140), booked from [#146](https://github.com/xuhuanhello/juice-c-sharp/issues/146)). See *Getting diagnostics out of a release player* below for what applications do instead.
+
+The once-per-process latch is **managed state at the emitting call site**. Native `dcu_init` idempotence does not implement it: [#141](https://github.com/xuhuanhello/juice-c-sharp/issues/141)'s duplicated banner occurred with `dcu_init` already idempotent, because what is idempotent there is initialization, not the log line. Initialization can legitimately run more than once per process (editor assembly-reload restore, shutdown → re-init), and the banner must not repeat with it — a repeat that used to be Editor-only Console noise would now reach **every adopter's release logs**. In the Editor, "process" reads as the scripting domain: a domain reload resets the latch with every other static; entering play mode without one does not. A banner silenced by `None` at init time stays spent — "at most once" is the promise, not "once, audibly".
+
+### Getting diagnostics out of a release player
+
+The release default (**Warning**) already carries every warning and error this package produces, plus the identity banner above. What it deliberately does not carry is the Info-level breadcrumb trail; the package-supported routes for applications that want one:
+
+- **Lifecycle breadcrumbs without touching the console:** subscribe the real events — `ConnectionStateChanged`, `DataChannelReceived`, per-channel `Open`/`Closed` — and feed the application's own log pipeline. Events are not log lines: they bypass no gate because they never pass through one, at zero Console cost. This is the production-telemetry answer.
+- **The full package log trail in the platform log (logcat / os_log):** set `DataChannelLog.Level = LogLevel.Info` at runtime — one line. A `[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]` hook is early enough to catch even the first line the package can emit (the package's own hooks run in that phase, ahead of `BeforeSceneLoad` — and loading is lazy anyway, §6).
+- **There is no "dispatch always, Console by level" split, on purpose.** `MessageLogged` receives what passes the gate; the level is the one volume knob ([#140](https://github.com/xuhuanhello/juice-c-sharp/issues/140) kept severity and verbosity on a single axis). An application routing `MessageLogged` into its own pipeline widens the stream by raising the level, and accepts the wider Console along with it — its subscriber filters from there.
 
 ### Initialization dependency is one-directional
 
@@ -1102,7 +1176,7 @@ The dividing line is **"does it need Unity?"** Anything that does runs **locally
 
 Tests that need Unity are also simply more trustworthy inside a real Editor: the PlayerLoop, domain reload and plugin loading are exactly the counter-intuitive paths the gate list exists for, and a CI-shaped imitation of them buys less confidence than it costs.
 
-> **Accepted cost, stated rather than hidden: no automated gate covers C# at all.** A compile error in `Runtime/` is caught when the Editor is next opened, not by CI. For a single-maintainer package whose author has the Editor open daily this is a reasonable trade — but nobody should read this spec and believe there is a net under the C# side. **The automated gate that turns red is the native build + audit job.**
+> **Accepted cost, stated rather than hidden: no automated gate covers C# at all.** A compile error in `Runtime/` is caught when the Editor is next opened, not by CI. For a single-maintainer package whose author has the Editor open daily this is a reasonable trade — but nobody should read this spec and believe there is a net under the C# side. **The automated gate that turns red is the native build + audit job.** A `push: main`-only Unity job — which *does* receive secrets and never runs on fork PRs, so the reason above does not block it — was audited and declined on licence-maintenance cost and coverage value ([#153](https://github.com/xuhuanhello/juice-c-sharp/issues/153); the account is also appended to [#43](https://github.com/xuhuanhello/juice-c-sharp/issues/43)).
 >
 > Compiling the pure-managed logic into a plain .NET project so `dotnet test` could gate it in CI is **rejected**: it means maintaining a second compilation of the same sources to verify what the maintainer's Editor verifies anyway. Recorded here so it is not repeatedly rediscovered.
 
@@ -1144,8 +1218,10 @@ Selection principle: **only decisions that measurement or research overturned an
 | `PeerConnection.Dispose` cascades to its channels — including **incoming** ones — and a directly-disposed child is not destroyed a second time | Native / EditMode |
 | An undisposed object that is collected **is reported**, with its creation stack | Native / EditMode |
 | Pump re-registers **once** after a third party overwrites `SetPlayerLoop`, and stops retrying if erased again | Native / PlayMode |
+| Pump-liveness verdict boundaries: frame deltas 0/1/2 stay silent, 3 fires, edit mode precedes the frame check — the frozen-loop false positive that burned the one retry was measured, not inferred ([#145](https://github.com/xuhuanhello/juice-c-sharp/issues/145) / [#147](https://github.com/xuhuanhello/juice-c-sharp/issues/147)) | Managed (pure predicate) |
 | Upstream state/exception mapping; out-of-range raw values map to `Unknown` (never throw) | Native / EditMode |
 | Log bridge survives repeated `Level` changes (regression for the silent-detach trap, §7) | Native / EditMode |
+| The ABI banner passes the level gate at the release default (Warning) and emits **at most once per process** even when init legitimately runs twice — the gate dropped it exactly in the builds that need it, and the duplicate emission was real, not hypothetical ([#140](https://github.com/xuhuanhello/juice-c-sharp/issues/140) / [#141](https://github.com/xuhuanhello/juice-c-sharp/issues/141) / [#142](https://github.com/xuhuanhello/juice-c-sharp/issues/142)) | Native / EditMode |
 | Domain-reload lifecycle | Native — **manual step permitted** (see below) |
 
 Managed tier additionally covers: native-config marshalling alloc/free balance, `Dispose` idempotence for managed-only types, and ICE-credential redaction — the last **through the public logging entry point**, not by exposing internals. `Dispose` idempotence is deliberately split across two tiers rather than written as one contract, so that "Dispose idempotence is covered" cannot mask the native side being untested.
@@ -1218,7 +1294,7 @@ The implementation regex is **byte-identical in both places it runs** (`audit_pl
 - **The crypto gate needs `-g`, and `nm -Uj` alone is wrong** ([#97](https://github.com/xuhuanhello/juice-c-sharp/issues/97)). `-U` excludes undefined symbols, **not local ones**, and `-j` only means "names only" — so `nm -Uj` lists the 1188 `mbedtls_` symbols that narrowing correctly localised, and reports a **correct** archive as red. The narrowing target is `T` → `t`: the implementation must still be *in* the archive, just no longer visible. That error stayed hidden for as long as it did because it was paired with an archive that had no mbedtls in it at all — a wrong criterion over a wrong artifact came out green.
 - **`exports_ios` reads type `C` (common), because common is external defined too** ([#104](https://github.com/xuhuanhello/juice-c-sharp/issues/104), [#108](https://github.com/xuhuanhello/juice-c-sharp/issues/108)). It once read only `T/W/D/B`, and 11 external commons walked past the strict export-set diff: ten from usrsctp, one `_mbedtls_cipher_supported`, including an orphan `_foo` in usrsctp's `user_recv_thread.c`. They are visible to adopters in the worst way — a common merges silently with a same-named common in the final link, sharing one storage location, with no error and no warning.
   **The rule this gate enforces was never "only `dcu_*` text symbols" — it is "the external defined set equals `expected-symbols.txt`"**. So the fix was neither a common allowlist nor a fourth gate: `-fno-common` became a global convention for `native/` C code (§9), tentative definitions got a section, and the existing narrowing step localised them. `exports_ios` reading `C` is what makes a *future* common hit the wall instead of slipping past — the criterion sees it, rather than trusting a compiler's default. The by-name crypto exemption for `_mbedtls_cipher_supported` is gone with it, since no external common should exist any more; keeping it would have left a permanent silent channel for "common came back". Measured: the pre-fix archive reports **31** external defined (11 extra), the rebuilt one **exactly 20** with nothing extra and nothing missing.
-- **The third gate is the one the other two structurally cannot replace.** An archive holding only the wrapper exports all 20 `dcu_*` and leaks no crypto name — full marks on both — while missing every dependency; the failure lands in the adopter's Xcode link, not in our CI. The same assertion also runs inside `narrow_ios_archive.py` at build time, because failing during the build is cheaper than failing at the landing gate.
+- **The third gate is the one the other two structurally cannot replace.** An archive holding only the wrapper exports the full `dcu_*` set and leaks no crypto name — full marks on both — while missing every dependency; the failure lands in the adopter's Xcode link, not in our CI. The same assertion also runs inside `narrow_ios_archive.py` at build time, because failing during the build is cheaper than failing at the landing gate.
 
 ### Upstream-upgrade gate
 
@@ -1245,7 +1321,7 @@ Clean-clone reproducibility is already gated: CI's `actions/checkout` *is* a rea
 
 One local rule, though: **reproducibility must be verified with a real `git clone` into a temporary directory.** `cp` / `rsync` do not count — `rsync -a` preserves working-tree permissions, which is precisely how a "clean clone builds" claim once passed while a real clone failed with `permission denied` (this repo has `core.fileMode = false`, so five scripts had been committed as `100644`).
 
-Deferred: device farm, fault injection, automated WebGL browser CI, back-pressure saturation tests (they need a channel flooded to 1024 — slow and fragile), libjuice's delayed log-level application (an upstream limitation; testing it tests upstream), weak-reference collection timing (needs a forced `GC.Collect()`, the archetypal fragile test).
+Deferred: device farm, fault injection, automated WebGL browser CI, back-pressure saturation tests (they need a channel flooded to 1024 — slow and fragile), libjuice's delayed log-level application (an upstream limitation; testing it tests upstream), weak-reference collection timing (needs a forced `GC.Collect()`, the archetypal fragile test), and the three [#150](https://github.com/xuhuanhello/juice-c-sharp/issues/150) shutdown-hardening edges (a throwing `Preload`, a hung `Cleanup`, an incoming channel squeezed into the teardown window) — automating them needs `dcu_test_*` injection hooks, three new exports plus an ABI bump for scenarios whose fixes are each a few reviewable lines; `NativeSuiteTeardown`'s zero-leak assertion is the standing backstop.
 
 ### Where the gates are written down
 
@@ -1439,4 +1515,4 @@ Not required to start implementation. Each is deliberately unspecified, with the
 | ~~Android's 16 KB page alignment~~ | **Resolved:** CI uses NDK r27 with explicit `-z,max-page-size=16384` and audits every `PT_LOAD` at `>= 0x4000`; generated Android PluginImporter metadata records `Is16KbAligned: true`; a Play-distributed AAB passed the device Runtime smoke. APK/AAB zip packaging remains an adopter/build-system concern, not a package binary requirement (§9). |
 | **HarmonyOS** | Waiting on Unity/tooling |
 | ~~Implementation milestones / PR slicing~~ | **Done** — [#44](https://github.com/xuhuanhello/juice-c-sharp/issues/44) slices §14 steps 2–3 into nine vertical cuts, each leaving the tree green |
-| Optional later | Selected-candidate-pair API, device farm CI, WebSocket bindings, FishNet transport mapping |
+| Optional later | ~~Selected-candidate-pair API~~ (**landed** as `dcu_pc_connection_path`, [#118](https://github.com/xuhuanhello/juice-c-sharp/issues/118) / [#123](https://github.com/xuhuanhello/juice-c-sharp/issues/123); see *Connection path*), device farm CI, WebSocket bindings, FishNet transport mapping ([#113](https://github.com/xuhuanhello/juice-c-sharp/issues/113) is charting it) |

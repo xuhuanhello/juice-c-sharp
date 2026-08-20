@@ -11,6 +11,8 @@
 | How to verify, with Unity MCP | [`docs/verification-mcp.md`](./docs/verification-mcp.md) |
 | Domain vocabulary | [`CONTEXT.md`](./CONTEXT.md) |
 
+**Rebuilding the native plugin while an Editor is open? Write to a temp path and `mv` into place — replace, never overwrite.** An in-place overwrite of the loaded dylib poisons its macOS code-signature registration: `git status`/`commit` get SIGKILLed repo-wide until the file is replaced again. Symptom table and recovery: the ⚠️ box in [`docs/verification-mcp.md`](./docs/verification-mcp.md).
+
 Two things worth knowing before reading code:
 
 - **The spec now describes the code as it is.** All nine steps of SPEC §14 have landed, so that list is a record of the order the work was done in, not a to-do list. Where the code and the spec disagree, the spec is still normative and the code is the bug — that has not changed.

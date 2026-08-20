@@ -29,6 +29,7 @@ namespace DataChannelUnity.Tests
         public void RequireNative()
         {
             // 缺席必须是失败，不是跳过（SPEC §11）。
+            DataChannelRuntime.Preload(); // #146 被动化后，读属性不再触发加载 —— 测试侧显式预热。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
                 "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
         }
@@ -56,11 +57,34 @@ namespace DataChannelUnity.Tests
         }
 
         [Test]
-        public void AbiVersion_IsTwo_ViaOutParameter()
+        public void AbiVersion_MatchesHeader_ViaOutParameter()
         {
-            // 同时验到「返回码 + out 参数」这条调用约定端到端成立：
+            // 本条验的是「返回码 + out 参数」这条调用约定端到端成立：
             // 旧形状下版本号是**返回值**，新形状下它经 out 参数带出。
-            Assert.AreEqual(2, DataChannelRuntime.AbiVersion);
+            //
+            // 期望值**从 dcu.h 读**，不写死在这里。写死的那个数字曾经把方法名都
+            // 带跑了（原名 AbiVersion_IsTwo_ViaOutParameter），于是每次有意的 ABI
+            // 变更都要顺手改一处与本条意图无关的断言 —— 而它红的时候看着像是
+            // 「ABI 坏了」，其实只是这里的数字过期了。
+            // docs/verification-mcp.md 第 33 行对这件事有明文：期望数字住在被检查
+            // 的地方（dcu.h / expected-symbols.txt），不住在别处的散文里。
+            var header = System.IO.Path.Combine(
+                System.IO.Directory.GetCurrentDirectory(), "native/dcu/include/dcu.h");
+
+            // 缺席必须是失败，不是跳过（SPEC §11）。
+            Assert.IsTrue(System.IO.File.Exists(header),
+                "Cannot read the source of truth for DCU_ABI_VERSION: " + header);
+
+            var m = System.Text.RegularExpressions.Regex.Match(
+                System.IO.File.ReadAllText(header),
+                @"^\s*#define\s+DCU_ABI_VERSION\s+(\d+)\s*$",
+                System.Text.RegularExpressions.RegexOptions.Multiline);
+
+            Assert.IsTrue(m.Success, "No DCU_ABI_VERSION define found in " + header);
+
+            var expected = int.Parse(m.Groups[1].Value);
+            Assert.AreEqual(expected, DataChannelRuntime.AbiVersion,
+                "The out-parameter calling convention must carry dcu.h's DCU_ABI_VERSION verbatim.");
         }
 
         [Test]

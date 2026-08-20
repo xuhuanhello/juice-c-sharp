@@ -6,6 +6,12 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/DataChannelUnity.Example/Scenes/Billiards over DataChannel.unity
+    guid: a43565c1323cd47ccba2c754cc7a397c
+  - enabled: 1
+    path: Assets/DataChannelUnity.Example/Scenes/CharacterController over DataChannel.unity
+    guid: 103553ad57b4641ba982eb4da767ceee
+  - enabled: 1
     path: Assets/Scenes/SampleScene.unity
     guid: 99c9720ab356a0642a771bea13969a05
   m_configObjects: {}

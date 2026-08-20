@@ -16,6 +16,7 @@ namespace DataChannelUnity.Tests
         [SetUp]
         public void RequireNative()
         {
+            DataChannelRuntime.Preload(); // #146 被动化后，读属性不再触发加载 —— 测试侧显式预热。
             Assert.IsTrue(DataChannelRuntime.IsNativeAvailable,
                 "Native plugin not loaded. This is a failure, not a skip. If the plugin was just rebuilt, restart the Editor.");
         }
@@ -231,6 +232,162 @@ namespace DataChannelUnity.Tests
             try { action(); }
             catch (ArgumentException e) { Assert.Fail(what + " was wrongly rejected by argument validation: " + e.Message); }
             catch (DataChannelException) { /* 越过校验、到了原生 —— 正是本用例要的 */ }
+        }
+
+        // ------------------------------------------------------------------
+        // 三、pump 自身的契约（#148 重入守卫 / #149 无预算）
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// 回调里重入 <c>Pump()</c>：内层抛、外层活、守卫复位、后续照常（#148 决议的四断言）。
+        /// </summary>
+        /// <remarks>
+        /// 守卫防的是**运行期静默数据损坏**：内层 pump 覆写复用的消息缓冲，外层回调
+        /// 手里的 <c>ReadOnlySpan</c> 在回调期间变质 —— 恰是 #38 选 Span 要在编译期
+        /// 消灭的那类事故从公开的 <c>Pump</c> 绕回来。异常必然被外层自己的每订阅者
+        /// 隔离接住（重入时外层必在栈上），所以「抛」是响亮且不崩的。
+        /// </remarks>
+        [Test]
+        public void ReentrantPump_InsideMessageCallback_ThrowsAndOuterPumpSurvives()
+        {
+            LogAssert.ignoreFailingMessages = true;   // 内层异常经隔离层记 Error，是预期产物
+
+            var caughtReentrancy = false;
+            Exception wrongException = null;
+            var tailDelivered = false;
+            DataChannel incoming = null;
+
+            using (var a = new PeerConnection(new PeerConnectionConfig()))
+            using (var b = new PeerConnection(new PeerConnectionConfig()))
+            {
+                a.LocalDescriptionGenerated += (sdp, t) => b.SetRemoteDescription(sdp, t);
+                b.LocalDescriptionGenerated += (sdp, t) => a.SetRemoteDescription(sdp, t);
+                a.LocalCandidateGenerated += (c, mid) => b.AddRemoteCandidate(c, mid);
+                b.LocalCandidateGenerated += (c, mid) => a.AddRemoteCandidate(c, mid);
+
+                b.DataChannelReceived += ch =>
+                {
+                    incoming = ch;
+                    ch.MessageReceived += bytes =>
+                    {
+                        if (bytes.Length == 1)
+                        {
+                            try { DataChannelRuntime.Pump(); }
+                            catch (InvalidOperationException) { caughtReentrancy = true; }
+                            catch (Exception e) { wrongException = e; }
+                        }
+                        else
+                        {
+                            tailDelivered = true;
+                        }
+                    };
+                };
+
+                var dc = a.CreateDataChannel("reentrancy-guard");
+                dc.Opened += () => dc.Send(new byte[1]);
+
+                var sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 15000 && !caughtReentrancy && wrongException == null)
+                {
+                    DataChannelRuntime.Pump();
+                    Thread.Sleep(5);
+                }
+
+                Assert.IsNull(wrongException,
+                    "Re-entrant Pump must throw InvalidOperationException specifically; got: " + wrongException);
+                Assert.IsTrue(caughtReentrancy, "The re-entrant Pump call did not throw — the guard is missing.");
+
+                // 守卫复位：外层结束后直接泵必须正常（try/finally 的回归钉子）。
+                DataChannelRuntime.Pump();
+
+                dc.Send(new byte[2]);
+                sw.Restart();
+                while (sw.ElapsedMilliseconds < 15000 && !tailDelivered)
+                {
+                    DataChannelRuntime.Pump();
+                    Thread.Sleep(5);
+                }
+                Assert.IsTrue(tailDelivered,
+                    "Delivery after the re-entrancy incident is broken: either the guard poisoned the pump "
+                    + "or the outer dispatch did not survive the inner throw.");
+
+                incoming?.Dispose();
+                dc.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// 控制段无每帧预算：≥300 个积压的 <c>DcClosed</c> 必须在**单次** <c>Pump()</c> 里全部派发（#149）。
+        /// </summary>
+        /// <remarks>
+        /// 300 越过被删掉的旧上限 256，专打「预算被凭直觉加回来」的回归 ——
+        /// 那个上限正是首个提交里没人对质的遗留（#149 的考古）。规格条文在
+        /// SPEC §6「both drain fully」与 SPEC:524（预算会把 DcClosed 推后）。
+        /// </remarks>
+        [Test]
+        public void ControlDrain_HasNoPerFrameBudget_AllClosedEventsInOnePump()
+        {
+            LogAssert.ignoreFailingMessages = true;   // 级联关闭期间的原生日志是预期产物
+
+            const int Channels = 300;
+            var closed = 0;
+            var adopted = 0;
+            var aChannels = new List<DataChannel>(Channels);
+
+            using (var a = new PeerConnection(new PeerConnectionConfig()))
+            using (var b = new PeerConnection(new PeerConnectionConfig()))
+            {
+                a.LocalDescriptionGenerated += (sdp, t) => b.SetRemoteDescription(sdp, t);
+                b.LocalDescriptionGenerated += (sdp, t) => a.SetRemoteDescription(sdp, t);
+                a.LocalCandidateGenerated += (c, mid) => b.AddRemoteCandidate(c, mid);
+                b.LocalCandidateGenerated += (c, mid) => a.AddRemoteCandidate(c, mid);
+                b.DataChannelReceived += _ => adopted++;
+
+                for (int i = 0; i < Channels; i++)
+                {
+                    var dc = a.CreateDataChannel("budget-" + i);
+                    dc.Closed += () => closed++;
+                    aChannels.Add(dc);
+                }
+
+                // 夹具就位：A 侧全开（活查询）+ B 侧全收养（收养走 pump 派发）。
+                var sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 30000
+                       && (adopted < Channels || aChannels.Exists(c => c.State != DataChannelState.Open)))
+                {
+                    DataChannelRuntime.Pump();
+                    Thread.Sleep(5);
+                }
+                Assert.AreEqual(Channels, adopted,
+                    "Not all incoming channels were adopted; the fixture never reached its premise.");
+
+                // 关键段开始：**从这里起不再泵**，让 DcClosed 在无界队列里积压。
+                // 同步 [Test] 体内没有别人会泵（EditMode 无 PlayerLoop，EditorPump
+                // 被测试体阻塞），队列只进不出。
+                b.Dispose();
+
+                // 等原生侧全部翻到 Closed —— State 是活查询，不需要泵；
+                // 状态翻转与事件入队之间有微小的在途窗口，再留 500ms 收尾。
+                sw.Restart();
+                while (sw.ElapsedMilliseconds < 15000
+                       && aChannels.Exists(c => c.State != DataChannelState.Closed))
+                {
+                    Thread.Sleep(10);
+                }
+                Assert.IsTrue(aChannels.TrueForAll(c => c.State == DataChannelState.Closed),
+                    "Native close never completed; the fixture never reached its premise.");
+                Thread.Sleep(500);
+
+                Assert.AreEqual(0, closed, "Events were dispatched before the single pump — something else pumped.");
+
+                DataChannelRuntime.Pump();   // 单次。
+
+                Assert.AreEqual(Channels, closed,
+                    "One Pump() must dispatch every backlogged DcClosed. Fewer than " + Channels
+                    + " means a per-frame budget crept back into the control drain (SPEC §6: both segments drain fully).");
+
+                foreach (var dc in aChannels) dc.Dispose();
+            }
         }
     }
 }

@@ -3,9 +3,10 @@
 // 本文件不再包含 <rtc/rtc.h>：句柄由 dcu 自己的 DcuHandleTable 分配与验活，
 // 而不是 src/capi.cpp 里那张够不着的私有 map。
 //
-// 本次迁移是**实现变更，不是 ABI 变更** —— dcu.h 与整个 C# 侧一字未动，
-// DCU_ABI_VERSION 仍为 1，导出仍为 18 个。事件 ABI 的重写、错误码独立编号、
-// 拉模式消息、日志桥等属于 SPEC §14 的第 2–4 步，不在本次范围内。
+// ABI 的版本号与导出清单**不写在本文件**：版本看 dcu.h 的 DCU_ABI_VERSION，
+// 成员看 native/exports/expected-symbols.txt。本文件头曾写死一对「版本号 + 导出数」
+// 并烂到与实物脱节两个大版本 —— 散文里的数字没人检查就会撒谎（CONTEXT.md 词条 1
+// 的同一课）。事件 ABI、独立错误码、拉模式消息、日志桥均已落地，见下文各段。
 //
 // 三条**违反了不会报错**的不变量（SPEC §2），改动本文件前请先读：
 //
@@ -15,8 +16,9 @@
 //      延后到登记之后，入向通道的 DC_OPEN 会全部丢失，且编译、门禁、单向测试全绿。
 //   2. 收消息若改拉模式，必须沿用 peek() / receive() 这一对（拷贝成功才丢弃）。
 //      直接 receive() 再拷贝会在调用方缓冲不足时丢消息 —— reliable 通道上即协议违约。
-//   3. 出向补发 DC_OPEN（#32 决议 2，尚未实现）只能加在出向创建路径；
-//      入向路径此刻 mIsOpen 已为 true 而 mOpenTriggered 刚被重置，补查会倒转事件顺序。
+//   3. 出向补发 DC_OPEN（#32 决议 2，见 resend_open_if_already_open）只能存在于
+//      出向创建路径；入向路径此刻 mIsOpen 已为 true 而 mOpenTriggered 刚被重置，
+//      补查会倒转事件顺序。
 
 #include "dcu.h"
 #include "dcu_handles.hpp"
@@ -26,6 +28,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <future>
 #include <thread>
 #include <memory>
 #include <stdexcept>
@@ -38,6 +41,11 @@
 namespace {
 
 std::atomic<bool> g_inited{false};
+// #150：上一次 dcu_shutdown 的 Cleanup future。超时抛出后它仍在后台收尾，
+// 下一次 dcu_init 必须先看它 —— init 与在途 Cleanup 的竞态由此确定性消灭。
+// 只在 dcu_init / dcu_shutdown 中触碰，而这两个入口由托管侧的主线程契约串行化
+//（SPEC §4：不得在事件处理内调用），故不加锁。
+std::shared_future<void> g_pending_cleanup;
 DcuEventQueue g_queue;
 DcuLogQueue g_log_queue;
 DcuHandleTable g_table;
@@ -47,12 +55,12 @@ std::atomic<int> g_open_race_delay_ms{0}; // 仅契约测试用，见 dcu.h
 // 异常边界
 //
 // 上游 capi 的 wrap() 少一个 catch(...)，且把 what() 压进 plog 就丢了。这里补上
-// catch(...)；错误码沿用迁移前的值域，使托管侧观察不到差异：
-//   std::invalid_argument -> DCU_ERR_INVALID (-1)   （= RTC_ERR_INVALID）
-//   其余异常              -> DCU_ERR_FAILURE (-2)   （= RTC_ERR_FAILURE）
-//
-// 已知的暂时性缺口：capi 的 wrap() 会把 e.what() 打进 plog（走 stdout），本层
-// 目前没有可用的日志出口，故异常文本被丢弃。由 SPEC §14 第 4 步的日志桥（#33）补回。
+// catch(...)，异常文本经 log_error 走日志桥（#33）。错误码**独立编号**（#31），
+// 刻意不与 RTC_ERR_* 逐值相同，数值只写在 dcu.h：透传上游错误码的代码会因此
+// 产出一个未定义的码而当场暴露，而不是一个「长得完全合法」的错误。
+//   std::invalid_argument -> DCU_ERR_INVALID
+//   其余 std::exception   -> DCU_ERR_FAILURE
+//   非 std 异常           -> DCU_ERR_UPSTREAM_UNKNOWN
 // ---------------------------------------------------------------------------
 
 // 唯一的日志出口。上游在**持锁**状态下调它，进程内所有线程的每条日志都串行经过
@@ -241,7 +249,17 @@ void wire_pc_callbacks(int h, const std::shared_ptr<rtc::PeerConnection> &pc) {
 
     // 不变量 1：登记 + wire + push 全部在本回调体内同步完成。
     pc->onDataChannel([h](std::shared_ptr<rtc::DataChannel> dc) {
-        int dh = g_table.add_dc(dc);
+        int dh;
+        try {
+            dh = g_table.add_dc(dc);
+        } catch (const std::exception &e) {
+            // #151：句柄空间耗尽（add_dc 到顶即抛）。本 lambda 跑在上游的回调
+            // 线程上，异常穿出去就是 std::terminate —— 回调边界与 C ABI 边界
+            // 同样不许异常穿越。丢弃这条入向通道并记日志：2^31 句柄耗尽时
+            // 一切都已不可用，一条被拒的通道 + 一行 Error 是诚实的失败形态。
+            log_error(e.what());
+            return;
+        }
         wire_dc_callbacks(dh, dc, std::make_shared<std::atomic<bool>>(false));
         // 此处**不做** resend_open_if_already_open，理由见该函数注释。
 
@@ -269,11 +287,29 @@ int dcu_abi_version(int *out_version) {
 int dcu_init(void) {
     if (g_inited.exchange(true))
         return DCU_OK;
-    return dcu_wrap([] {
+
+    // #150：上一次 shutdown 的 Cleanup 若还在后台收尾，此刻 init 会与「正在拆
+    // 全局态的上游」竞态（编辑器域重载恰是这个时序）。fail-fast + 回滚：
+    // 失败如实报出，等收尾完成后重试即可成功。
+    if (g_pending_cleanup.valid() &&
+        g_pending_cleanup.wait_for(std::chrono::seconds(0)) == std::future_status::timeout) {
+        g_inited.store(false);
+        log_error("dcu_init refused: the previous dcu_shutdown's Cleanup is still finishing in the "
+                  "background (it had timed out; possible upstream deadlock). Retry after it completes.");
+        return DCU_ERR_FAILURE;
+    }
+
+    const int rc = dcu_wrap([] {
         rtc::InitLogger(rtc::LogLevel::Warning, log_trampoline);
         rtc::Preload();
         return DCU_OK;
     });
+    // #150：失败回滚。exchange(true) 在前，不回滚的话下一次 dcu_init 会直接
+    // 返回 DCU_OK —— 失败被闩成永久成功，桥未接、Preload 未跑，而调用方看到
+    // 的一切都像初始化过了。回滚后 init 可重试（dcu.h 写明）。
+    if (rc != DCU_OK)
+        g_inited.store(false);
+    return rc;
 }
 
 int dcu_shutdown(int *out_undestroyed) {
@@ -288,10 +324,22 @@ int dcu_shutdown(int *out_undestroyed) {
         // clear() 返回它丢掉的对象数 —— 那正是「到调用 shutdown 为止都没人销毁的」。
         // 托管侧把它当泄漏账单用：正常收尾应当是 0，因为域将死之前会先
         // DisposeAllLive() 精确释放一遍（#37 决议 2、5）。
-        *out_undestroyed = static_cast<int>(g_table.clear());
+        int dropped = static_cast<int>(g_table.clear());
+
+        // #150：二次清扫孤儿窗口。第一次 clear() 在锁外析构 PC 时，在途的
+        // onDataChannel 回调仍可能完成 add_dc，把入向 DC 塞进刚清空的表 ——
+        // 此刻全部 PC 已析构完，回调物理上不可能再发生，扫到的就是全部孤儿。
+        // 不清的话：孤儿的 shared_ptr 会把下面的 Cleanup 拖到超时（上游要等
+        // 所有对象释放），且不进账单 —— 泄漏、假账、超时三个症状同一根。
+        dropped += static_cast<int>(g_table.clear());
+        *out_undestroyed = dropped;
+
         g_queue.clear();
         g_log_queue.clear();
-        if (rtc::Cleanup().wait_for(std::chrono::seconds(10)) == std::future_status::timeout)
+        // #150：future 存入全局再等。超时抛出 → FAILURE，但 Cleanup 仍在后台跑；
+        // 下一次 dcu_init 先查它，fail-fast 而不是与收尾竞态。
+        g_pending_cleanup = rtc::Cleanup();
+        if (g_pending_cleanup.wait_for(std::chrono::seconds(10)) == std::future_status::timeout)
             throw std::runtime_error("Cleanup timeout (possible deadlock or undestructible object)");
         return DCU_OK;
     });
@@ -313,6 +361,10 @@ int dcu_pc_create(const dcu_pc_config *config, int *out_pc) {
     if (!g_inited.load())
         return DCU_ERR_FAILURE;
     if (!config)
+        return DCU_ERR_INVALID;
+    // #151：倒置端口区间是明确无意义的输入，在两个消费边界都失败（C# 侧同判据）。
+    // 单侧设置（任一端为 0）语义归上游，不校验。
+    if (config->port_range_end != 0 && config->port_range_begin > config->port_range_end)
         return DCU_ERR_INVALID;
 
     return dcu_wrap([config, out_pc] {
@@ -458,6 +510,65 @@ int dcu_pc_create_data_channel(int pc, const char *label, int label_len, const d
         resend_open_if_already_open(h, dc, openReported);
 
         *out_dc = h;
+        return DCU_OK;
+    });
+}
+
+int dcu_pc_connection_path(int pc, int *out_verdict, void *buf, int cap, int *out_len) {
+    if (!out_verdict || !out_len)
+        return DCU_ERR_INVALID;
+    *out_verdict = DCU_PATH_DIRECT;
+    *out_len = 0;
+    if (pc <= 0)
+        return DCU_ERR_INVALID;
+
+    return dcu_wrap([pc, out_verdict, buf, cap, out_len] {
+        auto conn = g_table.get_pc(pc);
+
+        // 状态门禁**在这里**，不在托管侧。上游的选中候选对从不被清空，所以失败或
+        // 断开之后 getSelectedCandidatePair 仍会返回 true 并带回上一次的对；不拦
+        // 就是把陈旧值当现状交出去。
+        //
+        // 放这一层而不是 C# 那一层，是实测出来的：`state` 是 std::atomic<State>
+        // 的一次原子读（peerconnection.cpp:52），**活的**；而 C# 的 ConnectionState
+        // 是事件缓存，落后到下一次 pump 派发为止。用缓存做门禁会拒掉一个真正已连接
+        // 的连接 —— 通道的 State 是活查询，会先变 Open，于是调用方在事件派发前问
+        // 就被自己的门禁挡住。（那个 conn_lock 的成本顾虑在 libjuice 那一层，与本
+        // 判断无关。）
+        if (conn->state() != rtc::PeerConnection::State::Connected)
+            return DCU_ERR_NOT_AVAIL;
+
+        rtc::Candidate local, remote;
+        if (!conn->getSelectedCandidatePair(&local, &remote))
+            return DCU_ERR_NOT_AVAIL;
+
+        // 判据两端都要看：走中继时，靠 TURN 那一侧的 local 是 relay 而 remote
+        // 是对面的 host —— 只判 remote 会把这一侧报成直连。见 dcu.h 的注释。
+        *out_verdict = (local.type() == rtc::Candidate::Type::Relayed ||
+                        remote.type() == rtc::Candidate::Type::Relayed)
+                           ? DCU_PATH_RELAYED
+                           : DCU_PATH_DIRECT;
+
+        // 只带远端。本地那条在非中继路径上是 local.candidates[0] 的替身而非真实
+        // 路径（dcu.h 有完整理由）—— 判定内部采信它、且只在 == relay 这个方向上
+        // 采信，与把它交给调用方是两件事。
+        //
+        // std::string(remote) 走 operator string()，带 "a=" 前缀，与
+        // DCU_EVENT_LOCAL_CANDIDATE 同形；Candidate::candidate() 是不带前缀的
+        // 那个，别混 —— 一个 API 面上两种形态会让调用方无从判断要不要自己拼。
+        const std::string sdp = std::string(remote);
+        const size_t size = sdp.size();
+        *out_len = static_cast<int>(size);
+
+        // 与 dcu_dc_receive / dcu_log_next 同款：长度先填精确值，再判容量。
+        // 判定已经写进 out_verdict —— 缓冲不足只影响 SDP 那一段，不影响判定，
+        // 但仍返回 TOO_SMALL，因为调用方要的两个出参没有都拿到。
+        if (!buf || cap < static_cast<int>(size))
+            return DCU_ERR_TOO_SMALL;
+
+        if (size > 0)
+            std::memcpy(buf, sdp.data(), size);
+
         return DCU_OK;
     });
 }

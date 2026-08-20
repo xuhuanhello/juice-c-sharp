@@ -172,6 +172,9 @@ namespace DataChannelUnity
         {
             MainThread.Assert("PeerConnection.SetRemoteDescription");
             ThrowIfDisposed();
+            // #147：answerer 的典型流程是「建 PC → 设远端 offer → 等事件」，此前这条
+            // 路上没有任何存活检查点 —— 泵被抹除时它永远等不到那条诊断。
+            DataChannelRuntime.CheckPumpLiveness("PeerConnection.SetRemoteDescription");
             if (sdp == null) throw new ArgumentNullException(nameof(sdp));
             if (type == null) throw new ArgumentNullException(nameof(type));
             var sdpB = Encoding.UTF8.GetBytes(sdp);
@@ -186,6 +189,7 @@ namespace DataChannelUnity
         {
             MainThread.Assert("PeerConnection.AddRemoteCandidate");
             ThrowIfDisposed();
+            DataChannelRuntime.CheckPumpLiveness("PeerConnection.AddRemoteCandidate"); // #147
             if (candidate == null) throw new ArgumentNullException(nameof(candidate));
             var cB = Encoding.UTF8.GetBytes(candidate);
             byte[] mB = mid == null ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(mid);
@@ -193,6 +197,93 @@ namespace DataChannelUnity
                 NativeMethods.dcu_pc_add_remote_candidate(
                     NativeHandle, cB, cB.Length, mB, mB.Length),
                 "dcu_pc_add_remote_candidate");
+        }
+
+        /// <summary>
+        /// 判定这条连接实际走的是直连还是 TURN 中继，并带出远端候选的 SDP。
+        /// </summary>
+        /// <param name="path">走的路。仅当返回 <c>true</c> 时有意义。</param>
+        /// <param name="remoteCandidateSdp">
+        /// 远端候选的 SDP 行（带 <c>a=</c> 前缀，与 <see cref="LocalCandidateGenerated"/>
+        /// 的形态一致）。仅当返回 <c>true</c> 时非 <c>null</c>。只要判定不要它就写
+        /// <c>out _</c>。
+        /// </param>
+        /// <returns>
+        /// 连接尚未建立、或此刻没有选中候选对时返回 <c>false</c> —— 那是**正常态，不是错误**。
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// **拉取，没有对应事件。** 上游没有「候选对变了」的事件源，而 ICE 一旦提名就
+        /// 不再重选（RFC 8445 §8.1.1，libjuice 逐字实现）。要合成一个事件就得起一条
+        /// 后台轮询线程，与本包「绝不后台轮询」的立场冲突。连上之后读一次即可。
+        /// </para>
+        /// <para>
+        /// **判据不暴露，也不该由调用方拼。** 它是「候选对任一端是中继」，两端都要看：
+        /// 走中继时，靠 TURN 那一侧看到的是自己的本地候选是中继、对面的远端候选是 host。
+        /// 判据在 native 侧合成（见 <c>dcu.h</c>），本方法只搬结果。
+        /// </para>
+        /// <para>
+        /// **本地候选类型故意不给。** 它在非中继路径上不是真实路径：libjuice 只为本地
+        /// 中继候选建带本地端的候选对，其余情况回退到优先级最高的那条本地候选，通常是
+        /// host —— 于是一条 srflx 路径的本地会被报成 host。判定内部只在「是中继」这个
+        /// 方向上采信它，是安全的；把它交出去不是。
+        /// </para>
+        /// <para>
+        /// **陈旧判定由原生侧的状态门禁拦掉。** 上游的选中候选对**从不被清空**，所以
+        /// 连接失败或断开之后，上游那个 getter 仍会返回上一次的对。原生侧先查一次
+        /// **活**状态（一次原子读），状态不是 Connected 就返回「无」—— 所以本方法不会
+        /// 把陈旧值当现状交出去。
+        /// </para>
+        /// <para>
+        /// 门禁刻意**不放在托管侧**：<see cref="ConnectionState"/> 是事件缓存，落后到
+        /// 下一次泵派发为止，而 <see cref="DataChannel.State"/> 是活查询、会先变
+        /// <see cref="DataChannelState.Open"/>。用缓存做门禁会拒掉一个真正已连接的
+        /// 连接 —— 这是实测出来的，不是推演。
+        /// </para>
+        /// <para>
+        /// 残留的窗口只有一处，且无法在不改上游的前提下消除：原生侧读状态与取候选对
+        /// 是两步，其间连接可能在别的线程上失败。窗口是微秒级而非帧级，代价是那一瞬
+        /// 读到上一次的对。
+        /// </para>
+        /// </remarks>
+        public bool TryGetConnectionPath(out ConnectionPath path, out string remoteCandidateSdp)
+        {
+            MainThread.Assert("PeerConnection.TryGetConnectionPath");
+            ThrowIfDisposed();
+
+            path = default;
+            remoteCandidateSdp = null;
+
+            // **这里没有状态门禁，是故意的。** 它在原生侧，用的是活状态；托管侧的
+            // ConnectionState 是事件缓存，拿它做门禁会拒掉真正已连接的连接（实测过：
+            // 通道的 State 是活查询、会先变 Open，于是在状态事件派发前调用就被自己
+            // 挡住）。原生侧状态不对时返回 NotAvailable，映射成本方法的 false。
+
+            // 一次穿越就够：上游 JUICE_MAX_CANDIDATE_SDP_STRING_LEN 是 256，
+            // 加上 "a=" 前缀仍在 288 以内。
+            var buf = new byte[288];
+            var rc = NativeMethods.dcu_pc_connection_path(
+                NativeHandle, out var verdict, buf, buf.Length, out var len);
+
+            if (rc == NativeMethods.ErrTooSmall)
+            {
+                // 按上面那个上界，这条路走不到。**留着不是防御性冗余** —— 那个
+                // 288 是从上游常量推出来的，上游改了它这里就该跟着走，而不是
+                // 静默截断或让一个 TooSmall 冒成异常。长度是精确值且未消费，
+                // 所以一次重试必然成功。
+                buf = new byte[len];
+                rc = NativeMethods.dcu_pc_connection_path(
+                    NativeHandle, out verdict, buf, buf.Length, out len);
+            }
+
+            if (rc == NativeMethods.ErrNotAvail)
+                return false;
+
+            DataChannelRuntime.RequireOk(rc, "dcu_pc_connection_path");
+
+            path = (ConnectionPath)verdict;
+            remoteCandidateSdp = len > 0 ? Encoding.UTF8.GetString(buf, 0, len) : string.Empty;
+            return true;
         }
 
         /// <summary>
