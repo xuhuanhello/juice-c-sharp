@@ -174,7 +174,9 @@ def check_binary_blobs(repo_root: Path, plugin_root: Path, landed: list[str]) ->
             problems.append(f"  {rel}: cannot read the blob git stores "
                             f"({proc.stderr.decode('utf-8', 'replace').strip()})")
             continue
-        head = proc.stdout[:8]
+        # PDB's MSF header is longer than ELF/PE/Mach-O magics; slicing to 8
+        # bytes made `Microsoft C/C++` look like a mismatch (`b'Microsof'`).
+        head = proc.stdout[:max(len(m) for m in magics)]
         if any(head.startswith(m) for m in magics):
             continue
         if proc.stdout.startswith(LFS_POINTER_PREFIX):
