@@ -18,6 +18,10 @@ Nobody maintains a list by hand, so nobody can forget to update one (#53).
 Also enforced here, because this script already walks the landed artifacts:
 
     every landed binary must have a CI-produced provenance file in `Report~/`.
+    every landed binary must have an unstripped twin under `Symbols~/` (same
+    relative path; Windows also needs the `.pdb`). The check runs only when
+    `--symbols-root` is passed — it is added in the same commit that lands
+    the first `Symbols~/` files, otherwise this gate would be permanently red.
 
 A build-info file with `ci: null` was produced by someone's local build: no run
 URL, and a commit that describes the checkout rather than what was compiled, so
@@ -124,6 +128,8 @@ BINARY_MAGIC = {
                b"\xca\xfe\xba\xbe",         # universal (fat), big-endian magic
                b"\xbe\xba\xfe\xca"),        # universal, byte-swapped
     ".a": (b"!<arch>",),                    # ar archive
+    ".pdb": (b"Microsoft C/C++",            # MSVC PDB 7.0 (MSF)
+             b"BSJB"),                      # portable PDB
 }
 
 LFS_POINTER_PREFIX = b"version https://git-lfs"
@@ -184,6 +190,39 @@ def check_binary_blobs(repo_root: Path, plugin_root: Path, landed: list[str]) ->
             problems.append(
                 f"  {rel}: git stores something that is not a {suffix} "
                 f"(first bytes: {head!r}).")
+    return problems
+
+
+def check_symbols(repo_root: Path, symbols_root: Path, landed: list[str]) -> list[str]:
+    """Every landed Plugins/ binary has a twin under Symbols~/ at the same rel path.
+
+    Same pairing trick as Report~: the expected path is derived from the binary
+    itself, so there is no hand-maintained mapping that could lie. Windows is
+    the one extra file — crash tools want the PDB, which never lives in
+    Plugins/.
+    """
+    tracked = tracked_files(repo_root, symbols_root)
+    problems = []
+    missing = [rel for rel in landed if not is_landed(rel, tracked)]
+    for rel in missing:
+        problems.append(
+            f"  {rel}: no twin under {symbols_root.name}/ "
+            f"(expected {symbols_root.name}/{rel})")
+    present = [rel for rel in landed if is_landed(rel, tracked)]
+    problems.extend(check_binary_blobs(repo_root, symbols_root, present))
+    pdb_rels = []
+    for rel in landed:
+        if Path(rel).suffix.lower() != ".dll":
+            continue
+        pdb = Path(rel).with_suffix(".pdb").as_posix()
+        if not is_landed(pdb, tracked):
+            problems.append(
+                f"  {rel}: Windows crash tools need {symbols_root.name}/{pdb} "
+                "beside the dll (the PDB never ships in Plugins/)")
+        else:
+            pdb_rels.append(pdb)
+    if pdb_rels:
+        problems.extend(check_binary_blobs(repo_root, symbols_root, pdb_rels))
     return problems
 
 
@@ -264,6 +303,9 @@ def main() -> int:
     ap.add_argument("--report-root", required=True, type=Path,
                     help="Packages/datachannel-unity/Report~ -- where the provenance "
                          "files live since #65")
+    ap.add_argument("--symbols-root", type=Path, default=None,
+                    help="Packages/datachannel-unity/Symbols~ -- unstripped twins "
+                         "(optional until the first Symbols~/ batch lands)")
     ap.add_argument("--readme", required=True, type=Path)
     ap.add_argument("--check", action="store_true",
                     help="check only, never write; exit non-zero on any difference (for CI)")
@@ -290,6 +332,12 @@ def main() -> int:
     if problems:
         raise SupportTableError(
             "Landed binaries without usable provenance (#54):\n" + "\n".join(problems))
+
+    if args.symbols_root is not None:
+        problems = check_symbols(args.repo_root, args.symbols_root, landed)
+        if problems:
+            raise SupportTableError(
+                "Landed binaries without a Symbols~/ twin:\n" + "\n".join(problems))
 
     if not args.readme.is_file():
         raise SupportTableError(f"Missing {args.readme}")

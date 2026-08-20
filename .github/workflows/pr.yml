@@ -49,6 +49,7 @@ jobs:
             platform: darwin
             artifact_path: Packages/datachannel-unity/Plugins/macOS/datachannel_unity.dylib
             build_info_path: Packages/datachannel-unity/Report~/macOS.json
+            symbols_dir: Packages/datachannel-unity/Symbols~/macOS
           - name: Windows x64
             # 钉 windows-2022 而不是 windows-latest：后者现已指向 Windows Server
             # 2025 + **VS 2026**（别名 windows-2025-vs2026），"Visual Studio 17 2022"
@@ -59,6 +60,7 @@ jobs:
             platform: windows
             artifact_path: Packages/datachannel-unity/Plugins/Windows/x86_64/datachannel_unity.dll
             build_info_path: Packages/datachannel-unity/Report~/Windows-x86_64.json
+            symbols_dir: Packages/datachannel-unity/Symbols~/Windows/x86_64
           - name: Linux x64
             # 现存最老的 ubuntu 标签（ubuntu-20.04 已下架）。它决定本包的 glibc
             # 下限 = 2.35，比 Unity 2022.3 声明的 Ubuntu 20.04（2.31）高一档 ——
@@ -67,6 +69,7 @@ jobs:
             platform: linux
             artifact_path: Packages/datachannel-unity/Plugins/Linux/x86_64/libdatachannel_unity.so
             build_info_path: Packages/datachannel-unity/Report~/Linux-x86_64.json
+            symbols_dir: Packages/datachannel-unity/Symbols~/Linux/x86_64
           - name: Android arm64-v8a
             # 与 Linux x64 同宿主，但走 NDK 的 toolchain file 交叉编译 ——
             # 本仓库第一条真正使用 -DCMAKE_TOOLCHAIN_FILE= 的路径（决议 #79）。
@@ -74,6 +77,7 @@ jobs:
             platform: android
             artifact_path: Packages/datachannel-unity/Plugins/Android/arm64-v8a/libdatachannel_unity.so
             build_info_path: Packages/datachannel-unity/Report~/Android-arm64-v8a.json
+            symbols_dir: Packages/datachannel-unity/Symbols~/Android/arm64-v8a
           - name: iOS arm64
             # macOS 宿主 + iOS toolchain file 交叉编译 ——
             # ld -r 符号收窄是本仓库任何平台都没有的全新构建阶段（决议 #90 §6）。
@@ -81,6 +85,7 @@ jobs:
             platform: ios
             artifact_path: Packages/datachannel-unity/Plugins/iOS/libdatachannel_unity.a
             build_info_path: Packages/datachannel-unity/Report~/iOS.json
+            symbols_dir: Packages/datachannel-unity/Symbols~/iOS
     defaults:
       run:
         # Windows runner 的默认 shell 是 pwsh。不写这行，下面的 bash 语法会直接
@@ -197,25 +202,19 @@ jobs:
             --platform ${{ matrix.platform }} \
             --expected native/exports/expected-symbols.txt
 
-      # 产物**与它的溯源文件一起**上传。只传二进制的话，维护者下载后手里没有
-      # 溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py 的门禁
-      # （正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
+      # 产物与溯源文件、未剥离符号一起上传。只传二进制的话，维护者下载后
+      # 手里没有溯源信息，本机补一份的话 ci=null，会被 gen_support_table.py
+      # 的门禁（正确地）拒掉——于是根本无法从 CI 产物完成入库。首次尝试入库时发现。
       #
-      # 两条路径的最近公共祖先自 #65 起是包根，于是 zip 里就是 Plugins/... 与
-      # Report~/... 两棵子树 —— 正好是入库时该解到的形状。
+      # 三条路径的最近公共祖先是包根，于是 zip 里就是 Plugins/...、Report~/...
+      # 与 Symbols~/... 三棵子树 —— 正好是入库时该解到的形状。
       - uses: actions/upload-artifact@v6
         with:
           name: datachannel_unity-${{ matrix.platform }}
           path: |
             ${{ matrix.artifact_path }}
             ${{ matrix.build_info_path }}
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v6
-        if: matrix.platform == 'android'
-        with:
-          name: datachannel_unity-android-unstripped
-          path: native/build/ci/libdatachannel_unity.so.unstripped
+            ${{ matrix.symbols_dir }}
           if-no-files-found: error
 
   static-checks:
@@ -248,6 +247,8 @@ jobs:
       # 文件（#54 立的门禁，#65 只改了它去哪找）—— 本机产的那份 ci=null，没有 run
       # URL，commit 描述的是 checkout 而不是被编译的东西，没有溯源价值。期望的
       # 文件名由二进制自己的路径算出，没有人工清单可以撒谎。
+      # Symbols~/ 的孪生文件门禁（--symbols-root）在首次入库 Symbols~/ 的同一
+      # 次提交里打开；现在打开会因为目录还是空的而永久红。
       - name: Support table is derived from the shipped binaries
         run: |
           python3 native/scripts/gen_support_table.py \

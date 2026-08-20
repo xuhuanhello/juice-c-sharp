@@ -36,6 +36,25 @@ mechanism as `Samples~`), so the files ship with the package but never appear in
 the Project window, and they are not readable at runtime. Open them with any
 text editor.
 
+## Native crash symbols
+
+Every shipped plugin has an unstripped twin under `Symbols~/`, at the **same
+relative path** as `Plugins/`. Upload that file (Windows: the `.pdb` beside the
+dll) to Bugly / Firebase / Play Console / `llvm-symbolizer` — not the copy in
+`Plugins/`, which is what Unity packs into the Player.
+
+iOS is the exception on the Player side: the `.a` in `Plugins/iOS/` is **not**
+stripped, because Xcode needs that DWARF for the app dSYM. `Symbols~/iOS/` is
+still a copy, so the lookup rule does not grow a special case.
+
+Where `Symbols~/` is on disk depends on how the package was installed:
+
+- **git URL** — `Library/PackageCache/com.xuhuanhello.datachannel@<hash>/Symbols~/`
+- **local (`file:`)** — `Packages/datachannel-unity/Symbols~/`
+
+The `~` suffix is the same mechanism as `Report~/` and `Samples~`: the files
+come with the package and Unity never imports them.
+
 ## Install
 
 Add to `Packages/manifest.json` — **pin a tag**:

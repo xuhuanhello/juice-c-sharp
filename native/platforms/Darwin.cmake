@@ -27,3 +27,9 @@ set(DCU_EXTRA_LINK_LIBRARIES
   "-framework CoreFoundation"
   "-framework Security"
 )
+
+# Apple strip 没有 GNU 的 --strip-debug；-S 是去掉调试符号。
+# CMAKE_STRIP 是 /usr/bin/strip，不是 llvm-strip。
+set(DCU_STRIP_DEBUG ON)
+set(DCU_STRIP_ARGS "-S")
+set(DCU_STAGE_PDB OFF)

@@ -7,6 +7,17 @@ or behaviour change → minor, `dcu_*` or public C# break → **major**.
 
 ## [Unreleased]
 
+### Changed
+
+- **Native crash symbols live in `Symbols~/`, mirroring `Plugins/`.** Unity
+  ignores the `~` suffix, so a git-URL install has the files and the Player
+  does not. Dynamic plugins (Android, Linux, macOS) are still DWARF-stripped in
+  `Plugins/`; iOS `.a` is not stripped (it feeds the adopter's Xcode dSYM);
+  Windows line numbers are the `.pdb` beside the dll, never in `Plugins/`.
+  Compile always carries `-g` / `/Zi` so a Linux or macOS twin can actually
+  restore line numbers. GitHub Release assets are an optional duplicate, not
+  the lookup path.
+
 ## [0.5.0] — 2026-08-20
 
 ### Changed

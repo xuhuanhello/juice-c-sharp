@@ -19,6 +19,12 @@ set(DCU_EXPORT_FILE "${DCU_GEN_EXPORTS_DIR}/macos-exported-symbols.txt")
 # 静态库没有链接期，符号控制走 ld -r，这里设空
 set(DCU_EXPORT_LINK_OPTIONS "")
 
+# 不要剥 Plugins/ 里的 .a：DWARF 要进采用者的 Xcode dSYM。剥掉入库的归档，
+# 采用者的崩溃还原就只剩地址。Symbols~/iOS/ 仍放一份拷贝，查找规则与其它
+# 平台相同（Plugins/<rel>/<name> → Symbols~/<rel>/<name>）。
+set(DCU_STRIP_DEBUG OFF)
+set(DCU_STAGE_PDB OFF)
+
 # iOS 静态库：STATIC 而非 SHARED
 set(DCU_LIBRARY_TYPE "STATIC")
 

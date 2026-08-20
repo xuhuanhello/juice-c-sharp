@@ -41,3 +41,9 @@ set(DCU_EXTRA_LINK_OPTIONS "LINKER:-z,max-page-size=16384")
 # 齐，由采用者的打包配置决定，已出图（map #76 的 Out of scope，依据见
 # docs/research/android-packaging-alignment.md）。
 set(DCU_REQUIRE_PAGE_ALIGN 16384)
+
+# 入库的 .so 剥掉 DWARF（NDK Clang 的 Release 会编进完整 .debug_*）。
+# 未剥离副本在 Symbols~/，与 Plugins/ 路径镜像。
+set(DCU_STRIP_DEBUG ON)
+set(DCU_STRIP_ARGS "--strip-debug")
+set(DCU_STAGE_PDB OFF)
