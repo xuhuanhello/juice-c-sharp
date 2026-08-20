@@ -3,20 +3,20 @@
   "architectures": [
     "x86_64"
   ],
-  "built_at": "2026-08-20T15:22:39+00:00",
+  "built_at": "2026-08-20T15:48:52+00:00",
   "ci": {
     "event": "workflow_dispatch",
     "ref": "refs/heads/main",
     "run_attempt": "1",
-    "run_id": "32385550254",
-    "run_url": "https://github.com/xuhuanhello/juice-c-sharp/actions/runs/32385550254",
+    "run_id": "32388151832",
+    "run_url": "https://github.com/xuhuanhello/juice-c-sharp/actions/runs/32388151832",
     "workflow": "Plugins matrix"
   },
   "platform": "linux",
   "plugin": "datachannel_unity",
   "schema": 1,
   "source": {
-    "commit": "fd6525d78930d8e0f6765981461c0d9d156d1c7f"
+    "commit": "fd06a252d5deb42b9ee03a41a8861aa0c74dbdf9"
   },
   "toolchain": {
     "cmake": "3.31.6",

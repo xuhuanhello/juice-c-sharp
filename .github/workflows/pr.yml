@@ -247,14 +247,14 @@ jobs:
       # 文件（#54 立的门禁，#65 只改了它去哪找）—— 本机产的那份 ci=null，没有 run
       # URL，commit 描述的是 checkout 而不是被编译的东西，没有溯源价值。期望的
       # 文件名由二进制自己的路径算出，没有人工清单可以撒谎。
-      # Symbols~/ 的孪生文件门禁（--symbols-root）在首次入库 Symbols~/ 的同一
-      # 次提交里打开；现在打开会因为目录还是空的而永久红。
+      # Symbols~/ 孪生文件同一条：路径由二进制自己推，Windows 还要旁边那份 .pdb。
       - name: Support table is derived from the shipped binaries
         run: |
           python3 native/scripts/gen_support_table.py \
             --repo-root . \
             --plugin-root Packages/datachannel-unity/Plugins \
             --report-root "Packages/datachannel-unity/Report~" \
+            --symbols-root "Packages/datachannel-unity/Symbols~" \
             --readme Packages/datachannel-unity/README.md \
             --check
 

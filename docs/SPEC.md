@@ -1109,6 +1109,8 @@ The NDK Clang Release build embeds full `.debug_*`; gcc's Linux Release does not
 
 **Unstripped twin (`Symbols~/`):** same relative path as `Plugins/` (`Plugins/Android/arm64-v8a/libdatachannel_unity.so` → `Symbols~/Android/arm64-v8a/libdatachannel_unity.so`). Windows also has `datachannel_unity.pdb` beside the dll. The directory uses the same `~` suffix as `Report~/` and `Samples~`: Unity's asset database ignores it, so the files ship with a git-URL UPM install, do not appear in the Project window, and do not enter the Player. No `.meta`, no GUID.
 
+**`*.pdb` in the Unity `.gitignore` template is un-ignored for `Symbols~/`.** Without that exception, `git add` silently skips the file crash tools need — absence looking like success, the same disease as the LFS pointer files. The exception is load-bearing, not tidy-up.
+
 ~~**Unstripped copy:** `${CMAKE_BINARY_DIR}/<artifact>.unstripped`, uploaded as a CI artifact / GitHub Release asset. That is what an adopter uploads to a crash platform. It is **not** in `Plugins/`, so it does not enter the UPM git-URL install.~~ **Overturned.** Putting the file only on GitHub Releases makes the adopter leave the package they already installed and hunt a Release asset that may or may not match the git pin. The canonical copy lives in the package, in a directory Unity will not import. A GitHub Release attachment is an optional duplicate, not a source of truth.
 
 **Strip policy is platform data, not a CMake `if`.** Each `native/platforms/*.cmake` sets `DCU_STRIP_DEBUG`, `DCU_STRIP_ARGS` (when stripping), and `DCU_STAGE_PDB`. Missing `CMAKE_STRIP` on a platform that strips is a configure-time hard failure. The POST_BUILD order is stage → copy to `Symbols~/` → maybe strip `Plugins/` → provenance → audit.

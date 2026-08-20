@@ -59,6 +59,9 @@ ExportedObj/
 *.booproj
 *.svd
 *.pdb
+# Symbols~/ 里的 Windows PDB 是崩溃还原要用的交付物。模板这条会让
+# `git add` 静默跳过它 —— 和 LFS 指针同一病：缺席看起来像成功。
+!Packages/datachannel-unity/Symbols~/**/*.pdb
 *.mdb
 *.opendb
 *.VC.db
